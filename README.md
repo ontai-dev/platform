@@ -1,1 +1,1 @@
-ont-platform — ONT Platform Operator. See ont-platform-design.md for architecture.
+platform — ONT Platform Operator. See platform-design.md for architecture.

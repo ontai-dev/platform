@@ -2,14 +2,14 @@
 
 > Architecture, patterns, and constraints only.
 > Amended: 2026-03-30 — CAPI adopted for target cluster lifecycle.
->   ONT Infrastructure Provider introduced. ONT InfrastructureMachine pattern.
->   Kueue scoped to ont-infra. Operational runner Jobs retained where CAPI has no equivalent.
+>   Seam Infrastructure Provider introduced. ONT InfrastructureMachine pattern.
+>   Kueue scoped to wrapper. Operational runner Jobs retained where CAPI has no equivalent.
 
 ---
 
 ## 1. What Changed and Why
 
-Previous versions of this document described ont-platform as submitting Kueue Jobs
+Previous versions of this document described platform as submitting Kueue Jobs
 for all cluster lifecycle operations. This is replaced by CAPI for target clusters.
 
 CAPI provides battle-tested cluster lifecycle reconciliation. The ONT Infrastructure
@@ -22,7 +22,7 @@ The governing principle is preserved: every operation is declarative, versioned,
 and auditable. CAPI delivers this through its own status conditions and event model.
 Kueue Job-based auditing for cluster lifecycle is no longer needed.
 
-Kueue remains for ont-infra pack-deploy Jobs only. Operational runner Jobs
+Kueue remains for wrapper pack-deploy Jobs only. Operational runner Jobs
 (etcd-backup, etcd-maintenance, pki-rotate, etcd-restore, hardening-apply,
 node-patch, credential-rotate, cluster-reset) use direct Job submission without
 Kueue admission control — they are infrequent, targeted, and operator-gated.
@@ -31,7 +31,7 @@ Kueue admission control — they are infrequent, targeted, and operator-gated.
 
 ## 2. Controller Structure
 
-### 2.1 ont-platform Controllers
+### 2.1 platform Controllers
 
 **TalosClusterReconciler** — the primary reconciler. Watches TalosCluster CRs.
 For management cluster (capi.enabled=false): follows the direct bootstrap path
@@ -40,13 +40,13 @@ and owns all CAPI objects. Watches CAPI Cluster status and transitions
 TalosCluster status accordingly. Handles Cilium ClusterPack deployment trigger
 when cluster reaches Running state.
 
-**ONTInfrastructureClusterReconciler** — implements the CAPI InfrastructureCluster
-contract. Sets status.ready=true when all control plane ONTInfrastructureMachine
+**SeamInfrastructureClusterReconciler** — implements the CAPI InfrastructureCluster
+contract. Sets status.ready=true when all control plane SeamInfrastructureMachine
 objects are ready. Writes controlPlaneEndpoint back to the CAPI Cluster object.
 
-**ONTInfrastructureMachineReconciler** — implements the CAPI InfrastructureMachine
+**SeamInfrastructureMachineReconciler** — implements the CAPI InfrastructureMachine
 contract. This is the Talos-specific infrastructure layer. It watches for Machine
-objects that reference an ONTInfrastructureMachine, reads the CABPT-rendered
+objects that reference an SeamInfrastructureMachine, reads the CABPT-rendered
 machineconfig bootstrap data from the Machine's bootstrap data secret, calls
 talos goclient ApplyConfiguration against the declared node IP on port 50000,
 and sets status.ready=true with the providerID when the node transitions out of
@@ -72,7 +72,7 @@ direct runner Job submission as normal.
 **TalosClusterResetReconciler** — extends OperationalJobReconciler with the human
 approval gate. Holds at PendingApproval. When approved: deletes the CAPI Cluster
 object first (which triggers graceful machine deprovisioning through the
-ONT Infrastructure Provider), then submits the cluster-reset runner Job.
+Seam Infrastructure Provider), then submits the cluster-reset runner Job.
 
 **TalosNoMaintenanceReconciler** — watches TalosNoMaintenance CRs and reconciles
 the CAPI Cluster pause state. When no active window and blockOutsideWindows=true:
@@ -80,26 +80,26 @@ sets cluster.x-k8s.io/paused=true on the CAPI Cluster. When window opens: remove
 the pause annotation.
 
 **TenantReconcilers** — PlatformTenantReconciler, ClusterAssignmentReconciler,
-QueueProfileReconciler, LicenseKeyReconciler. These are unchanged from previous
+QueueProfileReconciler. Seam is fully open source with no licensing tier. These are unchanged from previous
 design. ClusterAssignmentReconciler now additionally watches CAPI Cluster
 status.phase before triggering the Cilium ClusterPack PackExecution via
 bootstrapFlag.
 
-Leader election: implemented at the manager level. Lease name: ont-platform-leader.
+Leader election: implemented at the manager level. Lease name: platform-leader.
 Lease namespace: platform-system.
 
 ---
 
-## 3. ONT Infrastructure Provider Implementation
+## 3. Seam Infrastructure Provider Implementation
 
-The ONT Infrastructure Provider consists of the two reconcilers described in
+The Seam Infrastructure Provider consists of the two reconcilers described in
 Section 2.1 above plus the talos goclient dependency. The provider binary is
 distroless — it requires only talos goclient and kube goclient. No helm, no
 kustomize, no shell.
 
-### 3.1 ONTInfrastructureMachineReconciler Detail
+### 3.1 SeamInfrastructureMachineReconciler Detail
 
-The reconciliation loop for each ONTInfrastructureMachine:
+The reconciliation loop for each SeamInfrastructureMachine:
 
 Step 1 — Read the owning CAPI Machine object. If Machine has no bootstrap data
 secret reference yet (CABPT has not rendered the machineconfig), requeue and wait.
@@ -138,7 +138,7 @@ When TalosClusterReconciler creates the TalosConfigTemplate for CABPT, it merges
 - Base machineconfig with cluster.network.cni.name: none
 - Cilium-required BPF kernel parameters
 - Any TalosHardeningProfile patches referenced in TalosCluster.spec
-- The cluster endpoint from ONTInfrastructureCluster.spec.controlPlaneEndpoint
+- The cluster endpoint from SeamInfrastructureCluster.spec.controlPlaneEndpoint
 - The Talos installer image derived from TalosCluster.spec.capi.talosVersion
 
 CABPT reads this template and renders a per-Machine machineconfig that the ONT
@@ -149,7 +149,7 @@ Infrastructure Provider then delivers.
 ## 4. Cilium Deployment Integration
 
 Cilium deployment is the bridge between CAPI (cluster exists, nodes Running) and
-ont-infra (Cilium pack deployed, nodes Ready).
+wrapper (Cilium pack deployed, nodes Ready).
 
 The TalosClusterReconciler watches the CAPI Cluster object's status.phase. When
 phase transitions to Running, the reconciler sets the CiliumPending condition on
@@ -173,7 +173,7 @@ TalosCluster.spec.capi.ciliumPackRef before GitOps apply.
 ## 5. Management Cluster Bootstrap Path (Unchanged)
 
 The management cluster bootstrap path does not use CAPI. It is executed by
-ont-runner directly, either via local invocation or as a bootstrap Job.
+conductor directly, either via local invocation or as a bootstrap Job.
 
 When TalosCluster.spec.capi.enabled=false:
 1. TalosClusterReconciler reads the bootstrap secrets from ont-system.
@@ -198,7 +198,7 @@ read OperationResult ConfigMap → update CR status → clean up Job and ConfigM
 
 These Jobs run in platform-system on the management cluster. They mount the
 target cluster's kubeconfig and talosconfig secrets from ont-system. They use
-the ont-runner executor image (debian-slim) because some operational capabilities
+the conductor executor image (debian-slim) because some operational capabilities
 require talos goclient.
 
 The Job TTL is 600 seconds. The reconciler reads the OperationResult before expiry.
@@ -219,7 +219,7 @@ submitting the reset Job. The sequence:
 
 ## 7. Namespace Management (Unchanged)
 
-ont-platform creates tenant namespaces synchronously before creating any CAPI or
+platform creates tenant namespaces synchronously before creating any CAPI or
 ONT resources in them. Namespace creation uses server-side apply with labels
 ontai.dev/tenant={customerID} and ontai.dev/cluster={cluster-name}.
 
@@ -232,15 +232,15 @@ operators and agents.
 
 All CAPI components (core, CABPT, CACPPT) install ClusterRoles, ClusterRoleBindings,
 ServiceAccounts, and webhook configurations. All of these must pass through
-ont-security's third-party RBAC intake protocol before any CAPI controller starts.
+guardian's third-party RBAC intake protocol before any CAPI controller starts.
 
 The enable phase order is enforced by OperatorManifest installOrder fields.
-ont-security is installOrder 1. CAPI core is installOrder 5. CABPT is installOrder 6.
-No CAPI controller starts until ont-security's admission webhook is operational and
+guardian is installOrder 1. CAPI core is installOrder 5. CABPT is installOrder 6.
+No CAPI controller starts until guardian's admission webhook is operational and
 each provider's RBACProfile has reached provisioned=true.
 
-The ont-runner enable phase splits each provider's Helm chart output into RBAC
-resources and workload resources. RBAC resources go through ont-security intake.
+The conductor enable phase splits each provider's Helm chart output into RBAC
+resources and workload resources. RBAC resources go through guardian intake.
 Workload resources apply after RBACProfile provisioned=true is confirmed.
 
 ---
@@ -266,10 +266,10 @@ existing bootstrap e2e tests unchanged.
 
 ---
 
-*ont-platform development standard*
+*platform development standard*
 *Amendments:*
 *2026-03-30 — CAPI adopted for target cluster lifecycle. Controller structure*
-*  revised: TalosClusterReconciler, ONTInfrastructureCluster/MachineReconciler,*
+*  revised: TalosClusterReconciler, SeamInfrastructureCluster/MachineReconciler,*
 *  OperationalJobReconciler base, TalosNoMaintenanceReconciler. Kueue removed*
 *  from cluster lifecycle operations. Cilium deployment integration documented.*
 *  Management cluster bootstrap path confirmed unchanged. CAPI RBAC intake*
