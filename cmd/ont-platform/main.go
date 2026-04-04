@@ -17,6 +17,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/log/zap"
 	metricsserver "sigs.k8s.io/controller-runtime/pkg/metrics/server"
 
+	infrav1alpha1 "github.com/ontai-dev/platform/api/infrastructure/v1alpha1"
 	platformv1alpha1 "github.com/ontai-dev/platform/api/v1alpha1"
 	"github.com/ontai-dev/platform/internal/controller"
 )
@@ -26,6 +27,7 @@ var scheme = runtime.NewScheme()
 func init() {
 	utilruntime.Must(clientgoscheme.AddToScheme(scheme))
 	utilruntime.Must(platformv1alpha1.AddToScheme(scheme))
+	utilruntime.Must(infrav1alpha1.AddToScheme(scheme))
 }
 
 func main() {
@@ -71,6 +73,30 @@ func main() {
 		Recorder: mgr.GetEventRecorderFor("taloscluster-controller"),
 	}).SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "unable to create controller", "controller", "TalosCluster")
+		os.Exit(1)
+	}
+
+	// SeamInfrastructureClusterReconciler implements the CAPI InfrastructureCluster
+	// contract. CP-INV-001: no talos goclient in this reconciler.
+	if err := (&controller.SeamInfrastructureClusterReconciler{
+		Client:   mgr.GetClient(),
+		Scheme:   mgr.GetScheme(),
+		Recorder: mgr.GetEventRecorderFor("seaminfrastructurecluster-controller"),
+	}).SetupWithManager(mgr); err != nil {
+		setupLog.Error(err, "unable to create controller", "controller", "SeamInfrastructureCluster")
+		os.Exit(1)
+	}
+
+	// SeamInfrastructureMachineReconciler implements the CAPI InfrastructureMachine
+	// contract. CP-INV-001: this is one of exactly two files permitted to use
+	// talos goclient — TalosMachineConfigApplier is the production implementation.
+	if err := (&controller.SeamInfrastructureMachineReconciler{
+		Client:   mgr.GetClient(),
+		Scheme:   mgr.GetScheme(),
+		Recorder: mgr.GetEventRecorderFor("seaminfrastructuremachine-controller"),
+		Applier:  &controller.TalosMachineConfigApplier{},
+	}).SetupWithManager(mgr); err != nil {
+		setupLog.Error(err, "unable to create controller", "controller", "SeamInfrastructureMachine")
 		os.Exit(1)
 	}
 

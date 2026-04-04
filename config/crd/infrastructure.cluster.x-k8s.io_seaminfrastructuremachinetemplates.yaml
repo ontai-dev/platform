@@ -1,0 +1,185 @@
+---
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  annotations:
+    controller-gen.kubebuilder.io/version: v0.16.1
+  name: seaminfrastructuremachinetemplates.infrastructure.cluster.x-k8s.io
+spec:
+  group: infrastructure.cluster.x-k8s.io
+  names:
+    kind: SeamInfrastructureMachineTemplate
+    listKind: SeamInfrastructureMachineTemplateList
+    plural: seaminfrastructuremachinetemplates
+    shortNames:
+    - simt
+    singular: seaminfrastructuremachinetemplate
+  scope: Namespaced
+  versions:
+  - additionalPrinterColumns:
+    - jsonPath: .metadata.creationTimestamp
+      name: Age
+      type: date
+    name: v1alpha1
+    schema:
+      openAPIV3Schema:
+        description: |-
+          SeamInfrastructureMachineTemplate is the template CRD for SeamInfrastructureMachine
+          objects. CAPI's MachineDeployment controller uses this template to define the shape
+          of worker node machines. platform-schema.md §2.2.
+        properties:
+          apiVersion:
+            description: |-
+              APIVersion defines the versioned schema of this representation of an object.
+              Servers should convert recognized schemas to the latest internal value, and
+              may reject unrecognized values.
+              More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#resources
+            type: string
+          kind:
+            description: |-
+              Kind is a string value representing the REST resource this object represents.
+              Servers may infer this from the endpoint the client submits requests to.
+              Cannot be updated.
+              In CamelCase.
+              More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#types-kinds
+            type: string
+          metadata:
+            type: object
+          spec:
+            description: SeamInfrastructureMachineTemplateSpec defines the spec of
+              SeamInfrastructureMachineTemplate.
+            properties:
+              template:
+                description: Template is the machine template resource.
+                properties:
+                  metadata:
+                    type: object
+                  spec:
+                    description: Spec is the SeamInfrastructureMachine spec to use
+                      as a template.
+                    properties:
+                      address:
+                        description: |-
+                          Address is the pre-provisioned node IP address reachable on the Talos
+                          maintenance API port (default 50000).
+                        type: string
+                      lineage:
+                        description: |-
+                          Lineage is the sealed causal chain record for this root declaration.
+                          Authored once at object creation time and immutable thereafter.
+                          seam-core-schema.md §5, CLAUDE.md §14 Decision 1.
+                        properties:
+                          creatingOperator:
+                            description: |-
+                              CreatingOperator identifies the Seam Operator that created this object.
+                              This is a structured identity carrying the operator name and its deployed
+                              version at creation time.
+                            properties:
+                              name:
+                                description: |-
+                                  Name is the canonical name of the Seam Operator (e.g., platform, guardian,
+                                  wrapper, conductor).
+                                type: string
+                              version:
+                                description: |-
+                                  Version is the deployed version of the operator at the time the object was
+                                  created (e.g., v1.26.5-r3). This allows audit tooling to correlate objects
+                                  with the operator version that produced them.
+                                type: string
+                            required:
+                            - name
+                            - version
+                            type: object
+                          creationRationale:
+                            description: |-
+                              CreationRationale is the reason this object was created, drawn from the
+                              Seam Core controlled vocabulary defined in rationale.go. It is not a
+                              free-text field.
+                            enum:
+                            - ClusterProvision
+                            - ClusterDecommission
+                            - SecurityEnforcement
+                            - PackExecution
+                            - VirtualizationFulfillment
+                            - ConductorAssignment
+                            - VortexBinding
+                            type: string
+                          rootGenerationAtCreation:
+                            description: |-
+                              RootGenerationAtCreation is the metadata.generation of the root declaration
+                              at the time this object was created. Together with RootUID, it provides a
+                              complete temporal anchor for the derivation record.
+                            format: int64
+                            type: integer
+                          rootKind:
+                            description: |-
+                              RootKind is the kind of the root declaration that caused this object to
+                              exist (e.g., TalosCluster, PackExecution, RBACPolicy).
+                            type: string
+                          rootName:
+                            description: RootName is the name of the root declaration.
+                            type: string
+                          rootNamespace:
+                            description: RootNamespace is the namespace of the root
+                              declaration.
+                            type: string
+                          rootUID:
+                            description: |-
+                              RootUID is the UID of the root declaration at the time this object was
+                              created. Used to verify that no root declaration replacement has occurred.
+                            type: string
+                        required:
+                        - creatingOperator
+                        - creationRationale
+                        - rootGenerationAtCreation
+                        - rootKind
+                        - rootName
+                        - rootNamespace
+                        - rootUID
+                        type: object
+                      nodeRole:
+                        description: |-
+                          NodeRole declares whether this machine is a control plane or worker node.
+                          Must match the MachineDeployment role. Used by SeamInfrastructureCluster
+                          to determine when all control plane machines are ready.
+                        enum:
+                        - controlplane
+                        - worker
+                        type: string
+                      port:
+                        description: |-
+                          Port is the Talos maintenance API port on this node.
+                          Defaults to 50000 if not specified.
+                        format: int32
+                        type: integer
+                      talosConfigSecretRef:
+                        description: |-
+                          TalosConfigSecretRef references the talosconfig Secret in ont-system used
+                          by the provider to authenticate calls to the node's normal Talos API
+                          (post-maintenance). platform-schema.md §4.
+                        properties:
+                          name:
+                            description: Name is the Secret name.
+                            type: string
+                          namespace:
+                            description: Namespace is the Secret namespace. Defaults
+                              to the object's own namespace.
+                            type: string
+                        required:
+                        - name
+                        type: object
+                    required:
+                    - address
+                    - nodeRole
+                    - talosConfigSecretRef
+                    type: object
+                required:
+                - spec
+                type: object
+            required:
+            - template
+            type: object
+        type: object
+    served: true
+    storage: true
+    subresources: {}
