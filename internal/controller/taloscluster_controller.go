@@ -12,8 +12,14 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
+	infrav1alpha1 "github.com/ontai-dev/platform/api/infrastructure/v1alpha1"
 	platformv1alpha1 "github.com/ontai-dev/platform/api/v1alpha1"
 )
+
+// machineApplyAttemptsHaltThreshold is the number of consecutive ApplyConfiguration
+// failures on port 50000 before TalosClusterReconciler raises ControlPlaneUnreachable
+// (control plane nodes) or PartialWorkerAvailability (worker nodes).
+const machineApplyAttemptsHaltThreshold int32 = 3
 
 // TalosClusterReconciler watches TalosCluster CRs and drives cluster lifecycle.
 //
@@ -54,6 +60,7 @@ type TalosClusterReconciler struct {
 // +kubebuilder:rbac:groups="",resources=secrets,verbs=get;list;watch
 // +kubebuilder:rbac:groups=batch,resources=jobs,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups="",resources=configmaps,verbs=get;list;watch
+// +kubebuilder:rbac:groups=infrastructure.cluster.x-k8s.io,resources=seaminfrastructuremachines,verbs=get;list;watch
 func (r *TalosClusterReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
 	logger := log.FromContext(ctx)
 
@@ -252,6 +259,17 @@ func (r *TalosClusterReconciler) reconcileCAPIPath(ctx context.Context, tc *plat
 		tc.Generation,
 	)
 
+	// Step 6.5 — Check for port-50000 unreachability on SeamInfrastructureMachine nodes.
+	// Control plane failures after machineApplyAttemptsHaltThreshold halt this reconcile.
+	// Worker failures are noted as PartialWorkerAvailability but do not block.
+	halt, err := r.checkMachineReachability(ctx, tc)
+	if err != nil {
+		return ctrl.Result{}, fmt.Errorf("reconcileCAPIPath: check machine reachability: %w", err)
+	}
+	if halt {
+		return ctrl.Result{RequeueAfter: capiPollInterval}, nil
+	}
+
 	// Step 7 — Read CAPI Cluster status.phase.
 	capiPhase, err := r.getCAPIClusterPhase(ctx, tc)
 	if err != nil {
@@ -350,6 +368,95 @@ func (r *TalosClusterReconciler) transitionToReady(tc *platformv1alpha1.TalosClu
 		"Cluster Ready: CAPI Running, Cilium up, all nodes Ready.",
 		tc.Generation,
 	)
+}
+
+// checkMachineReachability lists SeamInfrastructureMachine objects in the tenant
+// namespace and checks for port-50000 ApplyConfiguration failures. After
+// machineApplyAttemptsHaltThreshold failures:
+//   - Control plane nodes → sets ControlPlaneUnreachable=true, returns halt=true.
+//   - Worker nodes → sets PartialWorkerAvailability=true, returns halt=false.
+//
+// When no machines are stuck, both conditions are cleared. Returns (true, nil) to
+// halt reconciliation when a control plane node is unreachable past the threshold.
+func (r *TalosClusterReconciler) checkMachineReachability(ctx context.Context, tc *platformv1alpha1.TalosCluster) (halt bool, err error) {
+	logger := log.FromContext(ctx)
+	tenantNS := "seam-tenant-" + tc.Name
+
+	simList := &infrav1alpha1.SeamInfrastructureMachineList{}
+	if listErr := r.Client.List(ctx, simList, client.InNamespace(tenantNS)); listErr != nil {
+		if apierrors.IsNotFound(listErr) {
+			return false, nil
+		}
+		return false, fmt.Errorf("list SeamInfrastructureMachines in %s: %w", tenantNS, listErr)
+	}
+
+	if len(simList.Items) == 0 {
+		return false, nil
+	}
+
+	var cpUnreachable, workerUnreachable bool
+	for _, sim := range simList.Items {
+		if sim.Status.MachineConfigApplied || sim.Status.ApplyAttempts < machineApplyAttemptsHaltThreshold {
+			continue
+		}
+		if sim.Spec.NodeRole == infrav1alpha1.NodeRoleControlPlane {
+			cpUnreachable = true
+		} else {
+			workerUnreachable = true
+		}
+	}
+
+	if cpUnreachable {
+		platformv1alpha1.SetCondition(
+			&tc.Status.Conditions,
+			platformv1alpha1.ConditionTypeControlPlaneUnreachable,
+			metav1.ConditionTrue,
+			platformv1alpha1.ReasonControlPlaneNodeUnreachable,
+			fmt.Sprintf("Control plane node(s) unreachable on port 50000 after %d attempts. Halting reconciliation.", machineApplyAttemptsHaltThreshold),
+			tc.Generation,
+		)
+		r.Recorder.Eventf(tc, "Warning", "ControlPlaneUnreachable",
+			"Control plane node(s) unreachable on port 50000 after %d attempts", machineApplyAttemptsHaltThreshold)
+		logger.Info("halting TalosCluster reconcile — control plane port-50000 unreachable",
+			"name", tc.Name, "threshold", machineApplyAttemptsHaltThreshold)
+		return true, nil
+	}
+
+	// Clear ControlPlaneUnreachable if previously set and now resolved.
+	platformv1alpha1.SetCondition(
+		&tc.Status.Conditions,
+		platformv1alpha1.ConditionTypeControlPlaneUnreachable,
+		metav1.ConditionFalse,
+		platformv1alpha1.ReasonControlPlaneNodeUnreachable,
+		"All control plane nodes reachable on port 50000.",
+		tc.Generation,
+	)
+
+	if workerUnreachable {
+		platformv1alpha1.SetCondition(
+			&tc.Status.Conditions,
+			platformv1alpha1.ConditionTypePartialWorkerAvailability,
+			metav1.ConditionTrue,
+			platformv1alpha1.ReasonWorkerNodeUnreachable,
+			fmt.Sprintf("Worker node(s) unreachable on port 50000 after %d attempts. Proceeding with available workers.", machineApplyAttemptsHaltThreshold),
+			tc.Generation,
+		)
+		r.Recorder.Eventf(tc, "Warning", "PartialWorkerAvailability",
+			"Worker node(s) unreachable on port 50000 after %d attempts — proceeding with available workers",
+			machineApplyAttemptsHaltThreshold)
+	} else {
+		// Clear PartialWorkerAvailability — clears on next reconcile once resolved.
+		platformv1alpha1.SetCondition(
+			&tc.Status.Conditions,
+			platformv1alpha1.ConditionTypePartialWorkerAvailability,
+			metav1.ConditionFalse,
+			platformv1alpha1.ReasonWorkerNodeUnreachable,
+			"All worker nodes reachable on port 50000.",
+			tc.Generation,
+		)
+	}
+
+	return false, nil
 }
 
 // SetupWithManager registers TalosClusterReconciler with the controller-runtime

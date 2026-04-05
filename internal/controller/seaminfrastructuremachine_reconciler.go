@@ -14,6 +14,7 @@ import (
 	"context"
 	"fmt"
 	"strings"
+	"time"
 
 	talos_client "github.com/siderolabs/talos/pkg/machinery/client"
 	machineapi "github.com/siderolabs/talos/pkg/machinery/api/machine"
@@ -31,6 +32,31 @@ import (
 
 	infrav1alpha1 "github.com/ontai-dev/platform/api/infrastructure/v1alpha1"
 )
+
+// port50000RetryBase is the initial retry interval for Talos maintenance API failures.
+const port50000RetryBase = 10 * time.Second
+
+// port50000RetryCap is the maximum retry interval. platform-design.md §3.1.
+const port50000RetryCap = 5 * time.Minute
+
+// Port50000Backoff computes the exponential backoff duration for consecutive
+// ApplyConfiguration failures. Formula: base * 2^(attempts-1), capped at cap.
+// attempts=1 → 10s, attempts=2 → 20s, attempts=3 → 40s, …, cap=5min.
+// Exported for unit testing.
+func Port50000Backoff(attempts int32) time.Duration {
+	if attempts <= 1 {
+		return port50000RetryBase
+	}
+	shift := attempts - 1
+	if shift > 10 {
+		shift = 10 // guard against overflow: 10s * 2^10 = ~170min, already past cap
+	}
+	d := port50000RetryBase * (1 << shift)
+	if d > port50000RetryCap {
+		d = port50000RetryCap
+	}
+	return d
+}
 
 // MachineConfigApplier is the interface used by SeamInfrastructureMachineReconciler
 // to deliver machineconfigs to Talos nodes via the maintenance API.
@@ -224,23 +250,52 @@ func (r *SeamInfrastructureMachineReconciler) Reconcile(ctx context.Context, req
 		}
 
 		// Step 3 — Apply machineconfig via Talos maintenance API.
+		// Failures trigger exponential backoff (10s base, 5min cap). After
+		// machineApplyAttemptsHaltThreshold failures, TalosClusterReconciler
+		// raises ControlPlaneUnreachable (CP) or PartialWorkerAvailability (workers).
 		// platform-design.md §3.1 Step 3.
 		port := sim.Spec.Port
 		if port == 0 {
 			port = 50000
 		}
 		if err := r.Applier.ApplyConfiguration(ctx, sim.Spec.Address, port, configData); err != nil {
+			sim.Status.ApplyAttempts++
+			backoff := Port50000Backoff(sim.Status.ApplyAttempts)
 			infrav1alpha1.SetCondition(
 				&sim.Status.Conditions,
 				infrav1alpha1.ConditionTypeMachineReady,
 				metav1.ConditionFalse,
 				infrav1alpha1.ReasonMachineConfigFailed,
-				fmt.Sprintf("ApplyConfiguration failed: %v", err),
+				fmt.Sprintf("ApplyConfiguration attempt %d failed: %v. Retrying in %s.", sim.Status.ApplyAttempts, err, backoff),
 				sim.Generation,
 			)
-			return ctrl.Result{}, fmt.Errorf("ApplyConfiguration for %s at %s:%d: %w",
-				sim.Name, sim.Spec.Address, port, err)
+			infrav1alpha1.SetCondition(
+				&sim.Status.Conditions,
+				infrav1alpha1.ConditionTypePortReachable,
+				metav1.ConditionFalse,
+				infrav1alpha1.ReasonPortUnreachable,
+				fmt.Sprintf("Port %d unreachable after %d attempt(s).", port, sim.Status.ApplyAttempts),
+				sim.Generation,
+			)
+			r.Recorder.Eventf(sim, "Warning", "ApplyConfigurationFailed",
+				"ApplyConfiguration attempt %d failed for %s at %s:%d: %v",
+				sim.Status.ApplyAttempts, sim.Name, sim.Spec.Address, port, err)
+			logger.Error(err, "ApplyConfiguration failed — exponential backoff",
+				"name", sim.Name, "address", sim.Spec.Address,
+				"attempts", sim.Status.ApplyAttempts, "backoff", backoff)
+			// Return nil error to prevent controller-runtime double-backoff.
+			return ctrl.Result{RequeueAfter: backoff}, nil
 		}
+		// Success — clear the port-reachability failure counter and condition.
+		sim.Status.ApplyAttempts = 0
+		infrav1alpha1.SetCondition(
+			&sim.Status.Conditions,
+			infrav1alpha1.ConditionTypePortReachable,
+			metav1.ConditionTrue,
+			infrav1alpha1.ReasonPortUnreachable,
+			fmt.Sprintf("Port %d reachable — machineconfig delivered.", port),
+			sim.Generation,
+		)
 
 		// Machineconfig applied — mark it so we skip this on next reconcile.
 		sim.Status.MachineConfigApplied = true

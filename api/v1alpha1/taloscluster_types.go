@@ -63,6 +63,17 @@ const (
 	// Nodes are NotReady during this window. This is the expected state between
 	// CAPI Running and Cilium Ready. platform-schema.md §5, CP-INV-013.
 	ConditionTypeCiliumPending = "CiliumPending"
+
+	// ConditionTypeControlPlaneUnreachable is set when one or more control plane
+	// SeamInfrastructureMachine nodes cannot be reached on port 50000 after the
+	// retry threshold. Reconciliation halts until the condition clears.
+	ConditionTypeControlPlaneUnreachable = "ControlPlaneUnreachable"
+
+	// ConditionTypePartialWorkerAvailability is set when one or more worker
+	// SeamInfrastructureMachine nodes are unreachable on port 50000 after the
+	// retry threshold. Reconciliation proceeds with available workers. The
+	// condition clears automatically on the next successful reconcile.
+	ConditionTypePartialWorkerAvailability = "PartialWorkerAvailability"
 )
 
 // Condition reason constants for TalosCluster.
@@ -104,6 +115,14 @@ const (
 
 	// ReasonDegraded is set when a non-recoverable degraded condition is detected.
 	ReasonDegraded = "Degraded"
+
+	// ReasonControlPlaneNodeUnreachable is set on ControlPlaneUnreachable when one
+	// or more control plane nodes cannot be reached on port 50000.
+	ReasonControlPlaneNodeUnreachable = "ControlPlaneNodeUnreachable"
+
+	// ReasonWorkerNodeUnreachable is set on PartialWorkerAvailability when one or
+	// more worker nodes cannot be reached on port 50000.
+	ReasonWorkerNodeUnreachable = "WorkerNodeUnreachable"
 )
 
 // CAPICiliumPackRef is a reference to the cluster-specific Cilium ClusterPack

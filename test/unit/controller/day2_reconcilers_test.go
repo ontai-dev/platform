@@ -18,6 +18,7 @@ import (
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 
+	infrav1alpha1 "github.com/ontai-dev/platform/api/infrastructure/v1alpha1"
 	platformv1alpha1 "github.com/ontai-dev/platform/api/v1alpha1"
 	"github.com/ontai-dev/platform/internal/controller"
 )
@@ -37,6 +38,9 @@ func buildDay2Scheme(t *testing.T) *runtime.Scheme {
 	}
 	if err := platformv1alpha1.AddToScheme(s); err != nil {
 		t.Fatalf("add platformv1alpha1 scheme: %v", err)
+	}
+	if err := infrav1alpha1.AddToScheme(s); err != nil {
+		t.Fatalf("add infrav1alpha1 scheme: %v", err)
 	}
 	if err := controller.AddOperationalRunnerConfigToScheme(s); err != nil {
 		t.Fatalf("add OperationalRunnerConfig scheme: %v", err)

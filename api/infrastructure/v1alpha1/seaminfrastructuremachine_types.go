@@ -60,6 +60,14 @@ const (
 	// ReasonCAPIMachineNotBound is set when no owning CAPI Machine has bound to
 	// this SeamInfrastructureMachine yet.
 	ReasonCAPIMachineNotBound = "CAPIMachineNotBound"
+
+	// ConditionTypePortReachable indicates whether the Talos maintenance API port
+	// (default 50000) on this node is reachable for machineconfig delivery.
+	ConditionTypePortReachable = "PortReachable"
+
+	// ReasonPortUnreachable is set when ApplyConfiguration fails because the node
+	// cannot be reached on the maintenance API port.
+	ReasonPortUnreachable = "PortUnreachable"
 )
 
 // SeamInfrastructureMachineSpec defines the desired state of SeamInfrastructureMachine.
@@ -101,6 +109,12 @@ type SeamInfrastructureMachineStatus struct {
 	// called against the Talos maintenance API on this node.
 	// +optional
 	MachineConfigApplied bool `json:"machineConfigApplied,omitempty"`
+
+	// ApplyAttempts counts how many times ApplyConfiguration has been attempted
+	// and failed consecutively. Resets to zero on success. Used by
+	// TalosClusterReconciler to raise ControlPlaneUnreachable after 3 attempts.
+	// +optional
+	ApplyAttempts int32 `json:"applyAttempts,omitempty"`
 
 	// ProviderID is the Talos provider ID written back to the owning CAPI Machine.
 	// Format: talos://{cluster-name}/{node-ip}. Set after machineConfigApplied.

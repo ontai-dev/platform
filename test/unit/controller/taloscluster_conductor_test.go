@@ -20,6 +20,7 @@ import (
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 
+	infrav1alpha1 "github.com/ontai-dev/platform/api/infrastructure/v1alpha1"
 	platformv1alpha1 "github.com/ontai-dev/platform/api/v1alpha1"
 	"github.com/ontai-dev/platform/internal/controller"
 )
@@ -134,5 +135,145 @@ func TestTalosClusterReconcile_CAPIPathDoesNotBreakOnAbsentKubeconfig(t *testing
 	// Should requeue to wait for CAPI cluster.
 	if result.RequeueAfter == 0 {
 		t.Error("expected requeue while waiting for CAPI cluster")
+	}
+}
+
+// buildCAPITalosCluster returns a TalosCluster with CAPI enabled and minimal
+// config sufficient to reach the checkMachineReachability step.
+func buildCAPITalosCluster(name, namespace string) *platformv1alpha1.TalosCluster {
+	return &platformv1alpha1.TalosCluster{
+		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: namespace, Generation: 1},
+		Spec: platformv1alpha1.TalosClusterSpec{
+			CAPI: platformv1alpha1.CAPIConfig{
+				Enabled:           true,
+				TalosVersion:      "v1.7.0",
+				KubernetesVersion: "v1.31.0",
+				ControlPlane:      platformv1alpha1.CAPIControlPlaneConfig{Replicas: 3},
+			},
+		},
+	}
+}
+
+// buildSIMWithAttempts creates a SeamInfrastructureMachine in the given namespace
+// with the given role and ApplyAttempts count. MachineConfigApplied is false so
+// the machine is treated as stuck by checkMachineReachability.
+func buildSIMWithAttempts(name, namespace string, role infrav1alpha1.NodeRole, attempts int32) *infrav1alpha1.SeamInfrastructureMachine {
+	sim := &infrav1alpha1.SeamInfrastructureMachine{
+		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: namespace, Generation: 1},
+		Spec: infrav1alpha1.SeamInfrastructureMachineSpec{
+			Address:  "10.20.0.11",
+			NodeRole: role,
+			TalosConfigSecretRef: infrav1alpha1.SecretRef{Name: "tc", Namespace: "ont-system"},
+		},
+		Status: infrav1alpha1.SeamInfrastructureMachineStatus{
+			ApplyAttempts:        attempts,
+			MachineConfigApplied: false,
+		},
+	}
+	return sim
+}
+
+// TestTalosClusterReconcile_ControlPlaneUnreachableHalts verifies that when a
+// control plane SeamInfrastructureMachine has ApplyAttempts >= 3 and has not had
+// its config applied, TalosClusterReconciler sets ControlPlaneUnreachable=True
+// and returns a requeue (halts normal reconciliation progress).
+func TestTalosClusterReconcile_ControlPlaneUnreachableHalts(t *testing.T) {
+	scheme := buildDay2Scheme(t)
+	tc := buildCAPITalosCluster("ccs-dev", "seam-system")
+	// Pre-create a control plane SIM with 3 failed ApplyConfiguration attempts.
+	stuckSIM := buildSIMWithAttempts("cp1", "seam-tenant-ccs-dev", infrav1alpha1.NodeRoleControlPlane, 3)
+
+	c := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithObjects(tc, stuckSIM). // stuckSIM status set directly (no WithStatusSubresource)
+		WithStatusSubresource(tc).
+		Build()
+
+	r := &controller.TalosClusterReconciler{
+		Client:   c,
+		Scheme:   scheme,
+		Recorder: record.NewFakeRecorder(32),
+	}
+
+	result, err := r.Reconcile(context.Background(), ctrl.Request{
+		NamespacedName: types.NamespacedName{Name: "ccs-dev", Namespace: "seam-system"},
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	// Reconcile must requeue (halt, not proceed to CAPI cluster phase check).
+	if result.RequeueAfter == 0 {
+		t.Error("expected requeue when control plane node unreachable")
+	}
+
+	got := &platformv1alpha1.TalosCluster{}
+	if err := c.Get(context.Background(), types.NamespacedName{Name: "ccs-dev", Namespace: "seam-system"}, got); err != nil {
+		t.Fatalf("get TalosCluster: %v", err)
+	}
+	cond := platformv1alpha1.FindCondition(got.Status.Conditions, platformv1alpha1.ConditionTypeControlPlaneUnreachable)
+	if cond == nil {
+		t.Fatal("ControlPlaneUnreachable condition not set")
+	}
+	if cond.Status != metav1.ConditionTrue {
+		t.Errorf("ControlPlaneUnreachable = %s, want True", cond.Status)
+	}
+	if cond.Reason != platformv1alpha1.ReasonControlPlaneNodeUnreachable {
+		t.Errorf("reason = %s, want %s", cond.Reason, platformv1alpha1.ReasonControlPlaneNodeUnreachable)
+	}
+}
+
+// TestTalosClusterReconcile_WorkerUnreachablePartialAvailability verifies that
+// when a worker SeamInfrastructureMachine has ApplyAttempts >= 3, the reconciler
+// sets PartialWorkerAvailability=True but does NOT halt (continues to CAPI poll).
+func TestTalosClusterReconcile_WorkerUnreachablePartialAvailability(t *testing.T) {
+	scheme := buildDay2Scheme(t)
+	tc := buildCAPITalosCluster("ccs-dev", "seam-system")
+	// Pre-create a worker SIM with 3 failed ApplyConfiguration attempts.
+	stuckWorker := buildSIMWithAttempts("w1", "seam-tenant-ccs-dev", infrav1alpha1.NodeRoleWorker, 3)
+
+	c := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithObjects(tc, stuckWorker).
+		WithStatusSubresource(tc).
+		Build()
+
+	r := &controller.TalosClusterReconciler{
+		Client:   c,
+		Scheme:   scheme,
+		Recorder: record.NewFakeRecorder(32),
+	}
+
+	result, err := r.Reconcile(context.Background(), ctrl.Request{
+		NamespacedName: types.NamespacedName{Name: "ccs-dev", Namespace: "seam-system"},
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	// Reconcile should requeue (continuing to poll CAPI cluster) — not return nil.
+	if result.RequeueAfter == 0 {
+		t.Error("expected requeue while polling CAPI cluster status")
+	}
+
+	got := &platformv1alpha1.TalosCluster{}
+	if err := c.Get(context.Background(), types.NamespacedName{Name: "ccs-dev", Namespace: "seam-system"}, got); err != nil {
+		t.Fatalf("get TalosCluster: %v", err)
+	}
+
+	// ControlPlaneUnreachable must NOT be set (this is a worker failure only).
+	cpCond := platformv1alpha1.FindCondition(got.Status.Conditions, platformv1alpha1.ConditionTypeControlPlaneUnreachable)
+	if cpCond != nil && cpCond.Status == metav1.ConditionTrue {
+		t.Error("ControlPlaneUnreachable must not be True for a worker-only failure")
+	}
+
+	// PartialWorkerAvailability must be True.
+	wCond := platformv1alpha1.FindCondition(got.Status.Conditions, platformv1alpha1.ConditionTypePartialWorkerAvailability)
+	if wCond == nil {
+		t.Fatal("PartialWorkerAvailability condition not set")
+	}
+	if wCond.Status != metav1.ConditionTrue {
+		t.Errorf("PartialWorkerAvailability = %s, want True", wCond.Status)
+	}
+	if wCond.Reason != platformv1alpha1.ReasonWorkerNodeUnreachable {
+		t.Errorf("reason = %s, want %s", wCond.Reason, platformv1alpha1.ReasonWorkerNodeUnreachable)
 	}
 }
