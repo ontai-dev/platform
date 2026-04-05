@@ -33,7 +33,9 @@ const machineApplyAttemptsHaltThreshold int32 = 3
 // TalosConfigTemplates, SeamInfrastructureMachineTemplates) in the tenant namespace.
 // Watches CAPI Cluster status and transitions TalosCluster status accordingly.
 // Triggers the Cilium ClusterPack deployment when CAPI cluster reaches Running state.
-// platform-design.md §2.1, §4.
+// After Cilium is ready, ensures the Conductor Deployment is Available on the target
+// cluster before marking the TalosCluster Ready (ConductorReady condition, Gap 27).
+// platform-design.md §2.1, §4, §12.
 //
 // CP-INV-007: leader election is required — no reconciliation proceeds before
 // the manager acquires the leader lock.
@@ -48,6 +50,12 @@ type TalosClusterReconciler struct {
 
 	// Recorder is the Kubernetes event recorder for emitting Warning and Normal events.
 	Recorder record.EventRecorder
+
+	// RemoteConductorAvailableFn, if non-nil, replaces the real remote Conductor
+	// Deployment availability check in EnsureConductorDeploymentOnTargetCluster.
+	// Used exclusively in unit tests to inject a controlled availability response
+	// without a live target cluster kubeconfig.
+	RemoteConductorAvailableFn func(ctx context.Context, clusterName string) (bool, error)
 }
 
 // Reconcile is the main reconciliation loop for TalosCluster.
@@ -311,19 +319,11 @@ func (r *TalosClusterReconciler) reconcileCAPIPath(ctx context.Context, tc *plat
 
 	// Step 9 — Check Cilium PackInstance Ready status.
 	if tc.Spec.CAPI.CiliumPackRef == nil {
-		// No Cilium pack configured — mark Ready immediately (development mode).
+		// No Cilium pack configured — skip Cilium gate (development mode).
 		logger.Info("no CiliumPackRef configured — skipping Cilium gate (development mode)",
 			"name", tc.Name)
-		// Deploy Conductor agent to the target cluster before marking Ready.
-		// platform-schema.md §12 Conductor Deployment Contract.
-		if err := r.EnsureConductorDeploymentOnTargetCluster(ctx, tc); err != nil {
-			logger.Error(err, "failed to ensure Conductor Deployment on target cluster",
-				"cluster", tc.Name)
-			return ctrl.Result{RequeueAfter: capiPollInterval},
-				fmt.Errorf("reconcileCAPIPath: ensure conductor deployment: %w", err)
-		}
-		r.transitionToReady(tc)
-		return ctrl.Result{}, nil
+		// Ensure Conductor Deployment exists and is Available. Gap 27.
+		return r.ensureConductorReadyAndTransition(ctx, tc)
 	}
 
 	ciliumReady, err := r.isCiliumPackInstanceReady(ctx, tc)
@@ -334,17 +334,57 @@ func (r *TalosClusterReconciler) reconcileCAPIPath(ctx context.Context, tc *plat
 		return ctrl.Result{RequeueAfter: capiPollInterval}, nil
 	}
 
-	// Step 10 — Cilium Ready. Deploy Conductor to target cluster, then mark Ready.
-	// Platform deploys Conductor before marking the cluster fully Ready.
+	// Step 10 — Cilium Ready. Ensure Conductor Deployment Available, then mark Ready.
+	// The ConductorReady condition is the final gate before Ready=True. Gap 27.
 	// platform-schema.md §12 Conductor Deployment Contract.
-	if err := r.EnsureConductorDeploymentOnTargetCluster(ctx, tc); err != nil {
+	return r.ensureConductorReadyAndTransition(ctx, tc)
+}
+
+// ensureConductorReadyAndTransition ensures the Conductor Deployment exists on the
+// target cluster and has reached Available=True. If Available, sets ConductorReady=True
+// and calls transitionToReady. If not yet Available, sets ConductorReady=False and
+// requeues. This is the final gate before the TalosCluster transitions to Ready.
+// platform-schema.md §12, Gap 27.
+func (r *TalosClusterReconciler) ensureConductorReadyAndTransition(
+	ctx context.Context,
+	tc *platformv1alpha1.TalosCluster,
+) (ctrl.Result, error) {
+	logger := log.FromContext(ctx)
+
+	available, err := r.EnsureConductorDeploymentOnTargetCluster(ctx, tc)
+	if err != nil {
 		logger.Error(err, "failed to ensure Conductor Deployment on target cluster",
 			"cluster", tc.Name)
 		return ctrl.Result{RequeueAfter: capiPollInterval},
-			fmt.Errorf("reconcileCAPIPath: ensure conductor deployment: %w", err)
+			fmt.Errorf("ensureConductorReadyAndTransition: %w", err)
 	}
+
+	if !available {
+		// Conductor Deployment not yet Available — set ConductorReady=False and requeue.
+		platformv1alpha1.SetCondition(
+			&tc.Status.Conditions,
+			platformv1alpha1.ConditionTypeConductorReady,
+			metav1.ConditionFalse,
+			platformv1alpha1.ReasonConductorDeploymentUnavailable,
+			"Conductor Deployment has been created on the target cluster but has not yet reached Available=True. Requeuing.",
+			tc.Generation,
+		)
+		logger.Info("Conductor Deployment not yet Available — requeueing",
+			"cluster", tc.Name)
+		return ctrl.Result{RequeueAfter: capiPollInterval}, nil
+	}
+
+	// Conductor is Available — set ConductorReady=True, then transition to cluster Ready.
+	platformv1alpha1.SetCondition(
+		&tc.Status.Conditions,
+		platformv1alpha1.ConditionTypeConductorReady,
+		metav1.ConditionTrue,
+		platformv1alpha1.ReasonConductorDeploymentAvailable,
+		"Conductor Deployment is Available on the target cluster.",
+		tc.Generation,
+	)
 	r.transitionToReady(tc)
-	logger.Info("TalosCluster Ready — CAPI Running, Cilium Ready, Conductor deployed",
+	logger.Info("TalosCluster Ready — CAPI Running, Cilium Ready, Conductor Available",
 		"name", tc.Name)
 	return ctrl.Result{}, nil
 }

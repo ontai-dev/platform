@@ -594,22 +594,34 @@ const conductorAgentNamespace = "ont-system"
 const conductorRoleEnvVar = "CONDUCTOR_ROLE"
 
 // EnsureConductorDeploymentOnTargetCluster creates the Conductor agent Deployment
-// in ont-system on the target cluster if it does not already exist.
+// in ont-system on the target cluster if it does not already exist, then checks
+// whether the Deployment has reached Available=True.
+//
+// Returns (true, nil) when the Deployment is Available.
+// Returns (false, nil) when the kubeconfig is not yet available, or when the
+// Deployment was just created and is not yet Available — the caller should requeue.
+// Returns (false, err) only for unexpected API errors.
 //
 // Platform is the sole authority for deploying Conductor to tenant clusters.
 // The Deployment is stamped with CONDUCTOR_ROLE=tenant. platform-schema.md §12.
-// conductor-schema.md §15 Role Declaration Contract.
+// conductor-schema.md §15 Role Declaration Contract. Gap 27.
+//
+// If RemoteConductorAvailableFn is set on the reconciler (unit test override), it
+// is called instead of the real remote cluster interaction.
 //
 // Kubeconfig resolution: CAPI generates a Secret named {cluster-name}-kubeconfig
 // in seam-tenant-{cluster-name} after the cluster reaches Running state. Platform
 // reads this Secret to connect to the target cluster.
-//
-// If the kubeconfig Secret is not yet present (CAPI hasn't written it), returns
-// nil and the caller should requeue — this is not a fatal error.
 func (r *TalosClusterReconciler) EnsureConductorDeploymentOnTargetCluster(
 	ctx context.Context,
 	tc *platformv1alpha1.TalosCluster,
-) error {
+) (bool, error) {
+	// Unit test override — injected via RemoteConductorAvailableFn to avoid
+	// requiring a live target cluster kubeconfig in tests.
+	if r.RemoteConductorAvailableFn != nil {
+		return r.RemoteConductorAvailableFn(ctx, tc.Name)
+	}
+
 	tenantNS := "seam-tenant-" + tc.Name
 	kubeconfigSecretName := tc.Name + "-kubeconfig"
 
@@ -621,47 +633,55 @@ func (r *TalosClusterReconciler) EnsureConductorDeploymentOnTargetCluster(
 	}, kubeconfigSecret); err != nil {
 		if apierrors.IsNotFound(err) {
 			// CAPI has not yet generated the kubeconfig — not fatal, requeue.
-			return nil
+			return false, nil
 		}
-		return fmt.Errorf("ensureConductorDeployment: get kubeconfig secret %s/%s: %w",
+		return false, fmt.Errorf("ensureConductorDeployment: get kubeconfig secret %s/%s: %w",
 			tenantNS, kubeconfigSecretName, err)
 	}
 
 	kubeconfigBytes, ok := kubeconfigSecret.Data["value"]
 	if !ok || len(kubeconfigBytes) == 0 {
 		// Secret exists but kubeconfig not yet written — not fatal.
-		return nil
+		return false, nil
 	}
 
 	// Build a remote Kubernetes client for the target cluster.
 	restConfig, err := clientcmd.RESTConfigFromKubeConfig(kubeconfigBytes)
 	if err != nil {
-		return fmt.Errorf("ensureConductorDeployment: parse kubeconfig for %s: %w", tc.Name, err)
+		return false, fmt.Errorf("ensureConductorDeployment: parse kubeconfig for %s: %w", tc.Name, err)
 	}
 	remoteK8s, err := kubernetes.NewForConfig(restConfig)
 	if err != nil {
-		return fmt.Errorf("ensureConductorDeployment: build remote client for %s: %w", tc.Name, err)
+		return false, fmt.Errorf("ensureConductorDeployment: build remote client for %s: %w", tc.Name, err)
 	}
 
 	// Check whether the Conductor Deployment already exists.
-	_, err = remoteK8s.AppsV1().Deployments(conductorAgentNamespace).Get(
+	dep, err := remoteK8s.AppsV1().Deployments(conductorAgentNamespace).Get(
 		ctx, conductorDeploymentName, metav1.GetOptions{})
-	if err == nil {
-		// Already exists — idempotent.
-		return nil
-	}
-	if !apierrors.IsNotFound(err) {
-		return fmt.Errorf("ensureConductorDeployment: check deployment %s/%s on %s: %w",
-			conductorAgentNamespace, conductorDeploymentName, tc.Name, err)
+	if err != nil {
+		if !apierrors.IsNotFound(err) {
+			return false, fmt.Errorf("ensureConductorDeployment: check deployment %s/%s on %s: %w",
+				conductorAgentNamespace, conductorDeploymentName, tc.Name, err)
+		}
+		// Deployment does not exist — create it.
+		newDep := BuildConductorAgentDeployment(tc.Name)
+		if _, createErr := remoteK8s.AppsV1().Deployments(conductorAgentNamespace).Create(
+			ctx, newDep, metav1.CreateOptions{}); createErr != nil && !apierrors.IsAlreadyExists(createErr) {
+			return false, fmt.Errorf("ensureConductorDeployment: create deployment on %s: %w", tc.Name, createErr)
+		}
+		// Just created — not yet Available.
+		return false, nil
 	}
 
-	// Deployment does not exist — create it.
-	dep := BuildConductorAgentDeployment(tc.Name)
-	if _, err := remoteK8s.AppsV1().Deployments(conductorAgentNamespace).Create(
-		ctx, dep, metav1.CreateOptions{}); err != nil && !apierrors.IsAlreadyExists(err) {
-		return fmt.Errorf("ensureConductorDeployment: create deployment on %s: %w", tc.Name, err)
+	// Deployment exists — check the Available condition.
+	// Available=True means all desired replicas are up and healthy.
+	for _, cond := range dep.Status.Conditions {
+		if cond.Type == appsv1.DeploymentAvailable && cond.Status == corev1.ConditionTrue {
+			return true, nil
+		}
 	}
-	return nil
+	// Deployment exists but not yet Available.
+	return false, nil
 }
 
 // BuildConductorAgentDeployment builds the Conductor agent Deployment spec for a

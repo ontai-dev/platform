@@ -74,6 +74,13 @@ const (
 	// retry threshold. Reconciliation proceeds with available workers. The
 	// condition clears automatically on the next successful reconcile.
 	ConditionTypePartialWorkerAvailability = "PartialWorkerAvailability"
+
+	// ConditionTypeConductorReady is set after the Conductor agent Deployment has
+	// been created on the target cluster. True when the Deployment's Available
+	// condition is True. False when the Deployment exists but is not yet Available.
+	// The cluster does not transition to Ready until ConductorReady=True.
+	// platform-schema.md §12. Gap 27.
+	ConditionTypeConductorReady = "ConductorReady"
 )
 
 // Condition reason constants for TalosCluster.
@@ -123,6 +130,15 @@ const (
 	// ReasonWorkerNodeUnreachable is set on PartialWorkerAvailability when one or
 	// more worker nodes cannot be reached on port 50000.
 	ReasonWorkerNodeUnreachable = "WorkerNodeUnreachable"
+
+	// ReasonConductorDeploymentAvailable is set on ConductorReady when the Conductor
+	// Deployment on the target cluster has reached Available=True.
+	ReasonConductorDeploymentAvailable = "ConductorDeploymentAvailable"
+
+	// ReasonConductorDeploymentUnavailable is set on ConductorReady when the Conductor
+	// Deployment has been created but has not yet reached Available=True.
+	// The reconciler requeues until Available=True.
+	ReasonConductorDeploymentUnavailable = "ConductorDeploymentUnavailable"
 )
 
 // CAPICiliumPackRef is a reference to the cluster-specific Cilium ClusterPack
