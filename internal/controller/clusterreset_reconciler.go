@@ -242,7 +242,15 @@ func (r *ClusterResetReconciler) submitAndWatchResetJob(ctx context.Context, crs
 	}
 
 	if existingJob == nil {
-		job := jobSpec(jobName, jobNamespace, crst.Spec.ClusterRef.Name, capabilityClusterReset)
+		// Resolve operator leader node. The reset Job must not run on the leader.
+		// conductor-schema.md §13.
+		leaderNode, err := resolveOperatorLeaderNode(ctx, r.Client)
+		if err != nil {
+			return ctrl.Result{}, fmt.Errorf("ClusterResetReconciler: resolve leader node: %w", err)
+		}
+		nodeExclusions := buildNodeExclusions(nil, leaderNode)
+
+		job := jobSpecWithExclusions(jobName, jobNamespace, crst.Spec.ClusterRef.Name, capabilityClusterReset, nodeExclusions)
 		if err := controllerutil.SetControllerReference(crst, job, r.Scheme); err != nil {
 			return ctrl.Result{}, fmt.Errorf("ClusterResetReconciler: set owner reference: %w", err)
 		}

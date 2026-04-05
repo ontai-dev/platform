@@ -6,6 +6,7 @@ package v1alpha1
 
 import (
 	"github.com/ontai-dev/seam-core/pkg/lineage"
+	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1"
 	runtime "k8s.io/apimachinery/pkg/runtime"
 )
@@ -360,6 +361,11 @@ func (in *EtcdMaintenanceList) DeepCopyObject() runtime.Object {
 func (in *EtcdMaintenanceSpec) DeepCopyInto(out *EtcdMaintenanceSpec) {
 	*out = *in
 	out.ClusterRef = in.ClusterRef
+	if in.EtcdBackupS3SecretRef != nil {
+		in, out := &in.EtcdBackupS3SecretRef, &out.EtcdBackupS3SecretRef
+		*out = new(corev1.SecretReference)
+		**out = **in
+	}
 	if in.S3Destination != nil {
 		in, out := &in.S3Destination, &out.S3Destination
 		*out = new(S3Ref)

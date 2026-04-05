@@ -272,7 +272,14 @@ func (r *NodeOperationReconciler) reconcileDirectNodeOp(ctx context.Context, nop
 	}
 
 	if existingJob == nil {
-		job := jobSpec(jobName, nop.Namespace, nop.Spec.ClusterRef.Name, capability)
+		// Resolve operator leader node and build node exclusions. conductor-schema.md §13.
+		leaderNode, err := resolveOperatorLeaderNode(ctx, r.Client)
+		if err != nil {
+			return ctrl.Result{}, fmt.Errorf("NodeOperationReconciler: resolve leader node: %w", err)
+		}
+		nodeExclusions := buildNodeExclusions(nop.Spec.TargetNodes, leaderNode)
+
+		job := jobSpecWithExclusions(jobName, nop.Namespace, nop.Spec.ClusterRef.Name, capability, nodeExclusions)
 		if err := controllerutil.SetControllerReference(nop, job, r.Scheme); err != nil {
 			return ctrl.Result{}, fmt.Errorf("NodeOperationReconciler: set owner reference: %w", err)
 		}

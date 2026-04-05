@@ -109,7 +109,14 @@ func (r *NodeMaintenanceReconciler) Reconcile(ctx context.Context, req ctrl.Requ
 	}
 
 	if existingJob == nil {
-		job := jobSpec(jobName, nm.Namespace, nm.Spec.ClusterRef.Name, capability)
+		// Resolve operator leader node and build node exclusions. conductor-schema.md §13.
+		leaderNode, err := resolveOperatorLeaderNode(ctx, r.Client)
+		if err != nil {
+			return ctrl.Result{}, fmt.Errorf("NodeMaintenanceReconciler: resolve leader node: %w", err)
+		}
+		nodeExclusions := buildNodeExclusions(nm.Spec.TargetNodes, leaderNode)
+
+		job := jobSpecWithExclusions(jobName, nm.Namespace, nm.Spec.ClusterRef.Name, capability, nodeExclusions)
 		if err := controllerutil.SetControllerReference(nm, job, r.Scheme); err != nil {
 			return ctrl.Result{}, fmt.Errorf("NodeMaintenanceReconciler: set owner reference: %w", err)
 		}

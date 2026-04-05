@@ -13,9 +13,11 @@ package controller
 import (
 	"context"
 	"fmt"
+	"strings"
 	"time"
 
 	batchv1 "k8s.io/api/batch/v1"
+	coordinationv1 "k8s.io/api/coordination/v1"
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -123,6 +125,93 @@ func readOperationalResult(ctx context.Context, c client.Client, namespace, jobN
 	default:
 		return false, false, msg
 	}
+}
+
+// jobSpecWithExclusions builds a Conductor executor Job spec and applies NotIn
+// NodeAffinity constraints to prevent the Job pod from landing on the listed nodes.
+// Used for all day-2 self-operation Jobs to avoid scheduling on maintenance targets
+// or the operator leader node. conductor-schema.md §13.
+func jobSpecWithExclusions(jobName, namespace, clusterName, capability string, nodeExclusions []string) *batchv1.Job {
+	job := jobSpec(jobName, namespace, clusterName, capability)
+	if len(nodeExclusions) == 0 {
+		return job
+	}
+	job.Spec.Template.Spec.Affinity = &corev1.Affinity{
+		NodeAffinity: &corev1.NodeAffinity{
+			RequiredDuringSchedulingIgnoredDuringExecution: &corev1.NodeSelector{
+				NodeSelectorTerms: []corev1.NodeSelectorTerm{
+					{
+						MatchExpressions: []corev1.NodeSelectorRequirement{
+							{
+								Key:      "kubernetes.io/hostname",
+								Operator: corev1.NodeSelectorOpNotIn,
+								Values:   nodeExclusions,
+							},
+						},
+					},
+				},
+			},
+		},
+	}
+	return job
+}
+
+// resolveOperatorLeaderNode reads the platform-leader Lease from seam-system,
+// resolves the holder pod, and returns the pod's node name. Returns an empty
+// string (not an error) when the Lease is absent or the holder pod is not found —
+// this allows reconcilers to proceed without exclusions rather than failing.
+// conductor-schema.md §13, CP-INV-007.
+func resolveOperatorLeaderNode(ctx context.Context, c client.Client) (string, error) {
+	lease := &coordinationv1.Lease{}
+	if err := c.Get(ctx, types.NamespacedName{
+		Name:      "platform-leader",
+		Namespace: "seam-system",
+	}, lease); err != nil {
+		if apierrors.IsNotFound(err) {
+			return "", nil
+		}
+		return "", fmt.Errorf("get platform-leader Lease: %w", err)
+	}
+	if lease.Spec.HolderIdentity == nil || *lease.Spec.HolderIdentity == "" {
+		return "", nil
+	}
+	// HolderIdentity format from controller-runtime: "{podName}_{uid}".
+	// Extract the pod name before the first underscore.
+	holderIdentity := *lease.Spec.HolderIdentity
+	podName := holderIdentity
+	if idx := strings.Index(holderIdentity, "_"); idx != -1 {
+		podName = holderIdentity[:idx]
+	}
+	pod := &corev1.Pod{}
+	if err := c.Get(ctx, types.NamespacedName{Name: podName, Namespace: "seam-system"}, pod); err != nil {
+		if apierrors.IsNotFound(err) {
+			return "", nil
+		}
+		return "", fmt.Errorf("get leader pod %s/seam-system: %w", podName, err)
+	}
+	return pod.Spec.NodeName, nil
+}
+
+// buildNodeExclusions merges the operation's target nodes and the leader node
+// into a deduplicated list of nodes that should not run the executor Job.
+// All day-2 operations are self-operations (SelfOperation=true) — exclusions
+// always apply. conductor-schema.md §13.
+func buildNodeExclusions(targetNodes []string, leaderNode string) []string {
+	if len(targetNodes) == 0 && leaderNode == "" {
+		return nil
+	}
+	seen := make(map[string]bool)
+	var exclusions []string
+	for _, n := range targetNodes {
+		if n != "" && !seen[n] {
+			seen[n] = true
+			exclusions = append(exclusions, n)
+		}
+	}
+	if leaderNode != "" && !seen[leaderNode] {
+		exclusions = append(exclusions, leaderNode)
+	}
+	return exclusions
 }
 
 // operationalJobName returns a deterministic Job name for an operational CRD.

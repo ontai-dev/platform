@@ -234,7 +234,15 @@ func (r *UpgradePolicyReconciler) reconcileDirectUpgrade(ctx context.Context, up
 	}
 
 	if existingJob == nil {
-		job := jobSpec(jobName, up.Namespace, up.Spec.ClusterRef.Name, capability)
+		// Resolve operator leader node. The upgrade Job must not run on the leader.
+		// conductor-schema.md §13.
+		leaderNode, err := resolveOperatorLeaderNode(ctx, r.Client)
+		if err != nil {
+			return ctrl.Result{}, fmt.Errorf("UpgradePolicyReconciler: resolve leader node: %w", err)
+		}
+		nodeExclusions := buildNodeExclusions(nil, leaderNode)
+
+		job := jobSpecWithExclusions(jobName, up.Namespace, up.Spec.ClusterRef.Name, capability, nodeExclusions)
 		if err := controllerutil.SetControllerReference(up, job, r.Scheme); err != nil {
 			return ctrl.Result{}, fmt.Errorf("UpgradePolicyReconciler: set owner reference: %w", err)
 		}

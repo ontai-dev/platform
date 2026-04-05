@@ -8,6 +8,7 @@ import (
 	"testing"
 
 	batchv1 "k8s.io/api/batch/v1"
+	coordinationv1 "k8s.io/api/coordination/v1"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
@@ -82,7 +83,7 @@ func TestEtcdMaintenanceReconcile_LineageSyncedInitialized(t *testing.T) {
 }
 
 // TestEtcdMaintenanceReconcile_SubmitsJob verifies that a Job is submitted on
-// the first reconcile for a backup operation.
+// the first reconcile for a backup operation when the default S3 Secret exists.
 func TestEtcdMaintenanceReconcile_SubmitsJob(t *testing.T) {
 	scheme := buildDay2Scheme(t)
 	em := &platformv1alpha1.EtcdMaintenance{
@@ -92,7 +93,11 @@ func TestEtcdMaintenanceReconcile_SubmitsJob(t *testing.T) {
 			Operation:  platformv1alpha1.EtcdMaintenanceOperationBackup,
 		},
 	}
-	c := fake.NewClientBuilder().WithScheme(scheme).WithObjects(em).WithStatusSubresource(em).Build()
+	// Pre-populate the cluster-wide default S3 Secret so the reconciler proceeds.
+	defaultS3Secret := &corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{Name: "seam-etcd-backup-config", Namespace: "seam-system"},
+	}
+	c := fake.NewClientBuilder().WithScheme(scheme).WithObjects(em, defaultS3Secret).WithStatusSubresource(em).Build()
 	r := &controller.EtcdMaintenanceReconciler{Client: c, Scheme: scheme, Recorder: fakeRecorder()}
 
 	result, err := r.Reconcile(context.Background(), ctrl.Request{
@@ -517,5 +522,246 @@ func TestNodeOperationReconcile_DirectScaleUp(t *testing.T) {
 	}
 	if len(jobList.Items) != 1 {
 		t.Errorf("expected 1 node-scale-up Job, got %d", len(jobList.Items))
+	}
+}
+
+// --- Self-operation node exclusion tests ---
+
+// TestEtcdMaintenanceReconcile_S3AbsentBlocksJob verifies that when no S3 backup
+// destination is configured, the reconciler sets EtcdBackupDestinationAbsent and
+// skips Job creation. platform-schema.md §10.
+func TestEtcdMaintenanceReconcile_S3AbsentBlocksJob(t *testing.T) {
+	scheme := buildDay2Scheme(t)
+	em := &platformv1alpha1.EtcdMaintenance{
+		ObjectMeta: metav1.ObjectMeta{Name: "backup-2", Namespace: "seam-tenant-test", Generation: 1},
+		Spec: platformv1alpha1.EtcdMaintenanceSpec{
+			ClusterRef: platformv1alpha1.LocalObjectRef{Name: "test-cluster"},
+			Operation:  platformv1alpha1.EtcdMaintenanceOperationBackup,
+		},
+	}
+	c := fake.NewClientBuilder().WithScheme(scheme).WithObjects(em).WithStatusSubresource(em).Build()
+	r := &controller.EtcdMaintenanceReconciler{Client: c, Scheme: scheme, Recorder: fakeRecorder()}
+
+	result, err := r.Reconcile(context.Background(), ctrl.Request{
+		NamespacedName: types.NamespacedName{Name: "backup-2", Namespace: "seam-tenant-test"},
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if result.RequeueAfter != 0 {
+		t.Errorf("should not requeue without S3 config, got RequeueAfter=%v", result.RequeueAfter)
+	}
+
+	jobList := &batchv1.JobList{}
+	if err := c.List(context.Background(), jobList); err != nil {
+		t.Fatalf("list jobs: %v", err)
+	}
+	if len(jobList.Items) != 0 {
+		t.Errorf("expected no Job when S3 absent, got %d", len(jobList.Items))
+	}
+
+	got := &platformv1alpha1.EtcdMaintenance{}
+	if err := c.Get(context.Background(), types.NamespacedName{
+		Name: "backup-2", Namespace: "seam-tenant-test",
+	}, got); err != nil {
+		t.Fatalf("get: %v", err)
+	}
+	cond := platformv1alpha1.FindCondition(got.Status.Conditions, platformv1alpha1.EtcdBackupDestinationAbsent)
+	if cond == nil {
+		t.Fatal("EtcdBackupDestinationAbsent condition not set")
+	}
+	if cond.Status != metav1.ConditionTrue {
+		t.Errorf("EtcdBackupDestinationAbsent status = %s, want True", cond.Status)
+	}
+	if cond.Reason != platformv1alpha1.ReasonEtcdBackupDestinationAbsent {
+		t.Errorf("EtcdBackupDestinationAbsent reason = %s, want %s",
+			cond.Reason, platformv1alpha1.ReasonEtcdBackupDestinationAbsent)
+	}
+}
+
+// TestEtcdMaintenanceReconcile_S3SecretRefPresent verifies that when
+// spec.etcdBackupS3SecretRef references an existing Secret, the Job is submitted.
+// platform-schema.md §10.
+func TestEtcdMaintenanceReconcile_S3SecretRefPresent(t *testing.T) {
+	scheme := buildDay2Scheme(t)
+	em := &platformv1alpha1.EtcdMaintenance{
+		ObjectMeta: metav1.ObjectMeta{Name: "backup-3", Namespace: "seam-tenant-test", Generation: 1},
+		Spec: platformv1alpha1.EtcdMaintenanceSpec{
+			ClusterRef: platformv1alpha1.LocalObjectRef{Name: "test-cluster"},
+			Operation:  platformv1alpha1.EtcdMaintenanceOperationBackup,
+			EtcdBackupS3SecretRef: &corev1.SecretReference{
+				Name:      "my-s3-config",
+				Namespace: "seam-system",
+			},
+		},
+	}
+	s3Secret := &corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{Name: "my-s3-config", Namespace: "seam-system"},
+	}
+	c := fake.NewClientBuilder().WithScheme(scheme).WithObjects(em, s3Secret).WithStatusSubresource(em).Build()
+	r := &controller.EtcdMaintenanceReconciler{Client: c, Scheme: scheme, Recorder: fakeRecorder()}
+
+	result, err := r.Reconcile(context.Background(), ctrl.Request{
+		NamespacedName: types.NamespacedName{Name: "backup-3", Namespace: "seam-tenant-test"},
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if result.RequeueAfter == 0 {
+		t.Error("expected requeue after job submission")
+	}
+
+	jobList := &batchv1.JobList{}
+	if err := c.List(context.Background(), jobList); err != nil {
+		t.Fatalf("list jobs: %v", err)
+	}
+	if len(jobList.Items) != 1 {
+		t.Errorf("expected 1 Job when explicit S3 SecretRef present, got %d", len(jobList.Items))
+	}
+}
+
+// TestEtcdMaintenanceReconcile_DefragNoS3Check verifies that defrag operations
+// do not require S3 config and proceed to Job submission regardless.
+func TestEtcdMaintenanceReconcile_DefragNoS3Check(t *testing.T) {
+	scheme := buildDay2Scheme(t)
+	em := &platformv1alpha1.EtcdMaintenance{
+		ObjectMeta: metav1.ObjectMeta{Name: "defrag-1", Namespace: "seam-tenant-test", Generation: 1},
+		Spec: platformv1alpha1.EtcdMaintenanceSpec{
+			ClusterRef: platformv1alpha1.LocalObjectRef{Name: "test-cluster"},
+			Operation:  platformv1alpha1.EtcdMaintenanceOperationDefrag,
+		},
+	}
+	c := fake.NewClientBuilder().WithScheme(scheme).WithObjects(em).WithStatusSubresource(em).Build()
+	r := &controller.EtcdMaintenanceReconciler{Client: c, Scheme: scheme, Recorder: fakeRecorder()}
+
+	result, err := r.Reconcile(context.Background(), ctrl.Request{
+		NamespacedName: types.NamespacedName{Name: "defrag-1", Namespace: "seam-tenant-test"},
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if result.RequeueAfter == 0 {
+		t.Error("expected requeue after job submission for defrag")
+	}
+
+	jobList := &batchv1.JobList{}
+	if err := c.List(context.Background(), jobList); err != nil {
+		t.Fatalf("list jobs: %v", err)
+	}
+	if len(jobList.Items) != 1 {
+		t.Errorf("expected 1 etcd-defrag Job, got %d", len(jobList.Items))
+	}
+}
+
+// TestEtcdMaintenanceReconcile_NodeExclusionsApplied verifies that when the
+// platform-leader Lease exists and its holder pod is found, the submitted Job
+// has NodeAffinity NotIn constraints excluding the leader node and target nodes.
+// conductor-schema.md §13.
+func TestEtcdMaintenanceReconcile_NodeExclusionsApplied(t *testing.T) {
+	scheme := buildDay2Scheme(t)
+
+	holderPodName := "platform-operator-pod"
+	holderIdentity := holderPodName + "_abc-uid-123"
+	leaderNode := "control-plane-1"
+	targetNode := "worker-1"
+
+	em := &platformv1alpha1.EtcdMaintenance{
+		ObjectMeta: metav1.ObjectMeta{Name: "defrag-3", Namespace: "seam-tenant-test", Generation: 1},
+		Spec: platformv1alpha1.EtcdMaintenanceSpec{
+			ClusterRef:  platformv1alpha1.LocalObjectRef{Name: "test-cluster"},
+			Operation:   platformv1alpha1.EtcdMaintenanceOperationDefrag,
+			TargetNodes: []string{targetNode},
+		},
+	}
+	lease := &coordinationv1.Lease{
+		ObjectMeta: metav1.ObjectMeta{Name: "platform-leader", Namespace: "seam-system"},
+		Spec:       coordinationv1.LeaseSpec{HolderIdentity: &holderIdentity},
+	}
+	leaderPod := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{Name: holderPodName, Namespace: "seam-system"},
+		Spec:       corev1.PodSpec{NodeName: leaderNode},
+	}
+
+	c := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithObjects(em, lease, leaderPod).
+		WithStatusSubresource(em).
+		Build()
+	r := &controller.EtcdMaintenanceReconciler{Client: c, Scheme: scheme, Recorder: fakeRecorder()}
+
+	_, err := r.Reconcile(context.Background(), ctrl.Request{
+		NamespacedName: types.NamespacedName{Name: "defrag-3", Namespace: "seam-tenant-test"},
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	jobList := &batchv1.JobList{}
+	if err := c.List(context.Background(), jobList); err != nil {
+		t.Fatalf("list jobs: %v", err)
+	}
+	if len(jobList.Items) != 1 {
+		t.Fatalf("expected 1 Job, got %d", len(jobList.Items))
+	}
+
+	job := jobList.Items[0]
+	affinity := job.Spec.Template.Spec.Affinity
+	if affinity == nil || affinity.NodeAffinity == nil {
+		t.Fatal("expected NodeAffinity to be set on Job pod spec")
+	}
+	required := affinity.NodeAffinity.RequiredDuringSchedulingIgnoredDuringExecution
+	if required == nil || len(required.NodeSelectorTerms) == 0 {
+		t.Fatal("expected RequiredDuringSchedulingIgnoredDuringExecution NodeSelector")
+	}
+	expr := required.NodeSelectorTerms[0].MatchExpressions[0]
+	if expr.Key != "kubernetes.io/hostname" {
+		t.Errorf("key = %s, want kubernetes.io/hostname", expr.Key)
+	}
+	if expr.Operator != corev1.NodeSelectorOpNotIn {
+		t.Errorf("operator = %s, want NotIn", expr.Operator)
+	}
+	wantValues := map[string]bool{leaderNode: true, targetNode: true}
+	for _, v := range expr.Values {
+		delete(wantValues, v)
+	}
+	if len(wantValues) > 0 {
+		t.Errorf("NodeSelectorRequirement missing values: %v (got %v)", wantValues, expr.Values)
+	}
+}
+
+// TestEtcdMaintenanceReconcile_NoLeaseGraceful verifies that when the
+// platform-leader Lease is absent, the reconciler proceeds without node
+// exclusions rather than returning an error. conductor-schema.md §13.
+func TestEtcdMaintenanceReconcile_NoLeaseGraceful(t *testing.T) {
+	scheme := buildDay2Scheme(t)
+	em := &platformv1alpha1.EtcdMaintenance{
+		ObjectMeta: metav1.ObjectMeta{Name: "defrag-2", Namespace: "seam-tenant-test", Generation: 1},
+		Spec: platformv1alpha1.EtcdMaintenanceSpec{
+			ClusterRef: platformv1alpha1.LocalObjectRef{Name: "test-cluster"},
+			Operation:  platformv1alpha1.EtcdMaintenanceOperationDefrag,
+		},
+	}
+	c := fake.NewClientBuilder().WithScheme(scheme).WithObjects(em).WithStatusSubresource(em).Build()
+	r := &controller.EtcdMaintenanceReconciler{Client: c, Scheme: scheme, Recorder: fakeRecorder()}
+
+	result, err := r.Reconcile(context.Background(), ctrl.Request{
+		NamespacedName: types.NamespacedName{Name: "defrag-2", Namespace: "seam-tenant-test"},
+	})
+	if err != nil {
+		t.Fatalf("unexpected error when Lease absent: %v", err)
+	}
+	if result.RequeueAfter == 0 {
+		t.Error("expected requeue after job submission even without Lease")
+	}
+
+	jobList := &batchv1.JobList{}
+	if err := c.List(context.Background(), jobList); err != nil {
+		t.Fatalf("list jobs: %v", err)
+	}
+	if len(jobList.Items) != 1 {
+		t.Errorf("expected 1 Job when Lease absent, got %d", len(jobList.Items))
+	}
+	if jobList.Items[0].Spec.Template.Spec.Affinity != nil {
+		t.Error("expected no Affinity on Job when no node exclusions")
 	}
 }

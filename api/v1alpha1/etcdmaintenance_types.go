@@ -1,6 +1,7 @@
 package v1alpha1
 
 import (
+	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
 	"github.com/ontai-dev/seam-core/pkg/lineage"
@@ -45,6 +46,19 @@ const (
 	// ReasonEtcdPendingApproval is not used for EtcdMaintenance (no approval gate).
 	// ReasonEtcdOperationPending is set before the first Job submission.
 	ReasonEtcdOperationPending = "Pending"
+
+	// EtcdBackupDestinationAbsent indicates no S3 backup destination is configured.
+	// Set when operation=backup and neither spec.etcdBackupS3SecretRef nor the
+	// cluster-wide seam-etcd-backup-config Secret in seam-system is present.
+	// platform-schema.md §10.
+	EtcdBackupDestinationAbsent = "EtcdBackupDestinationAbsent"
+
+	// EtcdBackupLocalFallback indicates PVC-based local backup is in use as a
+	// degraded-mode fallback when S3 is unavailable. platform-schema.md §10.
+	EtcdBackupLocalFallback = "EtcdBackupLocalFallback"
+
+	// ReasonEtcdBackupDestinationAbsent is the reason when no S3 config is found.
+	ReasonEtcdBackupDestinationAbsent = "S3DestinationAbsent"
 )
 
 // S3Ref references an S3 location for backup or restore.
@@ -72,6 +86,13 @@ type EtcdMaintenanceSpec struct {
 	// platform-schema.md §5 EtcdMaintenance.
 	// +kubebuilder:validation:Enum=backup;restore;defrag
 	Operation EtcdMaintenanceOperation `json:"operation"`
+
+	// EtcdBackupS3SecretRef references a Secret containing S3 backup destination
+	// configuration for this operation. Takes precedence over the cluster-wide
+	// seam-etcd-backup-config Secret in seam-system. Required when operation=backup
+	// and no cluster default is configured. platform-schema.md §10.
+	// +optional
+	EtcdBackupS3SecretRef *corev1.SecretReference `json:"etcdBackupS3SecretRef,omitempty"`
 
 	// S3Destination is the S3 location to write the etcd snapshot to.
 	// Required when operation=backup.

@@ -13,9 +13,11 @@ import (
 	"context"
 	"fmt"
 
+	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/tools/record"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -111,8 +113,36 @@ func (r *EtcdMaintenanceReconciler) Reconcile(ctx context.Context, req ctrl.Requ
 	}
 
 	if existingJob == nil {
+		// For backup operations: resolve S3 destination before submitting the Job.
+		// platform-schema.md §10 S3 resolution hierarchy.
+		if em.Spec.Operation == platformv1alpha1.EtcdMaintenanceOperationBackup {
+			if _, _, found, err := resolveEtcdBackupS3Secret(ctx, r.Client, em); err != nil {
+				return ctrl.Result{}, fmt.Errorf("EtcdMaintenanceReconciler: resolve S3 secret: %w", err)
+			} else if !found {
+				platformv1alpha1.SetCondition(
+					&em.Status.Conditions,
+					platformv1alpha1.EtcdBackupDestinationAbsent,
+					metav1.ConditionTrue,
+					platformv1alpha1.ReasonEtcdBackupDestinationAbsent,
+					"No S3 backup destination configured: spec.etcdBackupS3SecretRef is absent and seam-etcd-backup-config Secret is not found in seam-system. Set either to proceed. platform-schema.md §10.",
+					em.Generation,
+				)
+				r.Recorder.Eventf(em, "Warning", "S3DestinationAbsent",
+					"EtcdMaintenance %s/%s: no S3 backup destination configured", em.Namespace, em.Name)
+				return ctrl.Result{}, nil
+			}
+		}
+
+		// Resolve operator leader node and build node exclusions for the Job.
+		// conductor-schema.md §13: SelfOperation=true — exclude maintenance targets + leader.
+		leaderNode, err := resolveOperatorLeaderNode(ctx, r.Client)
+		if err != nil {
+			return ctrl.Result{}, fmt.Errorf("EtcdMaintenanceReconciler: resolve leader node: %w", err)
+		}
+		nodeExclusions := buildNodeExclusions(em.Spec.TargetNodes, leaderNode)
+
 		// No Job yet — submit one.
-		job := jobSpec(jobName, em.Namespace, em.Spec.ClusterRef.Name, capability)
+		job := jobSpecWithExclusions(jobName, em.Namespace, em.Spec.ClusterRef.Name, capability, nodeExclusions)
 		if err := controllerutil.SetControllerReference(em, job, r.Scheme); err != nil {
 			return ctrl.Result{}, fmt.Errorf("EtcdMaintenanceReconciler: set owner reference: %w", err)
 		}
@@ -200,6 +230,45 @@ func etcdCapability(op platformv1alpha1.EtcdMaintenanceOperation) (string, error
 	default:
 		return "", fmt.Errorf("unknown EtcdMaintenanceOperation %q", op)
 	}
+}
+
+// resolveEtcdBackupS3Secret resolves the S3 Secret for an etcd backup operation.
+// Resolution order (platform-schema.md §10):
+//  1. spec.etcdBackupS3SecretRef — per-operation Secret override.
+//  2. seam-etcd-backup-config in seam-system — cluster-wide default.
+//
+// Returns (secretName, secretNamespace, found, error).
+// found=false with error=nil means neither source is configured — the caller
+// should set EtcdBackupDestinationAbsent and skip Job submission.
+func resolveEtcdBackupS3Secret(ctx context.Context, c client.Client, em *platformv1alpha1.EtcdMaintenance) (string, string, bool, error) {
+	if em.Spec.EtcdBackupS3SecretRef != nil {
+		ns := em.Spec.EtcdBackupS3SecretRef.Namespace
+		if ns == "" {
+			ns = "seam-system"
+		}
+		secret := &corev1.Secret{}
+		if err := c.Get(ctx, types.NamespacedName{
+			Name:      em.Spec.EtcdBackupS3SecretRef.Name,
+			Namespace: ns,
+		}, secret); err != nil {
+			if apierrors.IsNotFound(err) {
+				return "", "", false, nil
+			}
+			return "", "", false, fmt.Errorf("get S3 secret %s/%s: %w", ns, em.Spec.EtcdBackupS3SecretRef.Name, err)
+		}
+		return em.Spec.EtcdBackupS3SecretRef.Name, ns, true, nil
+	}
+	// Cluster-wide default.
+	const defaultName = "seam-etcd-backup-config"
+	const defaultNS = "seam-system"
+	secret := &corev1.Secret{}
+	if err := c.Get(ctx, types.NamespacedName{Name: defaultName, Namespace: defaultNS}, secret); err != nil {
+		if apierrors.IsNotFound(err) {
+			return "", "", false, nil
+		}
+		return "", "", false, fmt.Errorf("get default S3 secret %s/%s: %w", defaultNS, defaultName, err)
+	}
+	return defaultName, defaultNS, true, nil
 }
 
 // SetupWithManager registers EtcdMaintenanceReconciler with the manager.

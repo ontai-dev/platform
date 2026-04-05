@@ -89,7 +89,15 @@ func (r *PKIRotationReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 	}
 
 	if existingJob == nil {
-		job := jobSpec(jobName, pkir.Namespace, pkir.Spec.ClusterRef.Name, capabilityPKIRotate)
+		// Resolve operator leader node. PKI rotation targets all nodes but the
+		// Job itself must not run on the leader node. conductor-schema.md §13.
+		leaderNode, err := resolveOperatorLeaderNode(ctx, r.Client)
+		if err != nil {
+			return ctrl.Result{}, fmt.Errorf("PKIRotationReconciler: resolve leader node: %w", err)
+		}
+		nodeExclusions := buildNodeExclusions(nil, leaderNode)
+
+		job := jobSpecWithExclusions(jobName, pkir.Namespace, pkir.Spec.ClusterRef.Name, capabilityPKIRotate, nodeExclusions)
 		if err := controllerutil.SetControllerReference(pkir, job, r.Scheme); err != nil {
 			return ctrl.Result{}, fmt.Errorf("PKIRotationReconciler: set owner reference: %w", err)
 		}
