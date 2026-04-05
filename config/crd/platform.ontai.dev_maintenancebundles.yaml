@@ -4,16 +4,16 @@ kind: CustomResourceDefinition
 metadata:
   annotations:
     controller-gen.kubebuilder.io/version: v0.16.1
-  name: etcdmaintenances.platform.ontai.dev
+  name: maintenancebundles.platform.ontai.dev
 spec:
   group: platform.ontai.dev
   names:
-    kind: EtcdMaintenance
-    listKind: EtcdMaintenanceList
-    plural: etcdmaintenances
+    kind: MaintenanceBundle
+    listKind: MaintenanceBundleList
+    plural: maintenancebundles
     shortNames:
-    - em
-    singular: etcdmaintenance
+    - mb
+    singular: maintenancebundle
   scope: Namespaced
   versions:
   - additionalPrinterColumns:
@@ -33,11 +33,10 @@ spec:
     schema:
       openAPIV3Schema:
         description: |-
-          EtcdMaintenance covers all etcd lifecycle operations for both management and
-          target clusters. CAPI has no etcd concept — this always submits a direct
-          Conductor executor Job regardless of the owning TalosCluster's capi.enabled.
-          Named Conductor capabilities: etcd-backup, etcd-restore, etcd-defrag.
-          platform-schema.md §5.
+          MaintenanceBundle is a pre-compiled scheduling artifact produced by
+          `compiler maintenance`. Carries pre-resolved scheduling context so neither
+          Platform nor Conductor need to perform cluster queries at execution time.
+          conductor-schema.md §9. API group: platform.ontai.dev.
         properties:
           apiVersion:
             description: |-
@@ -57,13 +56,13 @@ spec:
           metadata:
             type: object
           spec:
-            description: EtcdMaintenanceSpec defines the desired state of EtcdMaintenance.
+            description: |-
+              MaintenanceBundleSpec defines the desired state of MaintenanceBundle.
+              All fields are pre-resolved by `compiler maintenance` at compile time.
+              conductor-schema.md §9.
             properties:
               clusterRef:
-                description: |-
-                  ClusterRef references the TalosCluster this operation targets.
-                  The TalosCluster must exist in ont-system (management cluster) or in the
-                  tenant namespace (target cluster).
+                description: ClusterRef references the TalosCluster this bundle targets.
                 properties:
                   name:
                     description: Name is the object name.
@@ -75,23 +74,6 @@ spec:
                 required:
                 - name
                 type: object
-              etcdBackupS3SecretRef:
-                description: |-
-                  EtcdBackupS3SecretRef references a Secret containing S3 backup destination
-                  configuration for this operation. Takes precedence over the cluster-wide
-                  seam-etcd-backup-config Secret in seam-system. Required when operation=backup
-                  and no cluster default is configured. platform-schema.md §10.
-                properties:
-                  name:
-                    description: name is unique within a namespace to reference a
-                      secret resource.
-                    type: string
-                  namespace:
-                    description: namespace defines the space within which the secret
-                      name must be unique.
-                    type: string
-                type: object
-                x-kubernetes-map-type: atomic
               lineage:
                 description: |-
                   Lineage is the sealed causal chain record for this root declaration.
@@ -165,108 +147,66 @@ spec:
                 - rootNamespace
                 - rootUID
                 type: object
-              operation:
-                allOf:
-                - enum:
-                  - backup
-                  - restore
-                  - defrag
-                - enum:
-                  - backup
-                  - restore
-                  - defrag
+              maintenanceTargetNodes:
                 description: |-
-                  Operation declares the etcd lifecycle operation to perform.
-                  Named Conductor capabilities: etcd-backup, etcd-restore, etcd-defrag.
-                  platform-schema.md §5 EtcdMaintenance.
-                type: string
-              s3Destination:
-                description: |-
-                  S3Destination is the S3 location to write the etcd snapshot to.
-                  Required when operation=backup.
-                properties:
-                  bucket:
-                    description: Bucket is the S3 bucket name.
-                    type: string
-                  credentialsSecretRef:
-                    description: |-
-                      CredentialsSecretRef references the Secret containing S3 credentials.
-                      The Secret must be in ont-system.
-                    properties:
-                      name:
-                        description: Name is the Secret name.
-                        type: string
-                      namespace:
-                        description: |-
-                          Namespace is the Secret namespace. When empty, the consuming object's
-                          own namespace is used unless the schema specifies otherwise.
-                        type: string
-                    required:
-                    - name
-                    type: object
-                  key:
-                    description: Key is the S3 object key path.
-                    type: string
-                required:
-                - bucket
-                - credentialsSecretRef
-                - key
-                type: object
-              s3SnapshotPath:
-                description: |-
-                  S3SnapshotPath is the S3 location of the snapshot to restore from.
-                  Required when operation=restore.
-                properties:
-                  bucket:
-                    description: Bucket is the S3 bucket name.
-                    type: string
-                  credentialsSecretRef:
-                    description: |-
-                      CredentialsSecretRef references the Secret containing S3 credentials.
-                      The Secret must be in ont-system.
-                    properties:
-                      name:
-                        description: Name is the Secret name.
-                        type: string
-                      namespace:
-                        description: |-
-                          Namespace is the Secret namespace. When empty, the consuming object's
-                          own namespace is used unless the schema specifies otherwise.
-                        type: string
-                    required:
-                    - name
-                    type: object
-                  key:
-                    description: Key is the S3 object key path.
-                    type: string
-                required:
-                - bucket
-                - credentialsSecretRef
-                - key
-                type: object
-              schedule:
-                description: |-
-                  Schedule is a cron expression for recurring backup operations.
-                  When set with operation=backup, a recurring Job is submitted on schedule.
-                type: string
-              targetNodes:
-                description: |-
-                  TargetNodes is the list of node names to target for restore operations.
-                  When empty for restore, all etcd members are targeted.
+                  MaintenanceTargetNodes is the pre-resolved list of nodes targeted by the
+                  operation. Validated against the live cluster by `compiler maintenance`.
+                  Directly populates RunnerConfig.MaintenanceTargetNodes at execution time.
                 items:
                   type: string
                 type: array
+              operation:
+                allOf:
+                - enum:
+                  - drain
+                  - upgrade
+                  - etcd-backup
+                  - machineconfig-rotation
+                - enum:
+                  - drain
+                  - upgrade
+                  - etcd-backup
+                  - machineconfig-rotation
+                description: |-
+                  Operation declares the maintenance operation type.
+                  Determines which Conductor capability the resulting RunnerConfig targets.
+                  conductor-schema.md §9.
+                type: string
+              operatorLeaderNode:
+                description: |-
+                  OperatorLeaderNode is the node hosting the leader pod of the Platform operator
+                  at compile time, resolved from the platform-leader Lease in seam-system.
+                  Directly populates RunnerConfig.OperatorLeaderNode at execution time.
+                  conductor-schema.md §13.
+                type: string
+              s3ConfigSecretRef:
+                description: |-
+                  S3ConfigSecretRef references the S3 configuration Secret, pre-resolved and
+                  validated to exist by `compiler maintenance`. Follows the platform-schema.md §10
+                  S3 resolution hierarchy. A MaintenanceBundle is never committed without a valid
+                  S3 reference when the operation requires it (etcd-backup).
+                properties:
+                  name:
+                    description: name is unique within a namespace to reference a
+                      secret resource.
+                    type: string
+                  namespace:
+                    description: namespace defines the space within which the secret
+                      name must be unique.
+                    type: string
+                type: object
+                x-kubernetes-map-type: atomic
             required:
             - clusterRef
             - operation
             type: object
           status:
-            description: EtcdMaintenanceStatus defines the observed state of EtcdMaintenance.
+            description: MaintenanceBundleStatus defines the observed state of MaintenanceBundle.
             properties:
               conditions:
                 description: |-
-                  Conditions is the list of status conditions for this EtcdMaintenance.
-                  Condition types: Ready, Running, Degraded, LineageSynced.
+                  Conditions is the list of status conditions for this MaintenanceBundle.
+                  Condition types: Ready, Pending, Degraded, LineageSynced.
                 items:
                   description: Condition contains details for one aspect of the current
                     state of this API Resource.
@@ -325,19 +265,11 @@ spec:
                 x-kubernetes-list-map-keys:
                 - type
                 x-kubernetes-list-type: map
-              jobName:
-                description: JobName is the name of the most recently submitted Conductor
-                  executor Job.
-                type: string
               observedGeneration:
                 description: ObservedGeneration is the generation of the spec last
                   reconciled.
                 format: int64
                 type: integer
-              operationResult:
-                description: OperationResult is the message from the Conductor OperationResult
-                  ConfigMap.
-                type: string
             type: object
         type: object
     served: true
