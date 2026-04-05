@@ -1,18 +1,22 @@
 package v1alpha1
 
-// LineageSynced condition type and reason constants for Seam Infrastructure
-// Provider CRDs. These values are defined by seam-core-schema.md §7 Declaration 5
-// and are reserved platform-wide.
+// Lineage condition type and reason constants re-exported from
+// seam-core/pkg/conditions — the canonical source. seam-core-schema.md §7
+// Declaration 5. SC-INV-002 / Gap 31 WS2.
+//
+// Seam Infrastructure Provider reconcilers reference these via the infrav1alpha1
+// package alias; they continue to compile without modification. New code should
+// prefer importing github.com/ontai-dev/seam-core/pkg/conditions directly.
+
+import "github.com/ontai-dev/seam-core/pkg/conditions"
 
 const (
 	// ConditionTypeLineageSynced is the reserved condition type for lineage
 	// synchronization status on every root declaration CR.
-	// seam-core-schema.md §7 Declaration 5.
-	ConditionTypeLineageSynced = "LineageSynced"
+	// Canonical source: github.com/ontai-dev/seam-core/pkg/conditions.
+	ConditionTypeLineageSynced = conditions.ConditionTypeLineageSynced
 
-	// ReasonLineageControllerAbsent is set when a reconciler initializes the
-	// LineageSynced condition to False. It indicates InfrastructureLineageController
-	// has not yet been deployed and has not processed this root declaration.
-	// seam-core-schema.md §7 Declaration 5.
-	ReasonLineageControllerAbsent = "LineageControllerAbsent"
+	// ReasonLineageControllerAbsent is set when the reconciler initialises
+	// LineageSynced to False. Canonical source: pkg/conditions.
+	ReasonLineageControllerAbsent = conditions.ReasonLineageControllerAbsent
 )
