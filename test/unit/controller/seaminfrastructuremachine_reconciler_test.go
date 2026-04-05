@@ -72,7 +72,7 @@ func buildSIM(name, namespace string) *infrav1alpha1.SeamInfrastructureMachine {
 // TestSIMReconcile_LineageSyncedInitialized verifies the one-time LineageSynced init.
 func TestSIMReconcile_LineageSyncedInitialized(t *testing.T) {
 	scheme := buildSIMScheme(t)
-	sim := buildSIM("cp1", "tenant-ccs-dev")
+	sim := buildSIM("cp1", "seam-tenant-ccs-dev")
 
 	c := fake.NewClientBuilder().
 		WithScheme(scheme).
@@ -87,7 +87,7 @@ func TestSIMReconcile_LineageSyncedInitialized(t *testing.T) {
 	}
 
 	_, err := r.Reconcile(context.Background(), ctrl.Request{
-		NamespacedName: types.NamespacedName{Name: "cp1", Namespace: "tenant-ccs-dev"},
+		NamespacedName: types.NamespacedName{Name: "cp1", Namespace: "seam-tenant-ccs-dev"},
 	})
 	// Will requeue (no owning CAPI Machine), but must not error.
 	if err != nil {
@@ -96,7 +96,7 @@ func TestSIMReconcile_LineageSyncedInitialized(t *testing.T) {
 
 	got := &infrav1alpha1.SeamInfrastructureMachine{}
 	if err := c.Get(context.Background(), types.NamespacedName{
-		Name: "cp1", Namespace: "tenant-ccs-dev",
+		Name: "cp1", Namespace: "seam-tenant-ccs-dev",
 	}, got); err != nil {
 		t.Fatalf("get after reconcile: %v", err)
 	}
@@ -117,7 +117,7 @@ func TestSIMReconcile_LineageSyncedInitialized(t *testing.T) {
 // owning Machine ownerReference is set.
 func TestSIMReconcile_NoCAPIMachine(t *testing.T) {
 	scheme := buildSIMScheme(t)
-	sim := buildSIM("cp1", "tenant-ccs-dev")
+	sim := buildSIM("cp1", "seam-tenant-ccs-dev")
 
 	c := fake.NewClientBuilder().
 		WithScheme(scheme).
@@ -132,7 +132,7 @@ func TestSIMReconcile_NoCAPIMachine(t *testing.T) {
 	}
 
 	result, err := r.Reconcile(context.Background(), ctrl.Request{
-		NamespacedName: types.NamespacedName{Name: "cp1", Namespace: "tenant-ccs-dev"},
+		NamespacedName: types.NamespacedName{Name: "cp1", Namespace: "seam-tenant-ccs-dev"},
 	})
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
@@ -143,7 +143,7 @@ func TestSIMReconcile_NoCAPIMachine(t *testing.T) {
 
 	got := &infrav1alpha1.SeamInfrastructureMachine{}
 	if err := c.Get(context.Background(), types.NamespacedName{
-		Name: "cp1", Namespace: "tenant-ccs-dev",
+		Name: "cp1", Namespace: "seam-tenant-ccs-dev",
 	}, got); err != nil {
 		t.Fatalf("get: %v", err)
 	}
@@ -163,7 +163,7 @@ func TestSIMReconcile_NoCAPIMachine(t *testing.T) {
 // ownerReference is set but the Machine object doesn't exist yet.
 func TestSIMReconcile_MachineOwnerRefButNotFound(t *testing.T) {
 	scheme := buildSIMScheme(t)
-	sim := buildSIM("cp1", "tenant-ccs-dev")
+	sim := buildSIM("cp1", "seam-tenant-ccs-dev")
 	sim.OwnerReferences = []metav1.OwnerReference{
 		{
 			APIVersion: "cluster.x-k8s.io/v1beta1",
@@ -186,7 +186,7 @@ func TestSIMReconcile_MachineOwnerRefButNotFound(t *testing.T) {
 	}
 
 	result, err := r.Reconcile(context.Background(), ctrl.Request{
-		NamespacedName: types.NamespacedName{Name: "cp1", Namespace: "tenant-ccs-dev"},
+		NamespacedName: types.NamespacedName{Name: "cp1", Namespace: "seam-tenant-ccs-dev"},
 	})
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
@@ -200,7 +200,7 @@ func TestSIMReconcile_MachineOwnerRefButNotFound(t *testing.T) {
 // TestSIMReconcile_AlreadyReadyIsIdempotent verifies a ready SIM returns immediately.
 func TestSIMReconcile_AlreadyReadyIsIdempotent(t *testing.T) {
 	scheme := buildSIMScheme(t)
-	sim := buildSIM("cp1", "tenant-ccs-dev")
+	sim := buildSIM("cp1", "seam-tenant-ccs-dev")
 	sim.Status.Ready = true
 	sim.Status.MachineConfigApplied = true
 	sim.Status.ProviderID = "talos://ccs-dev/10.20.0.11"
@@ -220,7 +220,7 @@ func TestSIMReconcile_AlreadyReadyIsIdempotent(t *testing.T) {
 	}
 
 	result, err := r.Reconcile(context.Background(), ctrl.Request{
-		NamespacedName: types.NamespacedName{Name: "cp1", Namespace: "tenant-ccs-dev"},
+		NamespacedName: types.NamespacedName{Name: "cp1", Namespace: "seam-tenant-ccs-dev"},
 	})
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
@@ -239,10 +239,10 @@ func TestExtractClusterName(t *testing.T) {
 		namespace string
 		want      string
 	}{
-		{"tenant-ccs-dev", "ccs-dev"},
-		{"tenant-my-cluster", "my-cluster"},
-		{"tenant-", ""},                // edge case: empty cluster name
-		{"ont-system", "ont-system"},   // non-tenant namespace passes through unchanged
+		{"seam-tenant-ccs-dev", "ccs-dev"},
+		{"seam-tenant-my-cluster", "my-cluster"},
+		{"seam-tenant-", ""},                // edge case: empty cluster name
+		{"ont-system", "ont-system"},        // non-tenant namespace passes through unchanged
 	}
 	for _, tc := range cases {
 		got := controller.ExtractClusterName(tc.namespace)

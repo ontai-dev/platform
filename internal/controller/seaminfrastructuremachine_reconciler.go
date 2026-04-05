@@ -348,9 +348,9 @@ func (r *SeamInfrastructureMachineReconciler) patchCAPIMachineProviderID(
 }
 
 // ExtractClusterName derives the cluster name from the tenant namespace name.
-// Tenant namespaces follow the convention tenant-{cluster-name}. CP-INV-004.
+// Tenant namespaces follow the convention seam-tenant-{cluster-name}. CP-INV-004.
 func ExtractClusterName(namespaceName string) string {
-	return strings.TrimPrefix(namespaceName, "tenant-")
+	return strings.TrimPrefix(namespaceName, "seam-tenant-")
 }
 
 // SetupWithManager registers SeamInfrastructureMachineReconciler with the manager.

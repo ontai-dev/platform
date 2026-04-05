@@ -151,12 +151,12 @@ func (r *TalosClusterReconciler) readOperationResult(ctx context.Context, namesp
 	}
 }
 
-// ensureTenantNamespace creates the tenant-{cluster-name} namespace if it does
-// not exist. Platform is the sole namespace creation authority. CP-INV-004.
+// ensureTenantNamespace creates the seam-tenant-{cluster-name} namespace if it
+// does not exist. Platform is the sole namespace creation authority. CP-INV-004.
 // platform-design.md §7.
 func (r *TalosClusterReconciler) ensureTenantNamespace(ctx context.Context, tc *platformv1alpha1.TalosCluster) error {
 	ns := &corev1.Namespace{}
-	nsName := "tenant-" + tc.Name
+	nsName := "seam-tenant-" + tc.Name
 	if err := r.Client.Get(ctx, types.NamespacedName{Name: nsName}, ns); err != nil {
 		if !apierrors.IsNotFound(err) {
 			return fmt.Errorf("ensureTenantNamespace: get namespace %s: %w", nsName, err)
@@ -182,7 +182,7 @@ func (r *TalosClusterReconciler) ensureTenantNamespace(ctx context.Context, tc *
 // the tenant namespace if it does not exist. Owned by TalosCluster. CP-INV-008.
 // platform-schema.md §4.
 func (r *TalosClusterReconciler) ensureSeamInfrastructureCluster(ctx context.Context, tc *platformv1alpha1.TalosCluster) error {
-	nsName := "tenant-" + tc.Name
+	nsName := "seam-tenant-" + tc.Name
 	sic := &unstructured.Unstructured{}
 	sic.SetGroupVersionKind(schema.GroupVersionKind{
 		Group:   "infrastructure.cluster.x-k8s.io",
@@ -234,7 +234,7 @@ func (r *TalosClusterReconciler) ensureSeamInfrastructureCluster(ctx context.Con
 // ensureCAPICluster creates the CAPI Cluster object in the tenant namespace if
 // it does not exist. Owned by TalosCluster. CP-INV-008.
 func (r *TalosClusterReconciler) ensureCAPICluster(ctx context.Context, tc *platformv1alpha1.TalosCluster) error {
-	nsName := "tenant-" + tc.Name
+	nsName := "seam-tenant-" + tc.Name
 	cluster := &unstructured.Unstructured{}
 	cluster.SetGroupVersionKind(schema.GroupVersionKind{
 		Group:   "cluster.x-k8s.io",
@@ -295,7 +295,7 @@ func (r *TalosClusterReconciler) ensureCAPICluster(ctx context.Context, tc *plat
 // tenant namespace. Every template must include CNI=none and Cilium BPF params.
 // CP-INV-009.
 func (r *TalosClusterReconciler) ensureTalosConfigTemplate(ctx context.Context, tc *platformv1alpha1.TalosCluster) error {
-	nsName := "tenant-" + tc.Name
+	nsName := "seam-tenant-" + tc.Name
 	tmplName := tc.Name + "-config-template"
 	tct := &unstructured.Unstructured{}
 	tct.SetGroupVersionKind(schema.GroupVersionKind{
@@ -361,7 +361,7 @@ func (r *TalosClusterReconciler) ensureTalosConfigTemplate(ctx context.Context, 
 // ensureTalosControlPlane creates the TalosControlPlane (CACPPT) in the tenant
 // namespace if it does not exist.
 func (r *TalosClusterReconciler) ensureTalosControlPlane(ctx context.Context, tc *platformv1alpha1.TalosCluster) error {
-	nsName := "tenant-" + tc.Name
+	nsName := "seam-tenant-" + tc.Name
 	tcpName := tc.Name + "-control-plane"
 	tcp := &unstructured.Unstructured{}
 	tcp.SetGroupVersionKind(schema.GroupVersionKind{
@@ -416,7 +416,7 @@ func (r *TalosClusterReconciler) ensureTalosControlPlane(ctx context.Context, tc
 // ensureWorkerPool creates the MachineDeployment and SeamInfrastructureMachineTemplate
 // for a worker pool if they do not exist. platform-schema.md §2.2.
 func (r *TalosClusterReconciler) ensureWorkerPool(ctx context.Context, tc *platformv1alpha1.TalosCluster, pool platformv1alpha1.CAPIWorkerPool) error {
-	nsName := "tenant-" + tc.Name
+	nsName := "seam-tenant-" + tc.Name
 	mdName := fmt.Sprintf("%s-%s", tc.Name, pool.Name)
 
 	// Ensure SeamInfrastructureMachineTemplate for this pool.
@@ -530,7 +530,7 @@ func (r *TalosClusterReconciler) ensureWorkerPool(ctx context.Context, tc *platf
 // for this TalosCluster. Returns the phase string or an error if the object
 // is not yet visible.
 func (r *TalosClusterReconciler) getCAPIClusterPhase(ctx context.Context, tc *platformv1alpha1.TalosCluster) (string, error) {
-	nsName := "tenant-" + tc.Name
+	nsName := "seam-tenant-" + tc.Name
 	cluster := &unstructured.Unstructured{}
 	cluster.SetGroupVersionKind(schema.GroupVersionKind{
 		Group:   "cluster.x-k8s.io",
@@ -554,7 +554,7 @@ func (r *TalosClusterReconciler) isCiliumPackInstanceReady(ctx context.Context, 
 	// Look up the PackInstance for the Cilium ClusterPack in the tenant namespace.
 	// PackInstance is owned by infra.ontai.dev — we read it as unstructured.
 	// platform-schema.md §9: reads infra.ontai.dev/PackInstance.
-	nsName := "tenant-" + tc.Name
+	nsName := "seam-tenant-" + tc.Name
 	packInstanceList := &unstructured.UnstructuredList{}
 	packInstanceList.SetGroupVersionKind(schema.GroupVersionKind{
 		Group:   "infra.ontai.dev",

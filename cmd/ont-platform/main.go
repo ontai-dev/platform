@@ -53,14 +53,14 @@ func main() {
 	setupLog := ctrl.Log.WithName("setup")
 
 	// CP-INV-007: leader election required. Lease name: platform-leader.
-	// Lease namespace: platform-system.
+	// Lease namespace: seam-system (canonical operator namespace).
 	mgr, err := ctrl.NewManager(ctrl.GetConfigOrDie(), ctrl.Options{
 		Scheme:                  scheme,
 		Metrics:                 metricsserver.Options{BindAddress: metricsAddr},
 		HealthProbeBindAddress:  healthProbeAddr,
 		LeaderElection:          enableLeaderElection,
 		LeaderElectionID:        "platform-leader",
-		LeaderElectionNamespace: "platform-system",
+		LeaderElectionNamespace: "seam-system",
 	})
 	if err != nil {
 		setupLog.Error(err, "unable to start manager")
