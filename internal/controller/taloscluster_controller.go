@@ -296,6 +296,14 @@ func (r *TalosClusterReconciler) reconcileCAPIPath(ctx context.Context, tc *plat
 		// No Cilium pack configured — mark Ready immediately (development mode).
 		logger.Info("no CiliumPackRef configured — skipping Cilium gate (development mode)",
 			"name", tc.Name)
+		// Deploy Conductor agent to the target cluster before marking Ready.
+		// platform-schema.md §12 Conductor Deployment Contract.
+		if err := r.EnsureConductorDeploymentOnTargetCluster(ctx, tc); err != nil {
+			logger.Error(err, "failed to ensure Conductor Deployment on target cluster",
+				"cluster", tc.Name)
+			return ctrl.Result{RequeueAfter: capiPollInterval},
+				fmt.Errorf("reconcileCAPIPath: ensure conductor deployment: %w", err)
+		}
 		r.transitionToReady(tc)
 		return ctrl.Result{}, nil
 	}
@@ -308,9 +316,17 @@ func (r *TalosClusterReconciler) reconcileCAPIPath(ctx context.Context, tc *plat
 		return ctrl.Result{RequeueAfter: capiPollInterval}, nil
 	}
 
-	// Step 10 — Cilium Ready. Cluster fully operational.
+	// Step 10 — Cilium Ready. Deploy Conductor to target cluster, then mark Ready.
+	// Platform deploys Conductor before marking the cluster fully Ready.
+	// platform-schema.md §12 Conductor Deployment Contract.
+	if err := r.EnsureConductorDeploymentOnTargetCluster(ctx, tc); err != nil {
+		logger.Error(err, "failed to ensure Conductor Deployment on target cluster",
+			"cluster", tc.Name)
+		return ctrl.Result{RequeueAfter: capiPollInterval},
+			fmt.Errorf("reconcileCAPIPath: ensure conductor deployment: %w", err)
+	}
 	r.transitionToReady(tc)
-	logger.Info("TalosCluster Ready — CAPI Running, Cilium Ready",
+	logger.Info("TalosCluster Ready — CAPI Running, Cilium Ready, Conductor deployed",
 		"name", tc.Name)
 	return ctrl.Result{}, nil
 }

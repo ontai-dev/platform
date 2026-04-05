@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"time"
 
+	appsv1 "k8s.io/api/apps/v1"
 	batchv1 "k8s.io/api/batch/v1"
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
@@ -12,6 +13,8 @@ import (
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/client-go/kubernetes"
+	"k8s.io/client-go/tools/clientcmd"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 
@@ -575,6 +578,149 @@ func (r *TalosClusterReconciler) isCiliumPackInstanceReady(ctx context.Context, 
 		}
 	}
 	return false, nil
+}
+
+// conductorDeploymentName is the canonical name for the Conductor agent Deployment
+// on any cluster. Matches the name stamped by compiler enable on the management cluster.
+const conductorDeploymentName = "conductor-agent"
+
+// conductorAgentNamespace is the namespace where Conductor runs on every cluster.
+// Locked namespace model: CONTEXT.md §4.
+const conductorAgentNamespace = "ont-system"
+
+// conductorRoleEnvVar is the env var carrying the role stamp. conductor-schema.md §15.
+// The role field is a first-class spec field — it is in the container spec, not
+// in metadata. It is never modified after Deployment creation.
+const conductorRoleEnvVar = "CONDUCTOR_ROLE"
+
+// EnsureConductorDeploymentOnTargetCluster creates the Conductor agent Deployment
+// in ont-system on the target cluster if it does not already exist.
+//
+// Platform is the sole authority for deploying Conductor to tenant clusters.
+// The Deployment is stamped with CONDUCTOR_ROLE=tenant. platform-schema.md §12.
+// conductor-schema.md §15 Role Declaration Contract.
+//
+// Kubeconfig resolution: CAPI generates a Secret named {cluster-name}-kubeconfig
+// in seam-tenant-{cluster-name} after the cluster reaches Running state. Platform
+// reads this Secret to connect to the target cluster.
+//
+// If the kubeconfig Secret is not yet present (CAPI hasn't written it), returns
+// nil and the caller should requeue — this is not a fatal error.
+func (r *TalosClusterReconciler) EnsureConductorDeploymentOnTargetCluster(
+	ctx context.Context,
+	tc *platformv1alpha1.TalosCluster,
+) error {
+	tenantNS := "seam-tenant-" + tc.Name
+	kubeconfigSecretName := tc.Name + "-kubeconfig"
+
+	// Get the CAPI-generated kubeconfig Secret for the target cluster.
+	kubeconfigSecret := &corev1.Secret{}
+	if err := r.Client.Get(ctx, types.NamespacedName{
+		Name:      kubeconfigSecretName,
+		Namespace: tenantNS,
+	}, kubeconfigSecret); err != nil {
+		if apierrors.IsNotFound(err) {
+			// CAPI has not yet generated the kubeconfig — not fatal, requeue.
+			return nil
+		}
+		return fmt.Errorf("ensureConductorDeployment: get kubeconfig secret %s/%s: %w",
+			tenantNS, kubeconfigSecretName, err)
+	}
+
+	kubeconfigBytes, ok := kubeconfigSecret.Data["value"]
+	if !ok || len(kubeconfigBytes) == 0 {
+		// Secret exists but kubeconfig not yet written — not fatal.
+		return nil
+	}
+
+	// Build a remote Kubernetes client for the target cluster.
+	restConfig, err := clientcmd.RESTConfigFromKubeConfig(kubeconfigBytes)
+	if err != nil {
+		return fmt.Errorf("ensureConductorDeployment: parse kubeconfig for %s: %w", tc.Name, err)
+	}
+	remoteK8s, err := kubernetes.NewForConfig(restConfig)
+	if err != nil {
+		return fmt.Errorf("ensureConductorDeployment: build remote client for %s: %w", tc.Name, err)
+	}
+
+	// Check whether the Conductor Deployment already exists.
+	_, err = remoteK8s.AppsV1().Deployments(conductorAgentNamespace).Get(
+		ctx, conductorDeploymentName, metav1.GetOptions{})
+	if err == nil {
+		// Already exists — idempotent.
+		return nil
+	}
+	if !apierrors.IsNotFound(err) {
+		return fmt.Errorf("ensureConductorDeployment: check deployment %s/%s on %s: %w",
+			conductorAgentNamespace, conductorDeploymentName, tc.Name, err)
+	}
+
+	// Deployment does not exist — create it.
+	dep := BuildConductorAgentDeployment(tc.Name)
+	if _, err := remoteK8s.AppsV1().Deployments(conductorAgentNamespace).Create(
+		ctx, dep, metav1.CreateOptions{}); err != nil && !apierrors.IsAlreadyExists(err) {
+		return fmt.Errorf("ensureConductorDeployment: create deployment on %s: %w", tc.Name, err)
+	}
+	return nil
+}
+
+// BuildConductorAgentDeployment builds the Conductor agent Deployment spec for a
+// tenant cluster. The Deployment is stamped with CONDUCTOR_ROLE=tenant as a
+// first-class spec field in the container env. conductor-schema.md §15.
+// platform-schema.md §12.
+func BuildConductorAgentDeployment(clusterName string) *appsv1.Deployment {
+	replicas := int32(1)
+	return &appsv1.Deployment{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      conductorDeploymentName,
+			Namespace: conductorAgentNamespace,
+			Labels: map[string]string{
+				"runner.ontai.dev/component": "conductor",
+				"runner.ontai.dev/cluster":   clusterName,
+			},
+		},
+		Spec: appsv1.DeploymentSpec{
+			Replicas: &replicas,
+			Selector: &metav1.LabelSelector{
+				MatchLabels: map[string]string{
+					"runner.ontai.dev/component": "conductor",
+				},
+			},
+			Template: corev1.PodTemplateSpec{
+				ObjectMeta: metav1.ObjectMeta{
+					Labels: map[string]string{
+						"runner.ontai.dev/component": "conductor",
+						"runner.ontai.dev/cluster":   clusterName,
+					},
+				},
+				Spec: corev1.PodSpec{
+					ServiceAccountName: "conductor",
+					Containers: []corev1.Container{
+						{
+							Name:  "conductor",
+							Image: conductorImage, // Resolved from RunnerConfig.agentImage — placeholder per SC-INV-002.
+							Args:  []string{"agent"},
+							Env: []corev1.EnvVar{
+								{
+									// CONDUCTOR_ROLE is the first-class role stamp on the Deployment.
+									// conductor-schema.md §15: "first-class field on the Conductor
+									// Deployment, not an environment variable or ConfigMap mount" —
+									// the spec field IS the container env within the pod spec.
+									// Never modified after Deployment creation.
+									Name:  conductorRoleEnvVar,
+									Value: "tenant",
+								},
+								{
+									Name:  "CLUSTER_NAME",
+									Value: clusterName,
+								},
+							},
+						},
+					},
+				},
+			},
+		},
+	}
 }
 
 // boolPtr returns a pointer to a bool value.
