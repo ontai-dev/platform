@@ -52,6 +52,19 @@ const (
 
 	// ReasonMaintenanceBundleReconcilerNotImplemented marks the stub reconciler state.
 	ReasonMaintenanceBundleReconcilerNotImplemented = "ReconcilerNotImplemented"
+
+	// ReasonMaintenanceBundleJobSubmitted is set when the Conductor executor Job is submitted.
+	ReasonMaintenanceBundleJobSubmitted = "JobSubmitted"
+
+	// ReasonMaintenanceBundleJobComplete is set when the executor Job completes successfully.
+	ReasonMaintenanceBundleJobComplete = "JobComplete"
+
+	// ReasonMaintenanceBundleJobFailed is set when the executor Job reports failure.
+	ReasonMaintenanceBundleJobFailed = "JobFailed"
+
+	// ReasonMaintenanceBundleCapabilityUnknown is set when the operation type cannot be
+	// mapped to a named Conductor capability. This is a programming error.
+	ReasonMaintenanceBundleCapabilityUnknown = "CapabilityUnknown"
 )
 
 // MaintenanceBundleSpec defines the desired state of MaintenanceBundle.
@@ -99,6 +112,14 @@ type MaintenanceBundleStatus struct {
 	// ObservedGeneration is the generation of the spec last reconciled.
 	// +optional
 	ObservedGeneration int64 `json:"observedGeneration,omitempty"`
+
+	// JobName is the name of the Conductor executor Job submitted for this bundle.
+	// +optional
+	JobName string `json:"jobName,omitempty"`
+
+	// OperationResult carries the result message written by the Conductor executor Job.
+	// +optional
+	OperationResult string `json:"operationResult,omitempty"`
 
 	// Conditions is the list of status conditions for this MaintenanceBundle.
 	// Condition types: Ready, Pending, Degraded, LineageSynced.

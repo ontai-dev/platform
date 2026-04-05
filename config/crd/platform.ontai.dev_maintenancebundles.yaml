@@ -265,11 +265,19 @@ spec:
                 x-kubernetes-list-map-keys:
                 - type
                 x-kubernetes-list-type: map
+              jobName:
+                description: JobName is the name of the Conductor executor Job submitted
+                  for this bundle.
+                type: string
               observedGeneration:
                 description: ObservedGeneration is the generation of the spec last
                   reconciled.
                 format: int64
                 type: integer
+              operationResult:
+                description: OperationResult carries the result message written by
+                  the Conductor executor Job.
+                type: string
             type: object
         type: object
     served: true

@@ -765,3 +765,266 @@ func TestEtcdMaintenanceReconcile_NoLeaseGraceful(t *testing.T) {
 		t.Error("expected no Affinity on Job when no node exclusions")
 	}
 }
+
+// --- MaintenanceBundle tests ---
+
+// TestMaintenanceBundleReconcile_LineageSyncedInitialized verifies that the first
+// reconcile initializes LineageSynced=False/LineageControllerAbsent.
+func TestMaintenanceBundleReconcile_LineageSyncedInitialized(t *testing.T) {
+	scheme := buildDay2Scheme(t)
+	mb := &platformv1alpha1.MaintenanceBundle{
+		ObjectMeta: metav1.ObjectMeta{Name: "test-etcd-backup", Namespace: "seam-system", Generation: 1},
+		Spec: platformv1alpha1.MaintenanceBundleSpec{
+			ClusterRef: platformv1alpha1.LocalObjectRef{Name: "test-cluster"},
+			Operation:  platformv1alpha1.MaintenanceBundleOperationEtcdBackup,
+		},
+	}
+	c := fake.NewClientBuilder().WithScheme(scheme).WithObjects(mb).WithStatusSubresource(mb).Build()
+	r := &controller.MaintenanceBundleReconciler{Client: c, Scheme: scheme, Recorder: fakeRecorder()}
+
+	_, err := r.Reconcile(context.Background(), ctrl.Request{
+		NamespacedName: types.NamespacedName{Name: "test-etcd-backup", Namespace: "seam-system"},
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	got := &platformv1alpha1.MaintenanceBundle{}
+	if err := c.Get(context.Background(), types.NamespacedName{
+		Name: "test-etcd-backup", Namespace: "seam-system",
+	}, got); err != nil {
+		t.Fatalf("get: %v", err)
+	}
+
+	cond := platformv1alpha1.FindCondition(got.Status.Conditions, platformv1alpha1.ConditionTypeLineageSynced)
+	if cond == nil {
+		t.Fatal("LineageSynced condition not set")
+	}
+	if cond.Status != metav1.ConditionFalse {
+		t.Errorf("LineageSynced status = %s, want False", cond.Status)
+	}
+	if cond.Reason != platformv1alpha1.ReasonLineageControllerAbsent {
+		t.Errorf("LineageSynced reason = %s, want %s", cond.Reason, platformv1alpha1.ReasonLineageControllerAbsent)
+	}
+}
+
+// TestMaintenanceBundleReconcile_SubmitsJobWithPreEncodedContext verifies that
+// the reconciler creates a Job using the pre-encoded scheduling context from the
+// bundle spec (no live cluster queries).
+func TestMaintenanceBundleReconcile_SubmitsJobWithPreEncodedContext(t *testing.T) {
+	scheme := buildDay2Scheme(t)
+	mb := &platformv1alpha1.MaintenanceBundle{
+		ObjectMeta: metav1.ObjectMeta{Name: "test-drain", Namespace: "seam-system", Generation: 1},
+		Spec: platformv1alpha1.MaintenanceBundleSpec{
+			ClusterRef:             platformv1alpha1.LocalObjectRef{Name: "test-cluster"},
+			Operation:              platformv1alpha1.MaintenanceBundleOperationDrain,
+			MaintenanceTargetNodes: []string{"worker-1", "worker-2"},
+			OperatorLeaderNode:     "control-plane-1",
+		},
+	}
+	c := fake.NewClientBuilder().WithScheme(scheme).WithObjects(mb).WithStatusSubresource(mb).Build()
+	r := &controller.MaintenanceBundleReconciler{Client: c, Scheme: scheme, Recorder: fakeRecorder()}
+
+	result, err := r.Reconcile(context.Background(), ctrl.Request{
+		NamespacedName: types.NamespacedName{Name: "test-drain", Namespace: "seam-system"},
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if result.RequeueAfter == 0 {
+		t.Error("expected requeue after job submission")
+	}
+
+	// Verify Job was created.
+	jobList := &batchv1.JobList{}
+	if err := c.List(context.Background(), jobList); err != nil {
+		t.Fatalf("list jobs: %v", err)
+	}
+	if len(jobList.Items) != 1 {
+		t.Fatalf("expected 1 Job, got %d", len(jobList.Items))
+	}
+
+	job := jobList.Items[0]
+	// Verify node exclusions applied: worker-1, worker-2, control-plane-1.
+	if job.Spec.Template.Spec.Affinity == nil {
+		t.Fatal("expected Affinity on Job with node exclusions")
+	}
+	terms := job.Spec.Template.Spec.Affinity.NodeAffinity.
+		RequiredDuringSchedulingIgnoredDuringExecution.NodeSelectorTerms
+	if len(terms) != 1 || len(terms[0].MatchExpressions) != 1 {
+		t.Fatal("unexpected NodeSelectorTerms shape")
+	}
+	excluded := terms[0].MatchExpressions[0].Values
+	if len(excluded) != 3 {
+		t.Errorf("expected 3 excluded nodes, got %d: %v", len(excluded), excluded)
+	}
+
+	// Verify Pending condition set with JobSubmitted reason.
+	got := &platformv1alpha1.MaintenanceBundle{}
+	if err := c.Get(context.Background(), types.NamespacedName{
+		Name: "test-drain", Namespace: "seam-system",
+	}, got); err != nil {
+		t.Fatalf("get: %v", err)
+	}
+	cond := platformv1alpha1.FindCondition(got.Status.Conditions, platformv1alpha1.ConditionTypeMaintenanceBundlePending)
+	if cond == nil || cond.Status != metav1.ConditionTrue {
+		t.Error("expected Pending=True after job submission")
+	}
+	if cond.Reason != platformv1alpha1.ReasonMaintenanceBundleJobSubmitted {
+		t.Errorf("Pending reason = %s, want JobSubmitted", cond.Reason)
+	}
+}
+
+// TestMaintenanceBundleReconcile_JobSucceeds verifies that the reconciler transitions
+// to Ready=True when the OperationResult ConfigMap reports success.
+func TestMaintenanceBundleReconcile_JobSucceeds(t *testing.T) {
+	scheme := buildDay2Scheme(t)
+	mb := &platformv1alpha1.MaintenanceBundle{
+		ObjectMeta: metav1.ObjectMeta{Name: "test-etcd-backup", Namespace: "seam-system", Generation: 1},
+		Spec: platformv1alpha1.MaintenanceBundleSpec{
+			ClusterRef: platformv1alpha1.LocalObjectRef{Name: "test-cluster"},
+			Operation:  platformv1alpha1.MaintenanceBundleOperationEtcdBackup,
+		},
+	}
+	// Pre-existing Job and success result ConfigMap.
+	existingJob := &batchv1.Job{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "test-etcd-backup-etcd-backup",
+			Namespace: "seam-system",
+		},
+	}
+	resultCM := &corev1.ConfigMap{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "test-etcd-backup-etcd-backup-result",
+			Namespace: "seam-system",
+		},
+		Data: map[string]string{"status": "success", "message": "backup completed"},
+	}
+	c := fake.NewClientBuilder().WithScheme(scheme).
+		WithObjects(mb, existingJob, resultCM).WithStatusSubresource(mb).Build()
+	r := &controller.MaintenanceBundleReconciler{Client: c, Scheme: scheme, Recorder: fakeRecorder()}
+
+	_, err := r.Reconcile(context.Background(), ctrl.Request{
+		NamespacedName: types.NamespacedName{Name: "test-etcd-backup", Namespace: "seam-system"},
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	got := &platformv1alpha1.MaintenanceBundle{}
+	if err := c.Get(context.Background(), types.NamespacedName{
+		Name: "test-etcd-backup", Namespace: "seam-system",
+	}, got); err != nil {
+		t.Fatalf("get: %v", err)
+	}
+
+	readyCond := platformv1alpha1.FindCondition(got.Status.Conditions, platformv1alpha1.ConditionTypeMaintenanceBundleReady)
+	if readyCond == nil || readyCond.Status != metav1.ConditionTrue {
+		t.Error("expected Ready=True after job success")
+	}
+	if readyCond.Reason != platformv1alpha1.ReasonMaintenanceBundleJobComplete {
+		t.Errorf("Ready reason = %s, want JobComplete", readyCond.Reason)
+	}
+	if got.Status.OperationResult != "backup completed" {
+		t.Errorf("OperationResult = %q, want %q", got.Status.OperationResult, "backup completed")
+	}
+}
+
+// TestMaintenanceBundleReconcile_JobFails verifies that the reconciler transitions
+// to Degraded=True when the OperationResult ConfigMap reports failure.
+func TestMaintenanceBundleReconcile_JobFails(t *testing.T) {
+	scheme := buildDay2Scheme(t)
+	mb := &platformv1alpha1.MaintenanceBundle{
+		ObjectMeta: metav1.ObjectMeta{Name: "test-etcd-backup", Namespace: "seam-system", Generation: 1},
+		Spec: platformv1alpha1.MaintenanceBundleSpec{
+			ClusterRef: platformv1alpha1.LocalObjectRef{Name: "test-cluster"},
+			Operation:  platformv1alpha1.MaintenanceBundleOperationEtcdBackup,
+		},
+	}
+	existingJob := &batchv1.Job{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "test-etcd-backup-etcd-backup",
+			Namespace: "seam-system",
+		},
+	}
+	resultCM := &corev1.ConfigMap{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "test-etcd-backup-etcd-backup-result",
+			Namespace: "seam-system",
+		},
+		Data: map[string]string{"status": "failed", "message": "S3 unreachable"},
+	}
+	c := fake.NewClientBuilder().WithScheme(scheme).
+		WithObjects(mb, existingJob, resultCM).WithStatusSubresource(mb).Build()
+	r := &controller.MaintenanceBundleReconciler{Client: c, Scheme: scheme, Recorder: fakeRecorder()}
+
+	_, err := r.Reconcile(context.Background(), ctrl.Request{
+		NamespacedName: types.NamespacedName{Name: "test-etcd-backup", Namespace: "seam-system"},
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	got := &platformv1alpha1.MaintenanceBundle{}
+	if err := c.Get(context.Background(), types.NamespacedName{
+		Name: "test-etcd-backup", Namespace: "seam-system",
+	}, got); err != nil {
+		t.Fatalf("get: %v", err)
+	}
+
+	degradedCond := platformv1alpha1.FindCondition(got.Status.Conditions, platformv1alpha1.ConditionTypeMaintenanceBundleDegraded)
+	if degradedCond == nil || degradedCond.Status != metav1.ConditionTrue {
+		t.Error("expected Degraded=True after job failure")
+	}
+	if degradedCond.Reason != platformv1alpha1.ReasonMaintenanceBundleJobFailed {
+		t.Errorf("Degraded reason = %s, want JobFailed", degradedCond.Reason)
+	}
+	if got.Status.OperationResult != "S3 unreachable" {
+		t.Errorf("OperationResult = %q, want %q", got.Status.OperationResult, "S3 unreachable")
+	}
+}
+
+// TestMaintenanceBundleReconcile_IdempotentAfterSuccess verifies that a second
+// reconcile on a Ready=True bundle is a no-op.
+func TestMaintenanceBundleReconcile_IdempotentAfterSuccess(t *testing.T) {
+	scheme := buildDay2Scheme(t)
+	mb := &platformv1alpha1.MaintenanceBundle{
+		ObjectMeta: metav1.ObjectMeta{Name: "test-done", Namespace: "seam-system", Generation: 1},
+		Spec: platformv1alpha1.MaintenanceBundleSpec{
+			ClusterRef: platformv1alpha1.LocalObjectRef{Name: "test-cluster"},
+			Operation:  platformv1alpha1.MaintenanceBundleOperationUpgrade,
+		},
+		Status: platformv1alpha1.MaintenanceBundleStatus{
+			Conditions: []metav1.Condition{
+				{
+					Type:               platformv1alpha1.ConditionTypeMaintenanceBundleReady,
+					Status:             metav1.ConditionTrue,
+					Reason:             platformv1alpha1.ReasonMaintenanceBundleJobComplete,
+					Message:            "complete",
+					LastTransitionTime: metav1.Now(),
+				},
+			},
+		},
+	}
+	c := fake.NewClientBuilder().WithScheme(scheme).WithObjects(mb).WithStatusSubresource(mb).Build()
+	r := &controller.MaintenanceBundleReconciler{Client: c, Scheme: scheme, Recorder: fakeRecorder()}
+
+	result, err := r.Reconcile(context.Background(), ctrl.Request{
+		NamespacedName: types.NamespacedName{Name: "test-done", Namespace: "seam-system"},
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if result.RequeueAfter != 0 {
+		t.Errorf("expected no requeue on completed bundle, got RequeueAfter=%v", result.RequeueAfter)
+	}
+
+	// No Job should have been created.
+	jobList := &batchv1.JobList{}
+	if err := c.List(context.Background(), jobList); err != nil {
+		t.Fatalf("list jobs: %v", err)
+	}
+	if len(jobList.Items) != 0 {
+		t.Errorf("expected no Jobs created on idempotent reconcile, got %d", len(jobList.Items))
+	}
+}
