@@ -1,14 +1,18 @@
 package controller
 
-// NodeMaintenanceReconciler reconciles NodeMaintenance CRs. It submits a direct
-// Conductor executor Job for the requested node-level operation regardless of the
-// owning TalosCluster's capi.enabled value — CAPI has no node-patch equivalent.
-// Named Conductor capabilities: node-patch, hardening-apply, credential-rotate.
-// platform-schema.md §5 NodeMaintenance. platform-design.md §6.
+// NodeMaintenanceReconciler reconciles NodeMaintenance CRs. It emits a
+// RunnerConfig CR with a four-step execution sequence:
 //
-// CP-INV-001: No talos goclient here. Node operations use Conductor executor Jobs.
-// CP-INV-010: No Kueue. Jobs are submitted directly.
-// INV-018: backoffLimit=0. Gate failures are permanent.
+//	cordon → drain → {operation} → uncordon
+//
+// Named Conductor capabilities: node-cordon, node-drain, node-patch,
+// hardening-apply, credential-rotate, node-uncordon.
+// platform-schema.md §5 NodeMaintenance. platform-design.md §6.
+// conductor-schema.md §17 RunnerConfig Execution Model.
+//
+// CP-INV-001: No talos goclient here. Node operations use Conductor executor.
+// CP-INV-010: No Kueue. RunnerConfig submitted directly.
+// INV-018: cordon and drain halt the sequence on failure (HaltOnFailure=true).
 
 import (
 	"context"
@@ -27,10 +31,13 @@ import (
 )
 
 // node maintenance Conductor capability names per conductor-schema.md.
+// capabilityNodeDrain is declared in maintenancebundle_reconciler.go (same package).
 const (
-	capabilityNodePatch         = "node-patch"
-	capabilityHardeningApply    = "hardening-apply"
-	capabilityCredentialRotate  = "credential-rotate"
+	capabilityNodeCordon       = "node-cordon"
+	capabilityNodeUncordon     = "node-uncordon"
+	capabilityNodePatch        = "node-patch"
+	capabilityHardeningApply   = "hardening-apply"
+	capabilityCredentialRotate = "credential-rotate"
 )
 
 // NodeMaintenanceReconciler reconciles NodeMaintenance objects.
@@ -44,8 +51,7 @@ type NodeMaintenanceReconciler struct {
 // +kubebuilder:rbac:groups=platform.ontai.dev,resources=nodemaintenances/status,verbs=get;update;patch
 // +kubebuilder:rbac:groups=platform.ontai.dev,resources=nodemaintenances/finalizers,verbs=update
 // +kubebuilder:rbac:groups="",resources=events,verbs=create;patch
-// +kubebuilder:rbac:groups=batch,resources=jobs,verbs=get;list;watch;create;update;patch;delete
-// +kubebuilder:rbac:groups="",resources=configmaps,verbs=get;list;watch
+// +kubebuilder:rbac:groups=runner.ontai.dev,resources=runnerconfigs,verbs=get;list;watch;create;update;patch;delete
 
 func (r *NodeMaintenanceReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
 	logger := log.FromContext(ctx)
@@ -88,7 +94,7 @@ func (r *NodeMaintenanceReconciler) Reconcile(ctx context.Context, req ctrl.Requ
 		return ctrl.Result{}, nil
 	}
 
-	capability, err := nodeMaintenanceCapability(nm.Spec.Operation)
+	operationCapability, err := nodeMaintenanceCapability(nm.Spec.Operation)
 	if err != nil {
 		platformv1alpha1.SetCondition(
 			&nm.Status.Conditions,
@@ -101,75 +107,106 @@ func (r *NodeMaintenanceReconciler) Reconcile(ctx context.Context, req ctrl.Requ
 		return ctrl.Result{}, nil
 	}
 
-	jobName := operationalJobName(nm.Name, capability)
+	rcName := operationalRunnerConfigName(nm.Name)
 
-	existingJob, err := getOperationalJob(ctx, r.Client, nm.Namespace, jobName)
+	existingRC, err := getOperationalRunnerConfig(ctx, r.Client, nm.Namespace, rcName)
 	if err != nil {
-		return ctrl.Result{}, fmt.Errorf("NodeMaintenanceReconciler: check job: %w", err)
+		return ctrl.Result{}, fmt.Errorf("NodeMaintenanceReconciler: check RunnerConfig: %w", err)
 	}
 
-	if existingJob == nil {
+	if existingRC == nil {
 		// Resolve operator leader node and build node exclusions. conductor-schema.md §13.
-		leaderNode, err := resolveOperatorLeaderNode(ctx, r.Client)
-		if err != nil {
-			return ctrl.Result{}, fmt.Errorf("NodeMaintenanceReconciler: resolve leader node: %w", err)
+		leaderNode, lErr := resolveOperatorLeaderNode(ctx, r.Client)
+		if lErr != nil {
+			return ctrl.Result{}, fmt.Errorf("NodeMaintenanceReconciler: resolve leader node: %w", lErr)
 		}
-		nodeExclusions := buildNodeExclusions(nm.Spec.TargetNodes, leaderNode)
+		exclusionNodes := buildNodeExclusions(nm.Spec.TargetNodes, leaderNode)
 
-		job := jobSpecWithExclusions(jobName, nm.Namespace, nm.Spec.ClusterRef.Name, capability, nodeExclusions)
-		if err := controllerutil.SetControllerReference(nm, job, r.Scheme); err != nil {
+		// Four-step sequence: cordon → drain → {operation} → uncordon.
+		// cordon and drain halt the sequence on failure to prevent operating
+		// on a node that was not safely drained. conductor-schema.md §17.
+		steps := []OperationalStep{
+			{
+				Name:          "cordon",
+				Capability:    capabilityNodeCordon,
+				HaltOnFailure: true,
+			},
+			{
+				Name:          "drain",
+				Capability:    capabilityNodeDrain,
+				DependsOn:     "cordon",
+				HaltOnFailure: true,
+			},
+			{
+				Name:          "operate",
+				Capability:    operationCapability,
+				DependsOn:     "drain",
+				HaltOnFailure: false,
+			},
+			{
+				Name:          "uncordon",
+				Capability:    capabilityNodeUncordon,
+				DependsOn:     "operate",
+				HaltOnFailure: false,
+			},
+		}
+
+		rc := buildOperationalRunnerConfig(rcName, nm.Namespace, nm.Spec.ClusterRef.Name,
+			exclusionNodes, leaderNode, steps)
+		if err := controllerutil.SetControllerReference(nm, rc, r.Scheme); err != nil {
 			return ctrl.Result{}, fmt.Errorf("NodeMaintenanceReconciler: set owner reference: %w", err)
 		}
-		if err := r.Client.Create(ctx, job); err != nil {
-			return ctrl.Result{}, fmt.Errorf("NodeMaintenanceReconciler: create job: %w", err)
+		if err := r.Client.Create(ctx, rc); err != nil {
+			return ctrl.Result{}, fmt.Errorf("NodeMaintenanceReconciler: create RunnerConfig: %w", err)
 		}
-		nm.Status.JobName = jobName
+		nm.Status.JobName = rcName
 		platformv1alpha1.SetCondition(
 			&nm.Status.Conditions,
 			platformv1alpha1.ConditionTypeNodeMaintenanceReady,
 			metav1.ConditionFalse,
 			platformv1alpha1.ReasonNodeJobSubmitted,
-			fmt.Sprintf("Conductor executor Job %s submitted for %s.", jobName, capability),
+			fmt.Sprintf("RunnerConfig %s submitted (cordon→drain→%s→uncordon).", rcName, operationCapability),
 			nm.Generation,
 		)
-		r.Recorder.Eventf(nm, "Normal", "JobSubmitted",
-			"Submitted Conductor executor Job %s for %s", jobName, capability)
-		logger.Info("submitted Conductor executor Job",
-			"name", nm.Name, "jobName", jobName, "capability", capability)
+		r.Recorder.Eventf(nm, "Normal", "RunnerConfigSubmitted",
+			"Submitted RunnerConfig %s for %s (4-step sequence)", rcName, operationCapability)
+		logger.Info("submitted NodeMaintenance RunnerConfig",
+			"name", nm.Name, "rcName", rcName, "capability", operationCapability)
 		return ctrl.Result{RequeueAfter: operationalJobPollInterval}, nil
 	}
 
-	complete, failed, result := readOperationalResult(ctx, r.Client, nm.Namespace, jobName)
+	// RunnerConfig exists — check terminal condition.
+	complete, failed, failedStep := readRunnerConfigTerminalCondition(existingRC)
 	if failed {
-		nm.Status.OperationResult = result
+		nm.Status.OperationResult = fmt.Sprintf("RunnerConfig failed at step %q.", failedStep)
 		platformv1alpha1.SetCondition(
 			&nm.Status.Conditions,
 			platformv1alpha1.ConditionTypeNodeMaintenanceDegraded,
 			metav1.ConditionTrue,
 			platformv1alpha1.ReasonNodeJobFailed,
-			fmt.Sprintf("Conductor executor Job %s failed: %s", jobName, result),
+			fmt.Sprintf("RunnerConfig %s failed at step %q.", rcName, failedStep),
 			nm.Generation,
 		)
-		r.Recorder.Eventf(nm, "Warning", "JobFailed",
-			"Conductor executor Job %s failed: %s", jobName, result)
+		r.Recorder.Eventf(nm, "Warning", "RunnerConfigFailed",
+			"RunnerConfig %s failed at step %q", rcName, failedStep)
 		return ctrl.Result{}, nil
 	}
 	if !complete {
 		return ctrl.Result{RequeueAfter: operationalJobPollInterval}, nil
 	}
 
-	nm.Status.OperationResult = result
+	nm.Status.OperationResult = "RunnerConfig completed successfully."
 	platformv1alpha1.SetCondition(
 		&nm.Status.Conditions,
 		platformv1alpha1.ConditionTypeNodeMaintenanceReady,
 		metav1.ConditionTrue,
 		platformv1alpha1.ReasonNodeJobComplete,
-		fmt.Sprintf("Conductor executor Job %s completed successfully.", jobName),
+		fmt.Sprintf("RunnerConfig %s completed successfully.", rcName),
 		nm.Generation,
 	)
-	r.Recorder.Eventf(nm, "Normal", "JobComplete",
-		"Conductor executor Job %s completed successfully", jobName)
-	logger.Info("NodeMaintenance complete", "name", nm.Name, "capability", capability)
+	r.Recorder.Eventf(nm, "Normal", "RunnerConfigComplete",
+		"RunnerConfig %s completed successfully", rcName)
+	logger.Info("NodeMaintenance complete", "name", nm.Name, "capability", operationCapability)
 	return ctrl.Result{}, nil
 }
 

@@ -28,6 +28,10 @@ func init() {
 	utilruntime.Must(clientgoscheme.AddToScheme(scheme))
 	utilruntime.Must(platformv1alpha1.AddToScheme(scheme))
 	utilruntime.Must(infrav1alpha1.AddToScheme(scheme))
+	// Register the local OperationalRunnerConfig type so the manager client can
+	// create and read RunnerConfig CRs emitted by day-2 reconcilers.
+	// conductor-schema.md §17.
+	utilruntime.Must(controller.AddOperationalRunnerConfigToScheme(scheme))
 }
 
 func main() {

@@ -2,8 +2,8 @@ package controller
 
 // ClusterResetReconciler reconciles ClusterReset CRs. It enforces the INV-007
 // human approval gate, then deletes the CAPI Cluster object (for CAPI-managed
-// clusters), waits for all Machine objects to reach Deleted phase, and submits
-// the cluster-reset Conductor executor Job.
+// clusters), waits for all Machine objects to reach Deleted phase, and emits
+// a RunnerConfig CR with a single cluster-reset step.
 //
 // HUMAN GATE — CP-INV-006, INV-007:
 // The ontai.dev/reset-approved=true annotation must be present before any
@@ -14,17 +14,17 @@ package controller
 //  1. Verify approval annotation.
 //  2. Delete CAPI Cluster object in tenant namespace.
 //  3. Wait for all CAPI Machine objects to reach Deleted phase.
-//  4. Submit cluster-reset Conductor executor Job.
-//  5. Wait for Job completion.
+//  4. Submit cluster-reset RunnerConfig.
+//  5. Wait for RunnerConfig terminal condition.
 //  6. Delete tenant namespace.
 //
 // For management cluster (capi.enabled=false):
 //  1. Verify approval annotation.
-//  2. Submit cluster-reset Conductor executor Job directly.
-//  3. Wait for Job completion.
+//  2. Submit cluster-reset RunnerConfig directly.
+//  3. Wait for RunnerConfig terminal condition.
 //
 // Named Conductor capability: cluster-reset. platform-schema.md §5.
-// platform-design.md §6.
+// platform-design.md §6. conductor-schema.md §17.
 
 import (
 	"context"
@@ -62,8 +62,7 @@ type ClusterResetReconciler struct {
 // +kubebuilder:rbac:groups=cluster.x-k8s.io,resources=machines,verbs=get;list;watch
 // +kubebuilder:rbac:groups="",resources=namespaces,verbs=get;list;watch;delete
 // +kubebuilder:rbac:groups="",resources=events,verbs=create;patch
-// +kubebuilder:rbac:groups=batch,resources=jobs,verbs=get;list;watch;create;update;patch;delete
-// +kubebuilder:rbac:groups="",resources=configmaps,verbs=get;list;watch
+// +kubebuilder:rbac:groups=runner.ontai.dev,resources=runnerconfigs,verbs=get;list;watch;create;update;patch;delete
 
 func (r *ClusterResetReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
 	logger := log.FromContext(ctx)
@@ -150,7 +149,7 @@ func (r *ClusterResetReconciler) Reconcile(ctx context.Context, req ctrl.Request
 }
 
 // reconcileCAPIReset handles the CAPI-managed cluster reset sequence:
-// delete CAPI Cluster → wait for all Machines deleted → submit reset Job.
+// delete CAPI Cluster → wait for all Machines deleted → submit reset RunnerConfig.
 func (r *ClusterResetReconciler) reconcileCAPIReset(ctx context.Context, crst *platformv1alpha1.ClusterReset) (ctrl.Result, error) {
 	logger := log.FromContext(ctx)
 	tenantNS := "seam-tenant-" + crst.Spec.ClusterRef.Name
@@ -212,94 +211,104 @@ func (r *ClusterResetReconciler) reconcileCAPIReset(ctx context.Context, crst *p
 		return ctrl.Result{RequeueAfter: operationalJobPollInterval}, nil
 	}
 
-	// Step 3 — All Machines gone. Submit the cluster-reset Job.
+	// Step 3 — All Machines gone. Submit the cluster-reset RunnerConfig.
 	platformv1alpha1.SetCondition(
 		&crst.Status.Conditions,
 		platformv1alpha1.ConditionTypeResetPendingApproval,
 		metav1.ConditionFalse,
 		platformv1alpha1.ReasonCAPIClusterDrained,
-		"All CAPI Machine objects deleted. Submitting cluster-reset Job.",
+		"All CAPI Machine objects deleted. Submitting cluster-reset RunnerConfig.",
 		crst.Generation,
 	)
-	return r.submitAndWatchResetJob(ctx, crst, tenantNS)
+	return r.submitAndWatchResetRC(ctx, crst, tenantNS)
 }
 
 // reconcileDirectReset handles the management cluster (capi.enabled=false) reset:
-// submit reset Job directly.
+// submit reset RunnerConfig directly.
 func (r *ClusterResetReconciler) reconcileDirectReset(ctx context.Context, crst *platformv1alpha1.ClusterReset) (ctrl.Result, error) {
-	return r.submitAndWatchResetJob(ctx, crst, crst.Namespace)
+	return r.submitAndWatchResetRC(ctx, crst, crst.Namespace)
 }
 
-// submitAndWatchResetJob submits the cluster-reset Conductor executor Job and
-// watches for its completion.
-func (r *ClusterResetReconciler) submitAndWatchResetJob(ctx context.Context, crst *platformv1alpha1.ClusterReset, jobNamespace string) (ctrl.Result, error) {
+// submitAndWatchResetRC submits the cluster-reset RunnerConfig CR and watches
+// for its terminal condition. conductor-schema.md §17.
+func (r *ClusterResetReconciler) submitAndWatchResetRC(ctx context.Context, crst *platformv1alpha1.ClusterReset, rcNamespace string) (ctrl.Result, error) {
 	logger := log.FromContext(ctx)
-	jobName := operationalJobName(crst.Name, capabilityClusterReset)
+	rcName := operationalRunnerConfigName(crst.Name)
 
-	existingJob, err := getOperationalJob(ctx, r.Client, jobNamespace, jobName)
+	existingRC, err := getOperationalRunnerConfig(ctx, r.Client, rcNamespace, rcName)
 	if err != nil {
-		return ctrl.Result{}, fmt.Errorf("ClusterResetReconciler: check job: %w", err)
+		return ctrl.Result{}, fmt.Errorf("ClusterResetReconciler: check RunnerConfig: %w", err)
 	}
 
-	if existingJob == nil {
-		// Resolve operator leader node. The reset Job must not run on the leader.
+	if existingRC == nil {
+		// Resolve operator leader node. The reset executor Job must not run on the leader.
 		// conductor-schema.md §13.
-		leaderNode, err := resolveOperatorLeaderNode(ctx, r.Client)
-		if err != nil {
-			return ctrl.Result{}, fmt.Errorf("ClusterResetReconciler: resolve leader node: %w", err)
+		leaderNode, lErr := resolveOperatorLeaderNode(ctx, r.Client)
+		if lErr != nil {
+			return ctrl.Result{}, fmt.Errorf("ClusterResetReconciler: resolve leader node: %w", lErr)
 		}
-		nodeExclusions := buildNodeExclusions(nil, leaderNode)
+		exclusionNodes := buildNodeExclusions(nil, leaderNode)
 
-		job := jobSpecWithExclusions(jobName, jobNamespace, crst.Spec.ClusterRef.Name, capabilityClusterReset, nodeExclusions)
-		if err := controllerutil.SetControllerReference(crst, job, r.Scheme); err != nil {
+		steps := []OperationalStep{
+			{
+				Name:          "reset",
+				Capability:    capabilityClusterReset,
+				HaltOnFailure: true,
+			},
+		}
+
+		rc := buildOperationalRunnerConfig(rcName, rcNamespace, crst.Spec.ClusterRef.Name,
+			exclusionNodes, leaderNode, steps)
+		if err := controllerutil.SetControllerReference(crst, rc, r.Scheme); err != nil {
 			return ctrl.Result{}, fmt.Errorf("ClusterResetReconciler: set owner reference: %w", err)
 		}
-		if err := r.Client.Create(ctx, job); err != nil {
-			return ctrl.Result{}, fmt.Errorf("ClusterResetReconciler: create job: %w", err)
+		if err := r.Client.Create(ctx, rc); err != nil {
+			return ctrl.Result{}, fmt.Errorf("ClusterResetReconciler: create RunnerConfig: %w", err)
 		}
-		crst.Status.JobName = jobName
+		crst.Status.JobName = rcName
 		platformv1alpha1.SetCondition(
 			&crst.Status.Conditions,
 			platformv1alpha1.ConditionTypeResetReady,
 			metav1.ConditionFalse,
 			platformv1alpha1.ReasonResetJobSubmitted,
-			fmt.Sprintf("Conductor executor Job %s submitted.", jobName),
+			fmt.Sprintf("RunnerConfig %s submitted for cluster-reset.", rcName),
 			crst.Generation,
 		)
-		r.Recorder.Eventf(crst, "Normal", "JobSubmitted",
-			"Submitted Conductor executor Job %s for cluster-reset", jobName)
-		logger.Info("submitted cluster-reset Conductor executor Job",
-			"name", crst.Name, "jobName", jobName)
+		r.Recorder.Eventf(crst, "Normal", "RunnerConfigSubmitted",
+			"Submitted RunnerConfig %s for cluster-reset", rcName)
+		logger.Info("submitted cluster-reset RunnerConfig",
+			"name", crst.Name, "rcName", rcName)
 		return ctrl.Result{RequeueAfter: operationalJobPollInterval}, nil
 	}
 
-	complete, failed, result := readOperationalResult(ctx, r.Client, jobNamespace, jobName)
+	// RunnerConfig exists — check terminal condition.
+	complete, failed, failedStep := readRunnerConfigTerminalCondition(existingRC)
 	if failed {
-		crst.Status.OperationResult = result
+		crst.Status.OperationResult = fmt.Sprintf("RunnerConfig failed at step %q.", failedStep)
 		platformv1alpha1.SetCondition(
 			&crst.Status.Conditions,
 			platformv1alpha1.ConditionTypeResetDegraded,
 			metav1.ConditionTrue,
 			platformv1alpha1.ReasonResetJobFailed,
-			fmt.Sprintf("Conductor executor Job %s failed: %s", jobName, result),
+			fmt.Sprintf("RunnerConfig %s failed at step %q.", rcName, failedStep),
 			crst.Generation,
 		)
-		r.Recorder.Eventf(crst, "Warning", "JobFailed",
-			"Conductor executor Job %s failed: %s", jobName, result)
+		r.Recorder.Eventf(crst, "Warning", "RunnerConfigFailed",
+			"RunnerConfig %s failed at step %q", rcName, failedStep)
 		return ctrl.Result{}, nil
 	}
 	if !complete {
 		return ctrl.Result{RequeueAfter: operationalJobPollInterval}, nil
 	}
 
-	// Job complete. Mark reset complete.
-	crst.Status.OperationResult = result
+	// RunnerConfig complete. Mark reset complete.
+	crst.Status.OperationResult = "RunnerConfig completed successfully."
 	platformv1alpha1.SetCondition(
 		&crst.Status.Conditions,
 		platformv1alpha1.ConditionTypeResetReady,
 		metav1.ConditionTrue,
 		platformv1alpha1.ReasonResetComplete,
-		fmt.Sprintf("Cluster reset complete. Job %s succeeded.", jobName),
+		fmt.Sprintf("Cluster reset complete. RunnerConfig %s succeeded.", rcName),
 		crst.Generation,
 	)
 	r.Recorder.Eventf(crst, "Normal", "ResetComplete",

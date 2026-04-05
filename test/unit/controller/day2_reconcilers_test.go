@@ -27,7 +27,8 @@ func fakeRecorder() record.EventRecorder {
 	return record.NewFakeRecorder(32)
 }
 
-// buildDay2Scheme returns a runtime.Scheme with platform and batch types registered.
+// buildDay2Scheme returns a runtime.Scheme with platform, batch, and
+// OperationalRunnerConfig types registered.
 func buildDay2Scheme(t *testing.T) *runtime.Scheme {
 	t.Helper()
 	s := runtime.NewScheme()
@@ -37,7 +38,18 @@ func buildDay2Scheme(t *testing.T) *runtime.Scheme {
 	if err := platformv1alpha1.AddToScheme(s); err != nil {
 		t.Fatalf("add platformv1alpha1 scheme: %v", err)
 	}
+	if err := controller.AddOperationalRunnerConfigToScheme(s); err != nil {
+		t.Fatalf("add OperationalRunnerConfig scheme: %v", err)
+	}
 	return s
+}
+
+// listRunnerConfigs returns all OperationalRunnerConfig objects in the fake client.
+func listRunnerConfigs(t *testing.T, c interface {
+	List(context.Context, *controller.OperationalRunnerConfigList, ...interface{}) error
+}, scheme *runtime.Scheme) []controller.OperationalRunnerConfig {
+	t.Helper()
+	return nil // unused helper — inline List calls used instead for clarity
 }
 
 // --- EtcdMaintenance tests ---
@@ -82,9 +94,10 @@ func TestEtcdMaintenanceReconcile_LineageSyncedInitialized(t *testing.T) {
 	}
 }
 
-// TestEtcdMaintenanceReconcile_SubmitsJob verifies that a Job is submitted on
-// the first reconcile for a backup operation when the default S3 Secret exists.
-func TestEtcdMaintenanceReconcile_SubmitsJob(t *testing.T) {
+// TestEtcdMaintenanceReconcile_SubmitsRunnerConfig verifies that a RunnerConfig
+// is submitted on the first reconcile for a backup operation when the default
+// S3 Secret exists.
+func TestEtcdMaintenanceReconcile_SubmitsRunnerConfig(t *testing.T) {
 	scheme := buildDay2Scheme(t)
 	em := &platformv1alpha1.EtcdMaintenance{
 		ObjectMeta: metav1.ObjectMeta{Name: "backup-1", Namespace: "seam-tenant-test", Generation: 1},
@@ -107,24 +120,43 @@ func TestEtcdMaintenanceReconcile_SubmitsJob(t *testing.T) {
 		t.Fatalf("unexpected error: %v", err)
 	}
 	if result.RequeueAfter == 0 {
-		t.Error("expected requeue after job submission")
+		t.Error("expected requeue after RunnerConfig submission")
 	}
 
-	// Verify a Job was created.
-	jobList := &batchv1.JobList{}
-	if err := c.List(context.Background(), jobList); err != nil {
-		t.Fatalf("list jobs: %v", err)
+	// Verify a RunnerConfig was created (RC name = CR name).
+	rcList := &controller.OperationalRunnerConfigList{}
+	if err := c.List(context.Background(), rcList); err != nil {
+		t.Fatalf("list RunnerConfigs: %v", err)
 	}
-	if len(jobList.Items) != 1 {
-		t.Errorf("expected 1 Job, got %d", len(jobList.Items))
+	if len(rcList.Items) != 1 {
+		t.Errorf("expected 1 RunnerConfig, got %d", len(rcList.Items))
+	}
+	if len(rcList.Items) > 0 {
+		rc := rcList.Items[0]
+		if rc.Name != "backup-1" {
+			t.Errorf("RunnerConfig name = %q, want %q", rc.Name, "backup-1")
+		}
+		if len(rc.Spec.Steps) != 1 {
+			t.Errorf("expected 1 step, got %d", len(rc.Spec.Steps))
+		}
+		if len(rc.Spec.Steps) > 0 && rc.Spec.Steps[0].Capability != "etcd-backup" {
+			t.Errorf("step[0].Capability = %q, want %q", rc.Spec.Steps[0].Capability, "etcd-backup")
+		}
+		// S3 params should be set for backup.
+		if len(rc.Spec.Steps) > 0 {
+			if rc.Spec.Steps[0].Parameters["s3SecretName"] == "" {
+				t.Error("step[0].Parameters[s3SecretName] should be set for backup")
+			}
+		}
 	}
 }
 
-// TestEtcdMaintenanceReconcile_JobComplete verifies that when an OperationResult
-// ConfigMap reports success, the EtcdMaintenance transitions to Ready.
-func TestEtcdMaintenanceReconcile_JobComplete(t *testing.T) {
+// TestEtcdMaintenanceReconcile_RunnerConfigComplete verifies that when a
+// RunnerConfig's terminal Phase is "Completed", EtcdMaintenance transitions
+// to Ready=True.
+func TestEtcdMaintenanceReconcile_RunnerConfigComplete(t *testing.T) {
 	scheme := buildDay2Scheme(t)
-	jobName := "backup-1-etcd-backup"
+	rcName := "backup-1" // operationalRunnerConfigName("backup-1") = CR name
 	em := &platformv1alpha1.EtcdMaintenance{
 		ObjectMeta: metav1.ObjectMeta{Name: "backup-1", Namespace: "seam-tenant-test", Generation: 1},
 		Spec: platformv1alpha1.EtcdMaintenanceSpec{
@@ -132,7 +164,7 @@ func TestEtcdMaintenanceReconcile_JobComplete(t *testing.T) {
 			Operation:  platformv1alpha1.EtcdMaintenanceOperationBackup,
 		},
 		Status: platformv1alpha1.EtcdMaintenanceStatus{
-			JobName: jobName,
+			JobName: rcName,
 			Conditions: []metav1.Condition{
 				{
 					Type:   platformv1alpha1.ConditionTypeEtcdMaintenanceRunning,
@@ -142,25 +174,16 @@ func TestEtcdMaintenanceReconcile_JobComplete(t *testing.T) {
 			},
 		},
 	}
-	// Pre-existing Job.
-	job := &batchv1.Job{
-		ObjectMeta: metav1.ObjectMeta{Name: jobName, Namespace: "seam-tenant-test"},
-	}
-	// OperationResult ConfigMap indicating success.
-	resultCM := &corev1.ConfigMap{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      jobName + "-result",
-			Namespace: "seam-tenant-test",
-		},
-		Data: map[string]string{
-			"status":  "success",
-			"message": "etcd backup complete",
+	// Pre-existing RunnerConfig with terminal Completed state.
+	rc := &controller.OperationalRunnerConfig{
+		ObjectMeta: metav1.ObjectMeta{Name: rcName, Namespace: "seam-tenant-test"},
+		Status: controller.OperationalRunnerConfigStatus{
+			Phase: "Completed",
 		},
 	}
-
 	c := fake.NewClientBuilder().
 		WithScheme(scheme).
-		WithObjects(em, job, resultCM).
+		WithObjects(em, rc).
 		WithStatusSubresource(em).
 		Build()
 	r := &controller.EtcdMaintenanceReconciler{Client: c, Scheme: scheme, Recorder: fakeRecorder()}
@@ -194,13 +217,14 @@ func TestEtcdMaintenanceReconcile_JobComplete(t *testing.T) {
 // --- ClusterReset tests ---
 
 // TestClusterResetReconcile_ApprovalGate verifies that without the approval
-// annotation, the reconciler sets PendingApproval and does not submit a Job.
+// annotation, the reconciler sets PendingApproval and does not submit a
+// RunnerConfig.
 func TestClusterResetReconcile_ApprovalGate(t *testing.T) {
 	scheme := buildDay2Scheme(t)
 	crst := &platformv1alpha1.ClusterReset{
 		ObjectMeta: metav1.ObjectMeta{
-			Name:      "reset-dev",
-			Namespace: "seam-tenant-dev",
+			Name:       "reset-dev",
+			Namespace:  "seam-tenant-dev",
 			Generation: 1,
 			// Note: no ontai.dev/reset-approved annotation.
 		},
@@ -240,25 +264,25 @@ func TestClusterResetReconcile_ApprovalGate(t *testing.T) {
 		t.Errorf("PendingApproval reason = %s, want %s", cond.Reason, platformv1alpha1.ReasonApprovalRequired)
 	}
 
-	// Verify no Job was submitted.
-	jobList := &batchv1.JobList{}
-	if err := c.List(context.Background(), jobList); err != nil {
-		t.Fatalf("list jobs: %v", err)
+	// Verify no RunnerConfig was submitted.
+	rcList := &controller.OperationalRunnerConfigList{}
+	if err := c.List(context.Background(), rcList); err != nil {
+		t.Fatalf("list RunnerConfigs: %v", err)
 	}
-	if len(jobList.Items) != 0 {
-		t.Errorf("no jobs should be submitted without approval, got %d", len(jobList.Items))
+	if len(rcList.Items) != 0 {
+		t.Errorf("no RunnerConfig should be submitted without approval, got %d", len(rcList.Items))
 	}
 }
 
 // TestClusterResetReconcile_ApprovedDirectPath verifies that with the approval
 // annotation set and capi.enabled=false (no TalosCluster found), the reconciler
-// submits the cluster-reset Job directly.
+// submits the cluster-reset RunnerConfig directly.
 func TestClusterResetReconcile_ApprovedDirectPath(t *testing.T) {
 	scheme := buildDay2Scheme(t)
 	crst := &platformv1alpha1.ClusterReset{
 		ObjectMeta: metav1.ObjectMeta{
-			Name:      "reset-mgmt",
-			Namespace: "ont-system",
+			Name:       "reset-mgmt",
+			Namespace:  "ont-system",
 			Generation: 1,
 			Annotations: map[string]string{
 				platformv1alpha1.ResetApprovalAnnotation: "true",
@@ -278,16 +302,25 @@ func TestClusterResetReconcile_ApprovedDirectPath(t *testing.T) {
 		t.Fatalf("unexpected error: %v", err)
 	}
 	if result.RequeueAfter == 0 {
-		t.Error("expected requeue after job submission")
+		t.Error("expected requeue after RunnerConfig submission")
 	}
 
-	// Verify the Job was submitted.
-	jobList := &batchv1.JobList{}
-	if err := c.List(context.Background(), jobList); err != nil {
-		t.Fatalf("list jobs: %v", err)
+	// Verify the RunnerConfig was submitted.
+	rcList := &controller.OperationalRunnerConfigList{}
+	if err := c.List(context.Background(), rcList); err != nil {
+		t.Fatalf("list RunnerConfigs: %v", err)
 	}
-	if len(jobList.Items) != 1 {
-		t.Errorf("expected 1 cluster-reset Job, got %d", len(jobList.Items))
+	if len(rcList.Items) != 1 {
+		t.Errorf("expected 1 cluster-reset RunnerConfig, got %d", len(rcList.Items))
+	}
+	if len(rcList.Items) > 0 {
+		rc := rcList.Items[0]
+		if len(rc.Spec.Steps) != 1 {
+			t.Errorf("expected 1 step, got %d", len(rc.Spec.Steps))
+		}
+		if len(rc.Spec.Steps) > 0 && rc.Spec.Steps[0].Capability != "cluster-reset" {
+			t.Errorf("step[0].Capability = %q, want cluster-reset", rc.Spec.Steps[0].Capability)
+		}
 	}
 }
 
@@ -335,8 +368,9 @@ func TestHardeningProfileReconcile_LineageSynced(t *testing.T) {
 
 // --- PKIRotation tests ---
 
-// TestPKIRotationReconcile_SubmitsJob verifies a pki-rotate Job is submitted.
-func TestPKIRotationReconcile_SubmitsJob(t *testing.T) {
+// TestPKIRotationReconcile_SubmitsRunnerConfig verifies a pki-rotate RunnerConfig
+// is submitted with the correct step structure.
+func TestPKIRotationReconcile_SubmitsRunnerConfig(t *testing.T) {
 	scheme := buildDay2Scheme(t)
 	pkir := &platformv1alpha1.PKIRotation{
 		ObjectMeta: metav1.ObjectMeta{Name: "pkir-1", Namespace: "seam-tenant-test", Generation: 1},
@@ -354,26 +388,43 @@ func TestPKIRotationReconcile_SubmitsJob(t *testing.T) {
 		t.Fatalf("unexpected error: %v", err)
 	}
 	if result.RequeueAfter == 0 {
-		t.Error("expected requeue after job submission")
+		t.Error("expected requeue after RunnerConfig submission")
 	}
 
-	jobList := &batchv1.JobList{}
-	if err := c.List(context.Background(), jobList); err != nil {
-		t.Fatalf("list jobs: %v", err)
+	rcList := &controller.OperationalRunnerConfigList{}
+	if err := c.List(context.Background(), rcList); err != nil {
+		t.Fatalf("list RunnerConfigs: %v", err)
 	}
-	if len(jobList.Items) != 1 {
-		t.Errorf("expected 1 Job, got %d", len(jobList.Items))
+	if len(rcList.Items) != 1 {
+		t.Errorf("expected 1 RunnerConfig, got %d", len(rcList.Items))
 	}
-	if jobList.Items[0].Name != "pkir-1-pki-rotate" {
-		t.Errorf("job name = %s, want pkir-1-pki-rotate", jobList.Items[0].Name)
+	if len(rcList.Items) > 0 {
+		rc := rcList.Items[0]
+		// RC name = CR name.
+		if rc.Name != "pkir-1" {
+			t.Errorf("RunnerConfig name = %q, want %q", rc.Name, "pkir-1")
+		}
+		if len(rc.Spec.Steps) != 1 {
+			t.Errorf("expected 1 step, got %d", len(rc.Spec.Steps))
+		}
+		if len(rc.Spec.Steps) > 0 {
+			step := rc.Spec.Steps[0]
+			if step.Capability != "pki-rotate" {
+				t.Errorf("step.Capability = %q, want pki-rotate", step.Capability)
+			}
+			if !step.HaltOnFailure {
+				t.Error("step.HaltOnFailure should be true")
+			}
+		}
 	}
 }
 
 // --- NodeMaintenance tests ---
 
-// TestNodeMaintenanceReconcile_SubmitsNodePatchJob verifies a node-patch Job
-// is submitted for a NodeMaintenance with operation=patch.
-func TestNodeMaintenanceReconcile_SubmitsNodePatchJob(t *testing.T) {
+// TestNodeMaintenanceReconcile_SubmitsFourStepRunnerConfig verifies that a
+// NodeMaintenance with operation=patch produces a RunnerConfig with the
+// 4-step cordon→drain→operate→uncordon sequence.
+func TestNodeMaintenanceReconcile_SubmitsFourStepRunnerConfig(t *testing.T) {
 	scheme := buildDay2Scheme(t)
 	nm := &platformv1alpha1.NodeMaintenance{
 		ObjectMeta: metav1.ObjectMeta{Name: "patch-1", Namespace: "seam-tenant-test", Generation: 1},
@@ -392,15 +443,48 @@ func TestNodeMaintenanceReconcile_SubmitsNodePatchJob(t *testing.T) {
 		t.Fatalf("unexpected error: %v", err)
 	}
 	if result.RequeueAfter == 0 {
-		t.Error("expected requeue after job submission")
+		t.Error("expected requeue after RunnerConfig submission")
 	}
 
-	jobList := &batchv1.JobList{}
-	if err := c.List(context.Background(), jobList); err != nil {
-		t.Fatalf("list jobs: %v", err)
+	rcList := &controller.OperationalRunnerConfigList{}
+	if err := c.List(context.Background(), rcList); err != nil {
+		t.Fatalf("list RunnerConfigs: %v", err)
 	}
-	if len(jobList.Items) != 1 {
-		t.Errorf("expected 1 Job, got %d", len(jobList.Items))
+	if len(rcList.Items) != 1 {
+		t.Fatalf("expected 1 RunnerConfig, got %d", len(rcList.Items))
+	}
+
+	rc := rcList.Items[0]
+	if len(rc.Spec.Steps) != 4 {
+		t.Fatalf("expected 4 steps (cordon/drain/operate/uncordon), got %d", len(rc.Spec.Steps))
+	}
+
+	// Verify step names and capabilities.
+	wantSteps := []struct {
+		name       string
+		capability string
+		dependsOn  string
+		halt       bool
+	}{
+		{"cordon", "node-cordon", "", true},
+		{"drain", "node-drain", "cordon", true},
+		{"operate", "node-patch", "drain", false},
+		{"uncordon", "node-uncordon", "operate", false},
+	}
+	for i, want := range wantSteps {
+		s := rc.Spec.Steps[i]
+		if s.Name != want.name {
+			t.Errorf("step[%d].Name = %q, want %q", i, s.Name, want.name)
+		}
+		if s.Capability != want.capability {
+			t.Errorf("step[%d].Capability = %q, want %q", i, s.Capability, want.capability)
+		}
+		if s.DependsOn != want.dependsOn {
+			t.Errorf("step[%d].DependsOn = %q, want %q", i, s.DependsOn, want.dependsOn)
+		}
+		if s.HaltOnFailure != want.halt {
+			t.Errorf("step[%d].HaltOnFailure = %v, want %v", i, s.HaltOnFailure, want.halt)
+		}
 	}
 }
 
@@ -455,16 +539,16 @@ func TestClusterMaintenanceReconcile_NoBlockOutsideWindows(t *testing.T) {
 // --- UpgradePolicy tests ---
 
 // TestUpgradePolicyReconcile_DirectPath verifies that for a non-CAPI cluster
-// (TalosCluster not found), a talos-upgrade Job is submitted directly.
+// (TalosCluster not found), a talos-upgrade RunnerConfig is submitted directly.
 func TestUpgradePolicyReconcile_DirectPath(t *testing.T) {
 	scheme := buildDay2Scheme(t)
 	up := &platformv1alpha1.UpgradePolicy{
 		ObjectMeta: metav1.ObjectMeta{Name: "upgrade-1", Namespace: "ont-system", Generation: 1},
 		Spec: platformv1alpha1.UpgradePolicySpec{
-			ClusterRef:          platformv1alpha1.LocalObjectRef{Name: "ccs-mgmt"},
-			UpgradeType:         platformv1alpha1.UpgradeTypeTalos,
-			TargetTalosVersion:  "v1.9.0",
-			RollingStrategy:     platformv1alpha1.RollingStrategySequential,
+			ClusterRef:         platformv1alpha1.LocalObjectRef{Name: "ccs-mgmt"},
+			UpgradeType:        platformv1alpha1.UpgradeTypeTalos,
+			TargetTalosVersion: "v1.9.0",
+			RollingStrategy:    platformv1alpha1.RollingStrategySequential,
 		},
 	}
 	c := fake.NewClientBuilder().WithScheme(scheme).WithObjects(up).WithStatusSubresource(up).Build()
@@ -477,22 +561,77 @@ func TestUpgradePolicyReconcile_DirectPath(t *testing.T) {
 		t.Fatalf("unexpected error: %v", err)
 	}
 	if result.RequeueAfter == 0 {
-		t.Error("expected requeue after job submission")
+		t.Error("expected requeue after RunnerConfig submission")
 	}
 
-	jobList := &batchv1.JobList{}
-	if err := c.List(context.Background(), jobList); err != nil {
-		t.Fatalf("list jobs: %v", err)
+	rcList := &controller.OperationalRunnerConfigList{}
+	if err := c.List(context.Background(), rcList); err != nil {
+		t.Fatalf("list RunnerConfigs: %v", err)
 	}
-	if len(jobList.Items) != 1 {
-		t.Errorf("expected 1 talos-upgrade Job, got %d", len(jobList.Items))
+	if len(rcList.Items) != 1 {
+		t.Errorf("expected 1 talos-upgrade RunnerConfig, got %d", len(rcList.Items))
+	}
+	if len(rcList.Items) > 0 {
+		rc := rcList.Items[0]
+		if len(rc.Spec.Steps) != 1 {
+			t.Errorf("talos upgrade: expected 1 step, got %d", len(rc.Spec.Steps))
+		}
+		if len(rc.Spec.Steps) > 0 && rc.Spec.Steps[0].Capability != "talos-upgrade" {
+			t.Errorf("step[0].Capability = %q, want talos-upgrade", rc.Spec.Steps[0].Capability)
+		}
+	}
+}
+
+// TestUpgradePolicyReconcile_StackUpgradeTwoSteps verifies that a stack upgrade
+// produces a 2-step RunnerConfig with talos-upgrade→kube-upgrade dependency.
+func TestUpgradePolicyReconcile_StackUpgradeTwoSteps(t *testing.T) {
+	scheme := buildDay2Scheme(t)
+	up := &platformv1alpha1.UpgradePolicy{
+		ObjectMeta: metav1.ObjectMeta{Name: "stack-1", Namespace: "ont-system", Generation: 1},
+		Spec: platformv1alpha1.UpgradePolicySpec{
+			ClusterRef:               platformv1alpha1.LocalObjectRef{Name: "ccs-mgmt"},
+			UpgradeType:              platformv1alpha1.UpgradeTypeStack,
+			TargetTalosVersion:       "v1.9.0",
+			TargetKubernetesVersion:  "v1.31.0",
+			RollingStrategy:          platformv1alpha1.RollingStrategySequential,
+		},
+	}
+	c := fake.NewClientBuilder().WithScheme(scheme).WithObjects(up).WithStatusSubresource(up).Build()
+	r := &controller.UpgradePolicyReconciler{Client: c, Scheme: scheme, Recorder: fakeRecorder()}
+
+	if _, err := r.Reconcile(context.Background(), ctrl.Request{
+		NamespacedName: types.NamespacedName{Name: "stack-1", Namespace: "ont-system"},
+	}); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	rcList := &controller.OperationalRunnerConfigList{}
+	if err := c.List(context.Background(), rcList); err != nil {
+		t.Fatalf("list RunnerConfigs: %v", err)
+	}
+	if len(rcList.Items) != 1 {
+		t.Fatalf("expected 1 RunnerConfig, got %d", len(rcList.Items))
+	}
+
+	rc := rcList.Items[0]
+	if len(rc.Spec.Steps) != 2 {
+		t.Fatalf("stack upgrade: expected 2 steps, got %d", len(rc.Spec.Steps))
+	}
+	if rc.Spec.Steps[0].Capability != "talos-upgrade" {
+		t.Errorf("step[0].Capability = %q, want talos-upgrade", rc.Spec.Steps[0].Capability)
+	}
+	if rc.Spec.Steps[1].Capability != "kube-upgrade" {
+		t.Errorf("step[1].Capability = %q, want kube-upgrade", rc.Spec.Steps[1].Capability)
+	}
+	if rc.Spec.Steps[1].DependsOn != "talos-upgrade" {
+		t.Errorf("step[1].DependsOn = %q, want talos-upgrade", rc.Spec.Steps[1].DependsOn)
 	}
 }
 
 // --- NodeOperation tests ---
 
 // TestNodeOperationReconcile_DirectScaleUp verifies that for a non-CAPI cluster,
-// a node-scale-up Job is submitted.
+// a node-scale-up RunnerConfig is submitted.
 func TestNodeOperationReconcile_DirectScaleUp(t *testing.T) {
 	scheme := buildDay2Scheme(t)
 	nop := &platformv1alpha1.NodeOperation{
@@ -513,24 +652,33 @@ func TestNodeOperationReconcile_DirectScaleUp(t *testing.T) {
 		t.Fatalf("unexpected error: %v", err)
 	}
 	if result.RequeueAfter == 0 {
-		t.Error("expected requeue after job submission")
+		t.Error("expected requeue after RunnerConfig submission")
 	}
 
-	jobList := &batchv1.JobList{}
-	if err := c.List(context.Background(), jobList); err != nil {
-		t.Fatalf("list jobs: %v", err)
+	rcList := &controller.OperationalRunnerConfigList{}
+	if err := c.List(context.Background(), rcList); err != nil {
+		t.Fatalf("list RunnerConfigs: %v", err)
 	}
-	if len(jobList.Items) != 1 {
-		t.Errorf("expected 1 node-scale-up Job, got %d", len(jobList.Items))
+	if len(rcList.Items) != 1 {
+		t.Errorf("expected 1 node-scale-up RunnerConfig, got %d", len(rcList.Items))
+	}
+	if len(rcList.Items) > 0 {
+		rc := rcList.Items[0]
+		if len(rc.Spec.Steps) != 1 {
+			t.Errorf("expected 1 step, got %d", len(rc.Spec.Steps))
+		}
+		if len(rc.Spec.Steps) > 0 && rc.Spec.Steps[0].Capability != "node-scale-up" {
+			t.Errorf("step[0].Capability = %q, want node-scale-up", rc.Spec.Steps[0].Capability)
+		}
 	}
 }
 
 // --- Self-operation node exclusion tests ---
 
-// TestEtcdMaintenanceReconcile_S3AbsentBlocksJob verifies that when no S3 backup
-// destination is configured, the reconciler sets EtcdBackupDestinationAbsent and
-// skips Job creation. platform-schema.md §10.
-func TestEtcdMaintenanceReconcile_S3AbsentBlocksJob(t *testing.T) {
+// TestEtcdMaintenanceReconcile_S3AbsentBlocksRunnerConfig verifies that when no
+// S3 backup destination is configured, the reconciler sets EtcdBackupDestinationAbsent
+// and skips RunnerConfig creation. platform-schema.md §10.
+func TestEtcdMaintenanceReconcile_S3AbsentBlocksRunnerConfig(t *testing.T) {
 	scheme := buildDay2Scheme(t)
 	em := &platformv1alpha1.EtcdMaintenance{
 		ObjectMeta: metav1.ObjectMeta{Name: "backup-2", Namespace: "seam-tenant-test", Generation: 1},
@@ -552,12 +700,12 @@ func TestEtcdMaintenanceReconcile_S3AbsentBlocksJob(t *testing.T) {
 		t.Errorf("should not requeue without S3 config, got RequeueAfter=%v", result.RequeueAfter)
 	}
 
-	jobList := &batchv1.JobList{}
-	if err := c.List(context.Background(), jobList); err != nil {
-		t.Fatalf("list jobs: %v", err)
+	rcList := &controller.OperationalRunnerConfigList{}
+	if err := c.List(context.Background(), rcList); err != nil {
+		t.Fatalf("list RunnerConfigs: %v", err)
 	}
-	if len(jobList.Items) != 0 {
-		t.Errorf("expected no Job when S3 absent, got %d", len(jobList.Items))
+	if len(rcList.Items) != 0 {
+		t.Errorf("expected no RunnerConfig when S3 absent, got %d", len(rcList.Items))
 	}
 
 	got := &platformv1alpha1.EtcdMaintenance{}
@@ -580,7 +728,8 @@ func TestEtcdMaintenanceReconcile_S3AbsentBlocksJob(t *testing.T) {
 }
 
 // TestEtcdMaintenanceReconcile_S3SecretRefPresent verifies that when
-// spec.etcdBackupS3SecretRef references an existing Secret, the Job is submitted.
+// spec.etcdBackupS3SecretRef references an existing Secret, the RunnerConfig
+// is submitted with S3 params in the step Parameters.
 // platform-schema.md §10.
 func TestEtcdMaintenanceReconcile_S3SecretRefPresent(t *testing.T) {
 	scheme := buildDay2Scheme(t)
@@ -608,20 +757,32 @@ func TestEtcdMaintenanceReconcile_S3SecretRefPresent(t *testing.T) {
 		t.Fatalf("unexpected error: %v", err)
 	}
 	if result.RequeueAfter == 0 {
-		t.Error("expected requeue after job submission")
+		t.Error("expected requeue after RunnerConfig submission")
 	}
 
-	jobList := &batchv1.JobList{}
-	if err := c.List(context.Background(), jobList); err != nil {
-		t.Fatalf("list jobs: %v", err)
+	rcList := &controller.OperationalRunnerConfigList{}
+	if err := c.List(context.Background(), rcList); err != nil {
+		t.Fatalf("list RunnerConfigs: %v", err)
 	}
-	if len(jobList.Items) != 1 {
-		t.Errorf("expected 1 Job when explicit S3 SecretRef present, got %d", len(jobList.Items))
+	if len(rcList.Items) != 1 {
+		t.Errorf("expected 1 RunnerConfig when explicit S3 SecretRef present, got %d", len(rcList.Items))
+	}
+	if len(rcList.Items) > 0 {
+		rc := rcList.Items[0]
+		if len(rc.Spec.Steps) > 0 {
+			params := rc.Spec.Steps[0].Parameters
+			if params["s3SecretName"] != "my-s3-config" {
+				t.Errorf("step.Parameters[s3SecretName] = %q, want my-s3-config", params["s3SecretName"])
+			}
+			if params["s3SecretNamespace"] != "seam-system" {
+				t.Errorf("step.Parameters[s3SecretNamespace] = %q, want seam-system", params["s3SecretNamespace"])
+			}
+		}
 	}
 }
 
 // TestEtcdMaintenanceReconcile_DefragNoS3Check verifies that defrag operations
-// do not require S3 config and proceed to Job submission regardless.
+// do not require S3 config and proceed to RunnerConfig submission regardless.
 func TestEtcdMaintenanceReconcile_DefragNoS3Check(t *testing.T) {
 	scheme := buildDay2Scheme(t)
 	em := &platformv1alpha1.EtcdMaintenance{
@@ -641,21 +802,27 @@ func TestEtcdMaintenanceReconcile_DefragNoS3Check(t *testing.T) {
 		t.Fatalf("unexpected error: %v", err)
 	}
 	if result.RequeueAfter == 0 {
-		t.Error("expected requeue after job submission for defrag")
+		t.Error("expected requeue after RunnerConfig submission for defrag")
 	}
 
-	jobList := &batchv1.JobList{}
-	if err := c.List(context.Background(), jobList); err != nil {
-		t.Fatalf("list jobs: %v", err)
+	rcList := &controller.OperationalRunnerConfigList{}
+	if err := c.List(context.Background(), rcList); err != nil {
+		t.Fatalf("list RunnerConfigs: %v", err)
 	}
-	if len(jobList.Items) != 1 {
-		t.Errorf("expected 1 etcd-defrag Job, got %d", len(jobList.Items))
+	if len(rcList.Items) != 1 {
+		t.Errorf("expected 1 etcd-defrag RunnerConfig, got %d", len(rcList.Items))
+	}
+	if len(rcList.Items) > 0 {
+		rc := rcList.Items[0]
+		if len(rc.Spec.Steps) > 0 && rc.Spec.Steps[0].Capability != "etcd-defrag" {
+			t.Errorf("step[0].Capability = %q, want etcd-defrag", rc.Spec.Steps[0].Capability)
+		}
 	}
 }
 
 // TestEtcdMaintenanceReconcile_NodeExclusionsApplied verifies that when the
-// platform-leader Lease exists and its holder pod is found, the submitted Job
-// has NodeAffinity NotIn constraints excluding the leader node and target nodes.
+// platform-leader Lease exists and its holder pod is found, the submitted
+// RunnerConfig has MaintenanceTargetNodes and OperatorLeaderNode set.
 // conductor-schema.md §13.
 func TestEtcdMaintenanceReconcile_NodeExclusionsApplied(t *testing.T) {
 	scheme := buildDay2Scheme(t)
@@ -696,36 +863,27 @@ func TestEtcdMaintenanceReconcile_NodeExclusionsApplied(t *testing.T) {
 		t.Fatalf("unexpected error: %v", err)
 	}
 
-	jobList := &batchv1.JobList{}
-	if err := c.List(context.Background(), jobList); err != nil {
-		t.Fatalf("list jobs: %v", err)
+	rcList := &controller.OperationalRunnerConfigList{}
+	if err := c.List(context.Background(), rcList); err != nil {
+		t.Fatalf("list RunnerConfigs: %v", err)
 	}
-	if len(jobList.Items) != 1 {
-		t.Fatalf("expected 1 Job, got %d", len(jobList.Items))
+	if len(rcList.Items) != 1 {
+		t.Fatalf("expected 1 RunnerConfig, got %d", len(rcList.Items))
 	}
 
-	job := jobList.Items[0]
-	affinity := job.Spec.Template.Spec.Affinity
-	if affinity == nil || affinity.NodeAffinity == nil {
-		t.Fatal("expected NodeAffinity to be set on Job pod spec")
+	rc := rcList.Items[0]
+	// Verify OperatorLeaderNode is set.
+	if rc.Spec.OperatorLeaderNode != leaderNode {
+		t.Errorf("OperatorLeaderNode = %q, want %q", rc.Spec.OperatorLeaderNode, leaderNode)
 	}
-	required := affinity.NodeAffinity.RequiredDuringSchedulingIgnoredDuringExecution
-	if required == nil || len(required.NodeSelectorTerms) == 0 {
-		t.Fatal("expected RequiredDuringSchedulingIgnoredDuringExecution NodeSelector")
+	// Verify MaintenanceTargetNodes includes the target node and leader node.
+	wantExclusions := map[string]bool{leaderNode: true, targetNode: true}
+	for _, v := range rc.Spec.MaintenanceTargetNodes {
+		delete(wantExclusions, v)
 	}
-	expr := required.NodeSelectorTerms[0].MatchExpressions[0]
-	if expr.Key != "kubernetes.io/hostname" {
-		t.Errorf("key = %s, want kubernetes.io/hostname", expr.Key)
-	}
-	if expr.Operator != corev1.NodeSelectorOpNotIn {
-		t.Errorf("operator = %s, want NotIn", expr.Operator)
-	}
-	wantValues := map[string]bool{leaderNode: true, targetNode: true}
-	for _, v := range expr.Values {
-		delete(wantValues, v)
-	}
-	if len(wantValues) > 0 {
-		t.Errorf("NodeSelectorRequirement missing values: %v (got %v)", wantValues, expr.Values)
+	if len(wantExclusions) > 0 {
+		t.Errorf("MaintenanceTargetNodes missing values: %v (got %v)",
+			wantExclusions, rc.Spec.MaintenanceTargetNodes)
 	}
 }
 
@@ -751,22 +909,29 @@ func TestEtcdMaintenanceReconcile_NoLeaseGraceful(t *testing.T) {
 		t.Fatalf("unexpected error when Lease absent: %v", err)
 	}
 	if result.RequeueAfter == 0 {
-		t.Error("expected requeue after job submission even without Lease")
+		t.Error("expected requeue after RunnerConfig submission even without Lease")
 	}
 
-	jobList := &batchv1.JobList{}
-	if err := c.List(context.Background(), jobList); err != nil {
-		t.Fatalf("list jobs: %v", err)
+	rcList := &controller.OperationalRunnerConfigList{}
+	if err := c.List(context.Background(), rcList); err != nil {
+		t.Fatalf("list RunnerConfigs: %v", err)
 	}
-	if len(jobList.Items) != 1 {
-		t.Errorf("expected 1 Job when Lease absent, got %d", len(jobList.Items))
+	if len(rcList.Items) != 1 {
+		t.Errorf("expected 1 RunnerConfig when Lease absent, got %d", len(rcList.Items))
 	}
-	if jobList.Items[0].Spec.Template.Spec.Affinity != nil {
-		t.Error("expected no Affinity on Job when no node exclusions")
+	if len(rcList.Items) > 0 {
+		rc := rcList.Items[0]
+		if rc.Spec.OperatorLeaderNode != "" {
+			t.Errorf("expected empty OperatorLeaderNode when no Lease, got %q", rc.Spec.OperatorLeaderNode)
+		}
+		if len(rc.Spec.MaintenanceTargetNodes) != 0 {
+			t.Errorf("expected empty MaintenanceTargetNodes when no targets and no Lease, got %v",
+				rc.Spec.MaintenanceTargetNodes)
+		}
 	}
 }
 
-// --- MaintenanceBundle tests ---
+// --- MaintenanceBundle tests (unchanged — still submits Jobs directly) ---
 
 // TestMaintenanceBundleReconcile_LineageSyncedInitialized verifies that the first
 // reconcile initializes LineageSynced=False/LineageControllerAbsent.
