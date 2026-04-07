@@ -115,7 +115,7 @@ func (r *TalosClusterReconciler) Reconcile(ctx context.Context, req ctrl.Request
 	// Step D — Check for reserved infrastructure provider paths before routing.
 	// Screen is a future operator (INV-021). Surface the reservation condition and
 	// halt without reconciling the screen path.
-	if tc.Spec.InfrastructureProvider == "screen" {
+	if tc.Spec.InfrastructureProvider == platformv1alpha1.InfrastructureProviderScreen {
 		platformv1alpha1.SetCondition(
 			&tc.Status.Conditions,
 			platformv1alpha1.ConditionTypeScreenProviderNotImplemented,

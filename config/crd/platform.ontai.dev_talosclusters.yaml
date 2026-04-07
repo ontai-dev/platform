@@ -143,6 +143,22 @@ spec:
                 required:
                 - enabled
                 type: object
+              infrastructureProvider:
+                allOf:
+                - enum:
+                  - native
+                  - capi
+                  - screen
+                - enum:
+                  - native
+                  - capi
+                  - screen
+                default: native
+                description: |-
+                  InfrastructureProvider declares the infrastructure provider backing this cluster.
+                  Defaults to native when absent. The only reserved future value is screen (INV-021):
+                  when set to screen the reconciler surfaces ScreenProviderNotImplemented and halts.
+                type: string
               lineage:
                 description: |-
                   Lineage is the sealed causal chain record for this root declaration.

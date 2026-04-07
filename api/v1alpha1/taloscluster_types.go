@@ -24,6 +24,32 @@ const (
 	TalosClusterModeImport TalosClusterMode = "import"
 )
 
+// InfrastructureProvider declares the infrastructure provider backing this
+// TalosCluster. The value constrains the reconciliation path the operator takes.
+//
+// +kubebuilder:validation:Enum=native;capi;screen
+type InfrastructureProvider string
+
+const (
+	// InfrastructureProviderNative is the default provider. The operator manages
+	// cluster lifecycle directly: management cluster via a bootstrap Conductor Job
+	// (capi.enabled=false), target clusters via the CAPI path (capi.enabled=true).
+	// This is the standard path for all currently supported clusters.
+	InfrastructureProviderNative InfrastructureProvider = "native"
+
+	// InfrastructureProviderCAPI is an explicit alias for the CAPI-backed target
+	// cluster path. Functionally equivalent to InfrastructureProviderNative when
+	// spec.capi.enabled=true. Reserved for future explicit-provider semantics.
+	InfrastructureProviderCAPI InfrastructureProvider = "capi"
+
+	// InfrastructureProviderScreen is reserved for the future Screen operator
+	// (KubeVirt workload lifecycle on VM-class clusters). INV-021: no implementation
+	// work proceeds until a formal Architecture Decision Record is approved by the
+	// Platform Governor. When observed, the reconciler sets
+	// ScreenProviderNotImplemented=True and halts without reconciling.
+	InfrastructureProviderScreen InfrastructureProvider = "screen"
+)
+
 // TalosClusterOrigin records how the cluster came to exist.
 //
 // +kubebuilder:validation:Enum=bootstrapped;imported
@@ -235,12 +261,13 @@ type TalosClusterSpec struct {
 	// +optional
 	CAPI CAPIConfig `json:"capi,omitempty"`
 
-	// InfrastructureProvider is a reservation field for future operator-backed
-	// infrastructure paths. The only supported future value is "screen" (INV-021).
-	// When set to "screen" the reconciler surfaces ScreenProviderNotImplemented and
-	// halts without reconciling the screen path. All other values are ignored.
+	// InfrastructureProvider declares the infrastructure provider backing this cluster.
+	// Defaults to native when absent. The only reserved future value is screen (INV-021):
+	// when set to screen the reconciler surfaces ScreenProviderNotImplemented and halts.
+	// +kubebuilder:validation:Enum=native;capi;screen
+	// +kubebuilder:default=native
 	// +optional
-	InfrastructureProvider string `json:"infrastructureProvider,omitempty"`
+	InfrastructureProvider InfrastructureProvider `json:"infrastructureProvider,omitempty"`
 
 	// Lineage is the sealed causal chain record for this root declaration.
 	// Authored once at object creation time and immutable thereafter.

@@ -177,6 +177,13 @@ spec:
             description: SeamInfrastructureMachineStatus defines the observed state
               of SeamInfrastructureMachine.
             properties:
+              applyAttempts:
+                description: |-
+                  ApplyAttempts counts how many times ApplyConfiguration has been attempted
+                  and failed consecutively. Resets to zero on success. Used by
+                  TalosClusterReconciler to raise ControlPlaneUnreachable after 3 attempts.
+                format: int32
+                type: integer
               conditions:
                 description: Conditions is the list of status conditions for this
                   SeamInfrastructureMachine.
