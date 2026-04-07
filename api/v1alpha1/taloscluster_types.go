@@ -81,6 +81,12 @@ const (
 	// The cluster does not transition to Ready until ConductorReady=True.
 	// platform-schema.md §12. Gap 27.
 	ConditionTypeConductorReady = "ConductorReady"
+
+	// ConditionTypeScreenProviderNotImplemented is set when
+	// spec.infrastructure.provider=screen is observed. Screen is a future operator
+	// (INV-021). The reconciler preserves the field and stops without attempting
+	// further reconciliation on the screen path. Clears when Screen is implemented.
+	ConditionTypeScreenProviderNotImplemented = "ScreenProviderNotImplemented"
 )
 
 // Condition reason constants for TalosCluster.
@@ -139,6 +145,10 @@ const (
 	// Deployment has been created but has not yet reached Available=True.
 	// The reconciler requeues until Available=True.
 	ReasonConductorDeploymentUnavailable = "ConductorDeploymentUnavailable"
+
+	// ReasonScreenNotImplemented is set on ScreenProviderNotImplemented when
+	// spec.infrastructure.provider=screen is observed. INV-021.
+	ReasonScreenNotImplemented = "ScreenNotImplemented"
 )
 
 // CAPICiliumPackRef is a reference to the cluster-specific Cilium ClusterPack
@@ -224,6 +234,13 @@ type TalosClusterSpec struct {
 	// for the Enabled flag itself.
 	// +optional
 	CAPI CAPIConfig `json:"capi,omitempty"`
+
+	// InfrastructureProvider is a reservation field for future operator-backed
+	// infrastructure paths. The only supported future value is "screen" (INV-021).
+	// When set to "screen" the reconciler surfaces ScreenProviderNotImplemented and
+	// halts without reconciling the screen path. All other values are ignored.
+	// +optional
+	InfrastructureProvider string `json:"infrastructureProvider,omitempty"`
 
 	// Lineage is the sealed causal chain record for this root declaration.
 	// Authored once at object creation time and immutable thereafter.

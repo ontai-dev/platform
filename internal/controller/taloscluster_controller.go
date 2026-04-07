@@ -112,7 +112,24 @@ func (r *TalosClusterReconciler) Reconcile(ctx context.Context, req ctrl.Request
 		)
 	}
 
-	// Step D — Route to the appropriate reconciliation path.
+	// Step D — Check for reserved infrastructure provider paths before routing.
+	// Screen is a future operator (INV-021). Surface the reservation condition and
+	// halt without reconciling the screen path.
+	if tc.Spec.InfrastructureProvider == "screen" {
+		platformv1alpha1.SetCondition(
+			&tc.Status.Conditions,
+			platformv1alpha1.ConditionTypeScreenProviderNotImplemented,
+			metav1.ConditionTrue,
+			platformv1alpha1.ReasonScreenNotImplemented,
+			"spec.infrastructureProvider=screen is reserved for the future Screen operator (INV-021). Screen is not yet implemented. No reconciliation will proceed on this path.",
+			tc.Generation,
+		)
+		logger.Info("TalosCluster uses screen provider — reserved path, halting reconciliation",
+			"name", tc.Name, "namespace", tc.Namespace)
+		return ctrl.Result{}, nil
+	}
+
+	// Step E — Route to the appropriate reconciliation path.
 	if !tc.Spec.CAPI.Enabled {
 		return r.reconcileDirectBootstrap(ctx, tc)
 	}
