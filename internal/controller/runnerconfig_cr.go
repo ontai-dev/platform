@@ -20,6 +20,25 @@ import (
 	"k8s.io/apimachinery/pkg/runtime/schema"
 )
 
+// runnerConfigGVK and runnerConfigListGVK are the canonical GVKs for the
+// RunnerConfig CRD owned by runner.ontai.dev. These explicit GVKs are used
+// with AddKnownTypeWithName so the scheme maps *OperationalRunnerConfig to
+// Kind="RunnerConfig" — not "OperationalRunnerConfig" (the Go struct name that
+// AddKnownTypes would derive). Without this, production REST calls fail because
+// the API server's REST mapper finds no resource for Kind=OperationalRunnerConfig.
+var (
+	runnerConfigGVK = schema.GroupVersionKind{
+		Group:   "runner.ontai.dev",
+		Version: "v1alpha1",
+		Kind:    "RunnerConfig",
+	}
+	runnerConfigListGVK = schema.GroupVersionKind{
+		Group:   "runner.ontai.dev",
+		Version: "v1alpha1",
+		Kind:    "RunnerConfigList",
+	}
+)
+
 // OperationalRunnerConfigGVK is the GVK for RunnerConfig CRs created by
 // platform. Matches the conductor-owned CRD. conductor-schema.md §17.
 var OperationalRunnerConfigGVK = schema.GroupVersionKind{
@@ -34,13 +53,19 @@ var operationalRunnerConfigGV = schema.GroupVersion{
 }
 
 // AddOperationalRunnerConfigToScheme registers OperationalRunnerConfig and
-// OperationalRunnerConfigList with the given scheme. Call this in both the
-// manager init (production) and test scheme builders (unit tests).
+// OperationalRunnerConfigList with the given scheme under the canonical
+// runner.ontai.dev/v1alpha1 GVKs (Kind=RunnerConfig / Kind=RunnerConfigList).
+//
+// AddKnownTypeWithName is used instead of AddKnownTypes because AddKnownTypes
+// derives Kind from the Go struct name ("OperationalRunnerConfig"), which does
+// not match the CRD Kind ("RunnerConfig"). Using the wrong Kind causes the
+// production REST mapper to return "no matches for kind OperationalRunnerConfig
+// in version runner.ontai.dev/v1alpha1" when the operator tries to Get or
+// Create RunnerConfig objects. Call this in both the manager init (production)
+// and test scheme builders (unit tests).
 func AddOperationalRunnerConfigToScheme(s *runtime.Scheme) error {
-	s.AddKnownTypes(operationalRunnerConfigGV,
-		&OperationalRunnerConfig{},
-		&OperationalRunnerConfigList{},
-	)
+	s.AddKnownTypeWithName(runnerConfigGVK, &OperationalRunnerConfig{})
+	s.AddKnownTypeWithName(runnerConfigListGVK, &OperationalRunnerConfigList{})
 	metav1.AddToGroupVersion(s, operationalRunnerConfigGV)
 	return nil
 }
