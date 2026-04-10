@@ -49,29 +49,34 @@ func bootstrapJobName(clusterName string) string {
 	return fmt.Sprintf("%s-bootstrap", clusterName)
 }
 
-// bootstrapRunnerConfigName returns the deterministic RunnerConfig name for a
-// management cluster bootstrap. Stored in the management namespace (ont-system /
-// seam-system) alongside the TalosCluster CR. Format: {clusterName}-bootstrap.
+// bootstrapRunnerConfigNamespace is the namespace where management cluster
+// RunnerConfig CRs are created and where Conductor looks them up.
+// conductor-schema.md §17, platform-schema.md §3.
+const bootstrapRunnerConfigNamespace = "ont-system"
+
+// bootstrapRunnerConfigName returns the name of the RunnerConfig for a management
+// cluster bootstrap. The name is the cluster name exactly — Conductor resolves the
+// RunnerConfig by the value of its --cluster flag, which equals TalosCluster.Name.
+// runner.ontai.dev/v1alpha1 RunnerConfig. conductor-schema.md §17.
 func bootstrapRunnerConfigName(clusterName string) string {
-	return clusterName + "-bootstrap-rc"
+	return clusterName
 }
 
-// getBootstrapRunnerConfig returns the bootstrap RunnerConfig for this TalosCluster
-// if it exists in namespace, or nil if it has not been created yet.
-func (r *TalosClusterReconciler) getBootstrapRunnerConfig(ctx context.Context, namespace, clusterName string) (*OperationalRunnerConfig, error) {
-	return getOperationalRunnerConfig(ctx, r.Client, namespace, bootstrapRunnerConfigName(clusterName))
+// getBootstrapRunnerConfig returns the RunnerConfig for this TalosCluster from
+// bootstrapRunnerConfigNamespace (ont-system), or nil if it does not yet exist.
+func (r *TalosClusterReconciler) getBootstrapRunnerConfig(ctx context.Context, clusterName string) (*OperationalRunnerConfig, error) {
+	return getOperationalRunnerConfig(ctx, r.Client, bootstrapRunnerConfigNamespace, bootstrapRunnerConfigName(clusterName))
 }
 
-// ensureBootstrapRunnerConfig creates the OperationalRunnerConfig for a management
-// cluster bootstrap if it does not already exist. The RunnerConfig expresses the
-// single-step enable intent for the cluster-bootstrap capability and is owned by
-// the TalosCluster CR. Idempotent — returns nil when already present.
-// platform-schema.md §3, CP-INV-003.
+// ensureBootstrapRunnerConfig creates the RunnerConfig CR in bootstrapRunnerConfigNamespace
+// (ont-system) for a management cluster bootstrap if it does not already exist.
+// Name equals TalosCluster.Name so Conductor can locate it by cluster-ref flag value.
+// Idempotent — returns nil when already present. platform-schema.md §3, CP-INV-003.
 func (r *TalosClusterReconciler) ensureBootstrapRunnerConfig(ctx context.Context, tc *platformv1alpha1.TalosCluster) error {
 	name := bootstrapRunnerConfigName(tc.Name)
 	rc := buildOperationalRunnerConfig(
 		name,
-		tc.Namespace,
+		bootstrapRunnerConfigNamespace,
 		tc.Name,
 		nil, // no maintenanceTargetNodes — bootstrap is a cluster-creation operation
 		"",  // no leaderNode — management cluster has no pre-existing operator leader
@@ -86,12 +91,9 @@ func (r *TalosClusterReconciler) ensureBootstrapRunnerConfig(ctx context.Context
 			},
 		},
 	)
-	if err := controllerutil.SetControllerReference(tc, rc, r.Scheme); err != nil {
-		return fmt.Errorf("ensureBootstrapRunnerConfig: set owner reference: %w", err)
-	}
 	if err := r.Client.Create(ctx, rc); err != nil && !apierrors.IsAlreadyExists(err) {
 		return fmt.Errorf("ensureBootstrapRunnerConfig: create RunnerConfig %s/%s: %w",
-			tc.Namespace, name, err)
+			bootstrapRunnerConfigNamespace, name, err)
 	}
 	return nil
 }

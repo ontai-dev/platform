@@ -162,7 +162,7 @@ func (r *TalosClusterReconciler) reconcileDirectBootstrap(ctx context.Context, t
 	// during the bootstrap sequence). The result is captured before any creation so
 	// that the distinction between "pre-existing" and "just created by us" is stable
 	// within this reconcile pass. platform-schema.md §3.
-	preExistingRC, err := r.getBootstrapRunnerConfig(ctx, tc.Namespace, tc.Name)
+	preExistingRC, err := r.getBootstrapRunnerConfig(ctx, tc.Name)
 	if err != nil {
 		return ctrl.Result{}, fmt.Errorf("reconcileDirectBootstrap: check RunnerConfig: %w", err)
 	}

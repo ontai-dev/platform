@@ -230,8 +230,11 @@ func TestTalosClusterReconcile_RunnerConfigCreatedOnFirstObservation(t *testing.
 		if rc.Spec.ClusterRef != "ccs-mgmt" {
 			t.Errorf("RunnerConfig clusterRef = %q, want ccs-mgmt", rc.Spec.ClusterRef)
 		}
-		if rc.Namespace != "seam-system" {
-			t.Errorf("RunnerConfig namespace = %q, want seam-system", rc.Namespace)
+		if rc.Name != "ccs-mgmt" {
+			t.Errorf("RunnerConfig name = %q, want ccs-mgmt", rc.Name)
+		}
+		if rc.Namespace != "ont-system" {
+			t.Errorf("RunnerConfig namespace = %q, want ont-system", rc.Namespace)
 		}
 	}
 }
@@ -245,12 +248,13 @@ func TestTalosClusterReconcile_RunnerConfigAlreadyExistsSkipsJob(t *testing.T) {
 	scheme := buildDay2Scheme(t)
 	tc := buildManagementTalosCluster("ccs-mgmt", "seam-system")
 
-	// Pre-create the RunnerConfig, simulating a prior bootstrap sequence or
-	// a prior Platform session that left it behind.
+	// Pre-create the RunnerConfig in ont-system, simulating a prior bootstrap
+	// sequence or a prior Platform session that left it behind.
+	// Name equals TalosCluster.Name — Conductor resolves it by cluster-ref flag value.
 	existingRC := &controller.OperationalRunnerConfig{
 		ObjectMeta: metav1.ObjectMeta{
-			Name:      "ccs-mgmt-bootstrap-rc",
-			Namespace: "seam-system",
+			Name:      "ccs-mgmt",
+			Namespace: "ont-system",
 			Labels: map[string]string{
 				"platform.ontai.dev/cluster": "ccs-mgmt",
 			},
