@@ -117,6 +117,12 @@ const (
 	// ConditionTypePhaseFailed is set when a required field is missing or invalid
 	// and reconciliation cannot proceed. The reason encodes the specific cause.
 	ConditionTypePhaseFailed = "PhaseFailed"
+
+	// ConditionTypeKubeconfigUnavailable is set on the import path when a kubeconfig
+	// Secret cannot be generated because a prerequisite resource is absent.
+	// The reason encodes the specific cause. Clears when the kubeconfig Secret is
+	// successfully written to seam-system.
+	ConditionTypeKubeconfigUnavailable = "KubeconfigUnavailable"
 )
 
 // Condition reason constants for TalosCluster.
@@ -184,6 +190,11 @@ const (
 	// empty and a RunnerConfig cannot be created without a version-tagged conductor image.
 	// conductor-schema.md §3, INV-012.
 	ReasonTalosVersionRequired = "TalosVersionRequired"
+
+	// ReasonTalosConfigSecretAbsent is set on KubeconfigUnavailable when the
+	// seam-mc-{cluster-name}-talosconfig Secret is not found in seam-system.
+	// The reconciler requeues after setting this condition. Clears when the Secret appears.
+	ReasonTalosConfigSecretAbsent = "TalosConfigSecretAbsent"
 )
 
 // CAPICiliumPackRef is a reference to the cluster-specific Cilium ClusterPack
@@ -270,6 +281,19 @@ type TalosClusterSpec struct {
 	// conductor-schema.md §3, INV-012.
 	// +optional
 	TalosVersion string `json:"talosVersion,omitempty"`
+
+	// ClusterEndpoint is the cluster VIP or primary API endpoint IP used to
+	// reach the control plane. Required on the import path when generating the
+	// kubeconfig Secret from the talosconfig Secret. Optional for bootstrap mode
+	// (endpoint is derived from the bootstrap Job output). platform-schema.md §5.
+	// +optional
+	ClusterEndpoint string `json:"clusterEndpoint,omitempty"`
+
+	// NodeAddresses is the list of node IPs belonging to this cluster.
+	// Used by DSNSReconciler to populate A records in the seam DNS zone.
+	// Optional. platform-schema.md §5.
+	// +optional
+	NodeAddresses []string `json:"nodeAddresses,omitempty"`
 
 	// CAPI holds the CAPI-specific configuration for target cluster lifecycle.
 	// When CAPI.Enabled=false (management cluster), this field is ignored except

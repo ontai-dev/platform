@@ -143,6 +143,13 @@ spec:
                 required:
                 - enabled
                 type: object
+              clusterEndpoint:
+                description: |-
+                  ClusterEndpoint is the cluster VIP or primary API endpoint IP used to
+                  reach the control plane. Required on the import path when generating the
+                  kubeconfig Secret from the talosconfig Secret. Optional for bootstrap mode
+                  (endpoint is derived from the bootstrap Job output). platform-schema.md §5.
+                type: string
               infrastructureProvider:
                 allOf:
                 - enum:
@@ -245,6 +252,14 @@ spec:
                   Mode declares whether this TalosCluster bootstraps a new cluster or
                   imports an existing one. platform-schema.md §5.
                 type: string
+              nodeAddresses:
+                description: |-
+                  NodeAddresses is the list of node IPs belonging to this cluster.
+                  Used by DSNSReconciler to populate A records in the seam DNS zone.
+                  Optional. platform-schema.md §5.
+                items:
+                  type: string
+                type: array
               talosVersion:
                 description: |-
                   TalosVersion is the Talos version running on this cluster (e.g. "v1.9.3").
