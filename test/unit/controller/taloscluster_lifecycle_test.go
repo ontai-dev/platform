@@ -61,23 +61,47 @@ func buildImportTalosCluster(name, namespace string) *platformv1alpha1.TalosClus
 	}
 }
 
+// buildFakeTalosconfigSecret returns a Secret mimicking the talosconfig Secret
+// that the import path reads from seam-system. Content is a minimal valid YAML
+// placeholder — the talos goclient is bypassed via KubeconfigGeneratorFn in tests.
+func buildFakeTalosconfigSecret(clusterName string) *corev1.Secret {
+	return &corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "seam-mc-" + clusterName + "-talosconfig",
+			Namespace: "seam-system",
+		},
+		Data: map[string][]byte{
+			"talosconfig": []byte("context: " + clusterName + "\ncontexts:\n  " + clusterName + ":\n    endpoints: []\n"),
+		},
+	}
+}
+
+// fakeKubeconfigGenerator is a KubeconfigGeneratorFn that returns a minimal
+// placeholder kubeconfig. Used to bypass the real talos goclient in unit tests.
+func fakeKubeconfigGenerator(_ context.Context, _, _ string) ([]byte, error) {
+	return []byte("apiVersion: v1\nkind: Config\nclusters: []\nusers: []\ncontexts: []\n"), nil
+}
+
 // TestTalosClusterReconcile_ImportModeCreatesRunnerConfigAndTransitionsToReady
-// verifies that spec.mode=import creates a RunnerConfig in ont-system, sets
-// origin=imported and Ready=True, and never submits a bootstrap Job.
+// verifies that spec.mode=import creates a RunnerConfig in ont-system, generates
+// the kubeconfig Secret, sets origin=imported and Ready=True, and never submits a
+// bootstrap Job. KubeconfigGeneratorFn is injected to bypass the talos goclient.
 // platform-schema.md §5 TalosClusterModeImport.
 func TestTalosClusterReconcile_ImportModeCreatesRunnerConfigAndTransitionsToReady(t *testing.T) {
 	scheme := buildDay2Scheme(t)
 	tc := buildImportTalosCluster("ccs-mgmt", "seam-system")
+	talosconfigSecret := buildFakeTalosconfigSecret("ccs-mgmt")
 
 	c := fake.NewClientBuilder().
 		WithScheme(scheme).
-		WithObjects(tc).
+		WithObjects(tc, talosconfigSecret).
 		WithStatusSubresource(tc).
 		Build()
 	r := &controller.TalosClusterReconciler{
-		Client:   c,
-		Scheme:   scheme,
-		Recorder: record.NewFakeRecorder(32),
+		Client:                c,
+		Scheme:                scheme,
+		Recorder:              record.NewFakeRecorder(32),
+		KubeconfigGeneratorFn: fakeKubeconfigGenerator,
 	}
 
 	result, err := r.Reconcile(context.Background(), ctrl.Request{
@@ -153,6 +177,67 @@ func TestTalosClusterReconcile_ImportModeCreatesRunnerConfigAndTransitionsToRead
 	}
 	if bootstrapCond.Reason != platformv1alpha1.ReasonImportComplete {
 		t.Errorf("Bootstrapping reason = %q, want %q", bootstrapCond.Reason, platformv1alpha1.ReasonImportComplete)
+	}
+
+	// Kubeconfig Secret must exist in seam-system.
+	kubeconfigSecret := &corev1.Secret{}
+	if err := c.Get(context.Background(), types.NamespacedName{
+		Name:      "seam-mc-ccs-mgmt-kubeconfig",
+		Namespace: "seam-system",
+	}, kubeconfigSecret); err != nil {
+		t.Fatalf("kubeconfig Secret not created: %v", err)
+	}
+	if _, ok := kubeconfigSecret.Data["value"]; !ok {
+		t.Error("kubeconfig Secret missing 'value' key")
+	}
+}
+
+// TestTalosClusterReconcile_ImportMode_TalosConfigAbsent verifies that when
+// spec.mode=import and the talosconfig Secret is absent, the reconciler sets
+// KubeconfigUnavailable=True with reason TalosConfigSecretAbsent and requeues.
+// platform-schema.md §5 TalosClusterModeImport.
+func TestTalosClusterReconcile_ImportMode_TalosConfigAbsent(t *testing.T) {
+	scheme := buildDay2Scheme(t)
+	tc := buildImportTalosCluster("ccs-mgmt", "seam-system")
+
+	// No talosconfig Secret pre-created.
+	c := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithObjects(tc).
+		WithStatusSubresource(tc).
+		Build()
+	r := &controller.TalosClusterReconciler{
+		Client:   c,
+		Scheme:   scheme,
+		Recorder: record.NewFakeRecorder(32),
+		// No KubeconfigGeneratorFn — should not reach the generator because talosconfig is absent.
+	}
+
+	result, err := r.Reconcile(context.Background(), ctrl.Request{
+		NamespacedName: types.NamespacedName{Name: "ccs-mgmt", Namespace: "seam-system"},
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if result.RequeueAfter == 0 {
+		t.Error("expected requeue when talosconfig Secret is absent, got RequeueAfter=0")
+	}
+
+	got := &platformv1alpha1.TalosCluster{}
+	if err := c.Get(context.Background(), types.NamespacedName{
+		Name: "ccs-mgmt", Namespace: "seam-system",
+	}, got); err != nil {
+		t.Fatalf("get TalosCluster: %v", err)
+	}
+	cond := platformv1alpha1.FindCondition(got.Status.Conditions, platformv1alpha1.ConditionTypeKubeconfigUnavailable)
+	if cond == nil {
+		t.Fatal("KubeconfigUnavailable condition not set")
+	}
+	if cond.Status != metav1.ConditionTrue {
+		t.Errorf("KubeconfigUnavailable = %s, want True", cond.Status)
+	}
+	if cond.Reason != platformv1alpha1.ReasonTalosConfigSecretAbsent {
+		t.Errorf("KubeconfigUnavailable reason = %q, want %q", cond.Reason, platformv1alpha1.ReasonTalosConfigSecretAbsent)
 	}
 }
 

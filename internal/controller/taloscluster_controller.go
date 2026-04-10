@@ -57,6 +57,12 @@ type TalosClusterReconciler struct {
 	// Used exclusively in unit tests to inject a controlled availability response
 	// without a live target cluster kubeconfig.
 	RemoteConductorAvailableFn func(ctx context.Context, clusterName string) (bool, error)
+
+	// KubeconfigGeneratorFn, if non-nil, replaces the real talos goclient call in
+	// ensureKubeconfigSecret. The function receives the cluster name and endpoint and
+	// returns raw kubeconfig bytes. Used exclusively in unit tests to avoid requiring
+	// a live talos endpoint. CP-INV-001 extension: authorized by Governor 2026-04-10.
+	KubeconfigGeneratorFn func(ctx context.Context, clusterName, endpoint string) ([]byte, error)
 }
 
 // Reconcile is the main reconciliation loop for TalosCluster.
@@ -184,16 +190,27 @@ func (r *TalosClusterReconciler) reconcileDirectBootstrap(ctx context.Context, t
 
 	// Import mode — the cluster already exists and is being brought under Seam
 	// governance. Never submit a bootstrap Job. RunnerConfig is ensured above so
-	// Conductor can attach to the cluster. Transition immediately to Ready.
+	// Conductor can attach to the cluster.
+	// Before transitioning to Ready, generate the kubeconfig Secret from the
+	// talosconfig Secret so downstream consumers have API access. If the talosconfig
+	// Secret is absent, ensureKubeconfigSecret sets KubeconfigUnavailable and requeues.
 	// platform-schema.md §5 TalosClusterModeImport.
 	if tc.Spec.Mode == platformv1alpha1.TalosClusterModeImport {
 		tc.Status.Origin = platformv1alpha1.TalosClusterOriginImported
+
+		if result, err := r.ensureKubeconfigSecret(ctx, tc); err != nil {
+			return ctrl.Result{}, fmt.Errorf("reconcileDirectBootstrap: import kubeconfig: %w", err)
+		} else if result.RequeueAfter > 0 {
+			// talosconfig Secret absent — condition already set, status will be patched by caller.
+			return result, nil
+		}
+
 		platformv1alpha1.SetCondition(
 			&tc.Status.Conditions,
 			platformv1alpha1.ConditionTypeBootstrapping,
 			metav1.ConditionFalse,
 			platformv1alpha1.ReasonImportComplete,
-			"Management cluster import: RunnerConfig created, cluster adopted under Seam governance without bootstrap Job.",
+			"Management cluster import: RunnerConfig created, kubeconfig generated, cluster adopted under Seam governance without bootstrap Job.",
 			tc.Generation,
 		)
 		platformv1alpha1.SetCondition(
@@ -204,7 +221,7 @@ func (r *TalosClusterReconciler) reconcileDirectBootstrap(ctx context.Context, t
 			"Management cluster imported and Ready.",
 			tc.Generation,
 		)
-		logger.Info("management cluster import — RunnerConfig created, transitioning to Ready",
+		logger.Info("management cluster import — RunnerConfig created, kubeconfig generated, transitioning to Ready",
 			"name", tc.Name)
 		return ctrl.Result{}, nil
 	}
