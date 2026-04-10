@@ -176,6 +176,33 @@ func (r *TalosClusterReconciler) reconcileDirectBootstrap(ctx context.Context, t
 		}
 	}
 
+	// Import mode — the cluster already exists and is being brought under Seam
+	// governance. Never submit a bootstrap Job. RunnerConfig is ensured above so
+	// Conductor can attach to the cluster. Transition immediately to Ready.
+	// platform-schema.md §5 TalosClusterModeImport.
+	if tc.Spec.Mode == platformv1alpha1.TalosClusterModeImport {
+		tc.Status.Origin = platformv1alpha1.TalosClusterOriginImported
+		platformv1alpha1.SetCondition(
+			&tc.Status.Conditions,
+			platformv1alpha1.ConditionTypeBootstrapping,
+			metav1.ConditionFalse,
+			platformv1alpha1.ReasonImportComplete,
+			"Management cluster import: RunnerConfig created, cluster adopted under Seam governance without bootstrap Job.",
+			tc.Generation,
+		)
+		platformv1alpha1.SetCondition(
+			&tc.Status.Conditions,
+			platformv1alpha1.ConditionTypeReady,
+			metav1.ConditionTrue,
+			platformv1alpha1.ReasonClusterReady,
+			"Management cluster imported and Ready.",
+			tc.Generation,
+		)
+		logger.Info("management cluster import — RunnerConfig created, transitioning to Ready",
+			"name", tc.Name)
+		return ctrl.Result{}, nil
+	}
+
 	// Check for an existing bootstrap Job for this TalosCluster.
 	jobName := bootstrapJobName(tc.Name)
 	existingJob, err := r.getBootstrapJob(ctx, tc.Namespace, jobName)

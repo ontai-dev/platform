@@ -44,6 +44,107 @@ func buildManagementTalosCluster(name, namespace string) *platformv1alpha1.Talos
 	}
 }
 
+// buildImportTalosCluster returns a TalosCluster configured for the management
+// cluster import path (capi.enabled=false, mode=import).
+func buildImportTalosCluster(name, namespace string) *platformv1alpha1.TalosCluster {
+	return &platformv1alpha1.TalosCluster{
+		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: namespace, Generation: 1},
+		Spec: platformv1alpha1.TalosClusterSpec{
+			Mode: platformv1alpha1.TalosClusterModeImport,
+			CAPI: platformv1alpha1.CAPIConfig{Enabled: false},
+		},
+	}
+}
+
+// TestTalosClusterReconcile_ImportModeCreatesRunnerConfigAndTransitionsToReady
+// verifies that spec.mode=import creates a RunnerConfig in ont-system, sets
+// origin=imported and Ready=True, and never submits a bootstrap Job.
+// platform-schema.md §5 TalosClusterModeImport.
+func TestTalosClusterReconcile_ImportModeCreatesRunnerConfigAndTransitionsToReady(t *testing.T) {
+	scheme := buildDay2Scheme(t)
+	tc := buildImportTalosCluster("ccs-mgmt", "seam-system")
+
+	c := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithObjects(tc).
+		WithStatusSubresource(tc).
+		Build()
+	r := &controller.TalosClusterReconciler{
+		Client:   c,
+		Scheme:   scheme,
+		Recorder: record.NewFakeRecorder(32),
+	}
+
+	result, err := r.Reconcile(context.Background(), ctrl.Request{
+		NamespacedName: types.NamespacedName{Name: "ccs-mgmt", Namespace: "seam-system"},
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	// Import mode must not requeue — cluster is immediately Ready.
+	if result.RequeueAfter != 0 {
+		t.Errorf("expected no requeue for import mode, got RequeueAfter=%v", result.RequeueAfter)
+	}
+
+	// No bootstrap Job must have been submitted.
+	jobList := &batchv1.JobList{}
+	if err := c.List(context.Background(), jobList); err != nil {
+		t.Fatalf("list Jobs: %v", err)
+	}
+	if len(jobList.Items) != 0 {
+		t.Errorf("import mode must not submit a bootstrap Job, got %d Jobs", len(jobList.Items))
+	}
+
+	// RunnerConfig must exist in ont-system with the cluster name.
+	rcList := &controller.OperationalRunnerConfigList{}
+	if err := c.List(context.Background(), rcList); err != nil {
+		t.Fatalf("list RunnerConfigs: %v", err)
+	}
+	if len(rcList.Items) != 1 {
+		t.Errorf("expected 1 RunnerConfig after import, got %d", len(rcList.Items))
+	}
+	if len(rcList.Items) > 0 {
+		rc := rcList.Items[0]
+		if rc.Name != "ccs-mgmt" {
+			t.Errorf("RunnerConfig name = %q, want ccs-mgmt", rc.Name)
+		}
+		if rc.Namespace != "ont-system" {
+			t.Errorf("RunnerConfig namespace = %q, want ont-system", rc.Namespace)
+		}
+	}
+
+	// TalosCluster must be Ready with origin=imported.
+	got := &platformv1alpha1.TalosCluster{}
+	if err := c.Get(context.Background(), types.NamespacedName{
+		Name: "ccs-mgmt", Namespace: "seam-system",
+	}, got); err != nil {
+		t.Fatalf("get TalosCluster: %v", err)
+	}
+	if got.Status.Origin != platformv1alpha1.TalosClusterOriginImported {
+		t.Errorf("Origin = %q, want imported", got.Status.Origin)
+	}
+	readyCond := platformv1alpha1.FindCondition(got.Status.Conditions, platformv1alpha1.ConditionTypeReady)
+	if readyCond == nil {
+		t.Fatal("Ready condition not set after import")
+	}
+	if readyCond.Status != metav1.ConditionTrue {
+		t.Errorf("Ready = %s, want True", readyCond.Status)
+	}
+	if readyCond.Reason != platformv1alpha1.ReasonClusterReady {
+		t.Errorf("Ready reason = %q, want %q", readyCond.Reason, platformv1alpha1.ReasonClusterReady)
+	}
+	bootstrapCond := platformv1alpha1.FindCondition(got.Status.Conditions, platformv1alpha1.ConditionTypeBootstrapping)
+	if bootstrapCond == nil {
+		t.Fatal("Bootstrapping condition not set after import")
+	}
+	if bootstrapCond.Status != metav1.ConditionFalse {
+		t.Errorf("Bootstrapping = %s, want False", bootstrapCond.Status)
+	}
+	if bootstrapCond.Reason != platformv1alpha1.ReasonImportComplete {
+		t.Errorf("Bootstrapping reason = %q, want %q", bootstrapCond.Reason, platformv1alpha1.ReasonImportComplete)
+	}
+}
+
 // TestTalosClusterReconcile_ManagementBootstrapJobSubmitted verifies that when a
 // management cluster TalosCluster (capi.enabled=false) is first reconciled, the
 // reconciler submits a bootstrap Conductor Job and sets Bootstrapping=True with
