@@ -245,6 +245,13 @@ spec:
                   Mode declares whether this TalosCluster bootstraps a new cluster or
                   imports an existing one. platform-schema.md §5.
                 type: string
+              talosVersion:
+                description: |-
+                  TalosVersion is the Talos version running on this cluster (e.g. "v1.9.3").
+                  Required for management clusters (capi.enabled=false): the conductor image is
+                  derived from this field as {registry}/conductor:{talosVersion}-dev.
+                  conductor-schema.md §3, INV-012.
+                type: string
             required:
             - mode
             type: object

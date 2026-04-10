@@ -63,17 +63,6 @@ func main() {
 	ctrl.SetLogger(zap.New(zap.UseFlagOptions(&opts)))
 	setupLog := ctrl.Log.WithName("setup")
 
-	// CONDUCTOR_IMAGE is a required configuration value — the fully qualified image
-	// reference used when creating RunnerConfig CRs for management cluster bootstrap
-	// and import. Fail fast if absent so a misconfigured Deployment fails immediately
-	// at startup rather than silently creating RunnerConfigs with empty image refs.
-	// platform-schema.md §3, conductor-schema.md §17.
-	conductorImage := os.Getenv("CONDUCTOR_IMAGE")
-	if conductorImage == "" {
-		setupLog.Error(nil, "CONDUCTOR_IMAGE env var is required but not set — cannot create RunnerConfig CRs without a valid conductor image reference")
-		os.Exit(1)
-	}
-
 	// CP-INV-007: leader election required. Lease name: platform-leader.
 	// Lease namespace: seam-system (canonical operator namespace).
 	mgr, err := ctrl.NewManager(ctrl.GetConfigOrDie(), ctrl.Options{
@@ -90,10 +79,9 @@ func main() {
 	}
 
 	if err := (&controller.TalosClusterReconciler{
-		Client:         mgr.GetClient(),
-		Scheme:         mgr.GetScheme(),
-		Recorder:       mgr.GetEventRecorderFor("taloscluster-controller"),
-		ConductorImage: conductorImage,
+		Client:   mgr.GetClient(),
+		Scheme:   mgr.GetScheme(),
+		Recorder: mgr.GetEventRecorderFor("taloscluster-controller"),
 	}).SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "unable to create controller", "controller", "TalosCluster")
 		os.Exit(1)

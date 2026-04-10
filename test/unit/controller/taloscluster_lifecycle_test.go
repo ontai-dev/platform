@@ -34,24 +34,29 @@ import (
 
 // buildManagementTalosCluster returns a TalosCluster configured for the
 // management cluster direct bootstrap path (capi.enabled=false).
+// TalosVersion is set to a realistic value so ensureBootstrapRunnerConfig can
+// derive the conductor image per INV-012.
 func buildManagementTalosCluster(name, namespace string) *platformv1alpha1.TalosCluster {
 	return &platformv1alpha1.TalosCluster{
 		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: namespace, Generation: 1},
 		Spec: platformv1alpha1.TalosClusterSpec{
-			Mode: platformv1alpha1.TalosClusterModeBootstrap,
-			CAPI: platformv1alpha1.CAPIConfig{Enabled: false},
+			Mode:         platformv1alpha1.TalosClusterModeBootstrap,
+			TalosVersion: "v1.9.3",
+			CAPI:         platformv1alpha1.CAPIConfig{Enabled: false},
 		},
 	}
 }
 
 // buildImportTalosCluster returns a TalosCluster configured for the management
 // cluster import path (capi.enabled=false, mode=import).
+// TalosVersion is set so ensureBootstrapRunnerConfig can derive the conductor image.
 func buildImportTalosCluster(name, namespace string) *platformv1alpha1.TalosCluster {
 	return &platformv1alpha1.TalosCluster{
 		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: namespace, Generation: 1},
 		Spec: platformv1alpha1.TalosClusterSpec{
-			Mode: platformv1alpha1.TalosClusterModeImport,
-			CAPI: platformv1alpha1.CAPIConfig{Enabled: false},
+			Mode:         platformv1alpha1.TalosClusterModeImport,
+			TalosVersion: "v1.9.3",
+			CAPI:         platformv1alpha1.CAPIConfig{Enabled: false},
 		},
 	}
 }
@@ -70,10 +75,9 @@ func TestTalosClusterReconcile_ImportModeCreatesRunnerConfigAndTransitionsToRead
 		WithStatusSubresource(tc).
 		Build()
 	r := &controller.TalosClusterReconciler{
-		Client:         c,
-		Scheme:         scheme,
-		Recorder:       record.NewFakeRecorder(32),
-		ConductorImage: "10.20.0.1:5000/ontai-dev/conductor:dev",
+		Client:   c,
+		Scheme:   scheme,
+		Recorder: record.NewFakeRecorder(32),
 	}
 
 	result, err := r.Reconcile(context.Background(), ctrl.Request{
@@ -112,9 +116,11 @@ func TestTalosClusterReconcile_ImportModeCreatesRunnerConfigAndTransitionsToRead
 		if rc.Namespace != "ont-system" {
 			t.Errorf("RunnerConfig namespace = %q, want ont-system", rc.Namespace)
 		}
-		if rc.Spec.RunnerImage != "10.20.0.1:5000/ontai-dev/conductor:dev" {
-			t.Errorf("RunnerConfig RunnerImage = %q, want 10.20.0.1:5000/ontai-dev/conductor:dev",
-				rc.Spec.RunnerImage)
+		// Image derived from TalosVersion="v1.9.3" + default registry + devRevision.
+		// conductor-schema.md §3, INV-012.
+		wantImage := "10.20.0.1:5000/ontai-dev/conductor:v1.9.3-dev"
+		if rc.Spec.RunnerImage != wantImage {
+			t.Errorf("RunnerConfig RunnerImage = %q, want %q", rc.Spec.RunnerImage, wantImage)
 		}
 	}
 

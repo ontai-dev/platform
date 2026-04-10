@@ -2,7 +2,9 @@ package controller
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"os"
 	"time"
 
 	appsv1 "k8s.io/api/apps/v1"
@@ -41,7 +43,28 @@ const (
 
 	// clusterNamespaceLabel is the namespace label applied to identify the cluster.
 	clusterNamespaceLabel = "ontai.dev/cluster"
+
+	// conductorImageName is the base image name for the Conductor binary.
+	// conductor-schema.md §3.
+	conductorImageName = "conductor"
+
+	// devRevision is the revision suffix used for lab/development conductor images.
+	// Stable releases use v{talosVersion}-r{N}. Dev builds use {talosVersion}-dev.
+	// conductor-schema.md §3, INV-011.
+	devRevision = "dev"
+
+	// conductorRegistryEnv is the env var name for overriding the conductor image registry.
+	conductorRegistryEnv = "CONDUCTOR_REGISTRY"
+
+	// conductorRegistryDefault is the default conductor image registry (lab local registry).
+	// INV-011: lab tags never enter the public registry.
+	conductorRegistryDefault = "10.20.0.1:5000/ontai-dev"
 )
+
+// errTalosVersionRequired is returned by ensureBootstrapRunnerConfig when
+// TalosCluster.Spec.TalosVersion is empty. The caller must return ctrl.Result{}
+// without error — the PhaseFailed condition is already written to tc.Status.
+var errTalosVersionRequired = errors.New("spec.talosVersion is required for conductor image derivation")
 
 // bootstrapJobName returns the Kubernetes Job name for the bootstrap Job of a
 // given TalosCluster.
@@ -71,10 +94,33 @@ func (r *TalosClusterReconciler) getBootstrapRunnerConfig(ctx context.Context, c
 // ensureBootstrapRunnerConfig creates the RunnerConfig CR in bootstrapRunnerConfigNamespace
 // (ont-system) for a management cluster bootstrap or import if it does not already exist.
 // Name equals TalosCluster.Name so Conductor can locate it by cluster-ref flag value.
-// RunnerImage is taken from r.ConductorImage — populated from CONDUCTOR_IMAGE env var
-// at startup (main.go fails fast if absent). Idempotent — returns nil when already present.
+// RunnerImage is derived from tc.Spec.TalosVersion per INV-012 and conductor-schema.md §3:
+//
+//	{CONDUCTOR_REGISTRY}/{conductorImageName}:{talosVersion}-dev
+//
+// If TalosVersion is empty, sets ConditionTypePhaseFailed on tc and returns
+// errTalosVersionRequired — the caller must return ctrl.Result{}, nil.
+// Idempotent — returns nil when RunnerConfig already present.
 // platform-schema.md §3, CP-INV-003.
 func (r *TalosClusterReconciler) ensureBootstrapRunnerConfig(ctx context.Context, tc *platformv1alpha1.TalosCluster) error {
+	if tc.Spec.TalosVersion == "" {
+		platformv1alpha1.SetCondition(
+			&tc.Status.Conditions,
+			platformv1alpha1.ConditionTypePhaseFailed,
+			metav1.ConditionTrue,
+			platformv1alpha1.ReasonTalosVersionRequired,
+			"spec.talosVersion is required: the conductor image is derived from the cluster's Talos version (INV-012). Set spec.talosVersion to proceed.",
+			tc.Generation,
+		)
+		return errTalosVersionRequired
+	}
+
+	registry := os.Getenv(conductorRegistryEnv)
+	if registry == "" {
+		registry = conductorRegistryDefault
+	}
+	runnerImage := fmt.Sprintf("%s/%s:%s-%s", registry, conductorImageName, tc.Spec.TalosVersion, devRevision)
+
 	name := bootstrapRunnerConfigName(tc.Name)
 	rc := &OperationalRunnerConfig{
 		ObjectMeta: metav1.ObjectMeta{
@@ -86,7 +132,7 @@ func (r *TalosClusterReconciler) ensureBootstrapRunnerConfig(ctx context.Context
 		},
 		Spec: OperationalRunnerConfigSpec{
 			ClusterRef:  tc.Name,
-			RunnerImage: r.ConductorImage,
+			RunnerImage: runnerImage,
 			Steps: []OperationalStep{
 				{
 					Name:          "enable",

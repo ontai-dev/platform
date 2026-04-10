@@ -2,6 +2,7 @@ package controller
 
 import (
 	"context"
+	"errors"
 	"fmt"
 
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
@@ -56,12 +57,6 @@ type TalosClusterReconciler struct {
 	// Used exclusively in unit tests to inject a controlled availability response
 	// without a live target cluster kubeconfig.
 	RemoteConductorAvailableFn func(ctx context.Context, clusterName string) (bool, error)
-
-	// ConductorImage is the fully qualified conductor image reference used when
-	// creating RunnerConfig CRs (bootstrap and import paths). Set from the
-	// CONDUCTOR_IMAGE env var at startup. Must be non-empty in production.
-	// conductor-schema.md §17, platform-schema.md §3.
-	ConductorImage string
 }
 
 // Reconcile is the main reconciliation loop for TalosCluster.
@@ -178,6 +173,11 @@ func (r *TalosClusterReconciler) reconcileDirectBootstrap(ctx context.Context, t
 	// status transition fires. Idempotent — no-op if it already exists.
 	if preExistingRC == nil {
 		if err := r.ensureBootstrapRunnerConfig(ctx, tc); err != nil {
+			if errors.Is(err, errTalosVersionRequired) {
+				// PhaseFailed condition already written to tc by ensureBootstrapRunnerConfig.
+				// Do not requeue — operator waits for the spec to be corrected.
+				return ctrl.Result{}, nil
+			}
 			return ctrl.Result{}, fmt.Errorf("reconcileDirectBootstrap: ensure RunnerConfig: %w", err)
 		}
 	}

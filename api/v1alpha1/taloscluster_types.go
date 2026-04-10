@@ -113,6 +113,10 @@ const (
 	// (INV-021). The reconciler preserves the field and stops without attempting
 	// further reconciliation on the screen path. Clears when Screen is implemented.
 	ConditionTypeScreenProviderNotImplemented = "ScreenProviderNotImplemented"
+
+	// ConditionTypePhaseFailed is set when a required field is missing or invalid
+	// and reconciliation cannot proceed. The reason encodes the specific cause.
+	ConditionTypePhaseFailed = "PhaseFailed"
 )
 
 // Condition reason constants for TalosCluster.
@@ -175,6 +179,11 @@ const (
 	// ReasonScreenNotImplemented is set on ScreenProviderNotImplemented when
 	// spec.infrastructure.provider=screen is observed. INV-021.
 	ReasonScreenNotImplemented = "ScreenNotImplemented"
+
+	// ReasonTalosVersionRequired is set on PhaseFailed when spec.talosVersion is
+	// empty and a RunnerConfig cannot be created without a version-tagged conductor image.
+	// conductor-schema.md §3, INV-012.
+	ReasonTalosVersionRequired = "TalosVersionRequired"
 )
 
 // CAPICiliumPackRef is a reference to the cluster-specific Cilium ClusterPack
@@ -254,6 +263,13 @@ type TalosClusterSpec struct {
 	// imports an existing one. platform-schema.md §5.
 	// +kubebuilder:validation:Enum=bootstrap;import
 	Mode TalosClusterMode `json:"mode"`
+
+	// TalosVersion is the Talos version running on this cluster (e.g. "v1.9.3").
+	// Required for management clusters (capi.enabled=false): the conductor image is
+	// derived from this field as {registry}/conductor:{talosVersion}-dev.
+	// conductor-schema.md §3, INV-012.
+	// +optional
+	TalosVersion string `json:"talosVersion,omitempty"`
 
 	// CAPI holds the CAPI-specific configuration for target cluster lifecycle.
 	// When CAPI.Enabled=false (management cluster), this field is ignored except
