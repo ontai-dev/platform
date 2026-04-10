@@ -49,6 +49,53 @@ func bootstrapJobName(clusterName string) string {
 	return fmt.Sprintf("%s-bootstrap", clusterName)
 }
 
+// bootstrapRunnerConfigName returns the deterministic RunnerConfig name for a
+// management cluster bootstrap. Stored in the management namespace (ont-system /
+// seam-system) alongside the TalosCluster CR. Format: {clusterName}-bootstrap.
+func bootstrapRunnerConfigName(clusterName string) string {
+	return clusterName + "-bootstrap-rc"
+}
+
+// getBootstrapRunnerConfig returns the bootstrap RunnerConfig for this TalosCluster
+// if it exists in namespace, or nil if it has not been created yet.
+func (r *TalosClusterReconciler) getBootstrapRunnerConfig(ctx context.Context, namespace, clusterName string) (*OperationalRunnerConfig, error) {
+	return getOperationalRunnerConfig(ctx, r.Client, namespace, bootstrapRunnerConfigName(clusterName))
+}
+
+// ensureBootstrapRunnerConfig creates the OperationalRunnerConfig for a management
+// cluster bootstrap if it does not already exist. The RunnerConfig expresses the
+// single-step enable intent for the cluster-bootstrap capability and is owned by
+// the TalosCluster CR. Idempotent — returns nil when already present.
+// platform-schema.md §3, CP-INV-003.
+func (r *TalosClusterReconciler) ensureBootstrapRunnerConfig(ctx context.Context, tc *platformv1alpha1.TalosCluster) error {
+	name := bootstrapRunnerConfigName(tc.Name)
+	rc := buildOperationalRunnerConfig(
+		name,
+		tc.Namespace,
+		tc.Name,
+		nil, // no maintenanceTargetNodes — bootstrap is a cluster-creation operation
+		"",  // no leaderNode — management cluster has no pre-existing operator leader
+		[]OperationalStep{
+			{
+				Name:          "enable",
+				Capability:    bootstrapCapability,
+				HaltOnFailure: true,
+				Parameters: map[string]string{
+					"cluster": tc.Name,
+				},
+			},
+		},
+	)
+	if err := controllerutil.SetControllerReference(tc, rc, r.Scheme); err != nil {
+		return fmt.Errorf("ensureBootstrapRunnerConfig: set owner reference: %w", err)
+	}
+	if err := r.Client.Create(ctx, rc); err != nil && !apierrors.IsAlreadyExists(err) {
+		return fmt.Errorf("ensureBootstrapRunnerConfig: create RunnerConfig %s/%s: %w",
+			tc.Namespace, name, err)
+	}
+	return nil
+}
+
 // getBootstrapJob returns the bootstrap Job for a TalosCluster if it exists,
 // or nil if it has not been created yet.
 func (r *TalosClusterReconciler) getBootstrapJob(ctx context.Context, namespace, jobName string) (*batchv1.Job, error) {

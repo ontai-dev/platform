@@ -191,6 +191,193 @@ func TestTalosClusterReconcile_ManagementBootstrapComplete(t *testing.T) {
 	}
 }
 
+// TestTalosClusterReconcile_RunnerConfigCreatedOnFirstObservation verifies that when a
+// management cluster TalosCluster (capi.enabled=false) has no RunnerConfig in the fake
+// client, the first reconcile creates one with the correct clusterRef.
+// platform-schema.md §3 Part 2: RunnerConfig creation on first observation.
+func TestTalosClusterReconcile_RunnerConfigCreatedOnFirstObservation(t *testing.T) {
+	scheme := buildDay2Scheme(t)
+	tc := buildManagementTalosCluster("ccs-mgmt", "seam-system")
+
+	c := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithObjects(tc).
+		WithStatusSubresource(tc).
+		Build()
+	r := &controller.TalosClusterReconciler{
+		Client:   c,
+		Scheme:   scheme,
+		Recorder: record.NewFakeRecorder(32),
+	}
+
+	_, err := r.Reconcile(context.Background(), ctrl.Request{
+		NamespacedName: types.NamespacedName{Name: "ccs-mgmt", Namespace: "seam-system"},
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	// RunnerConfig must exist after first reconcile.
+	rcList := &controller.OperationalRunnerConfigList{}
+	if err := c.List(context.Background(), rcList); err != nil {
+		t.Fatalf("list RunnerConfigs: %v", err)
+	}
+	if len(rcList.Items) != 1 {
+		t.Errorf("expected 1 RunnerConfig after first observation, got %d", len(rcList.Items))
+	}
+	if len(rcList.Items) > 0 {
+		rc := rcList.Items[0]
+		if rc.Spec.ClusterRef != "ccs-mgmt" {
+			t.Errorf("RunnerConfig clusterRef = %q, want ccs-mgmt", rc.Spec.ClusterRef)
+		}
+		if rc.Namespace != "seam-system" {
+			t.Errorf("RunnerConfig namespace = %q, want seam-system", rc.Namespace)
+		}
+	}
+}
+
+// TestTalosClusterReconcile_RunnerConfigAlreadyExistsSkipsJob verifies that when a
+// RunnerConfig pre-exists in ont-system for this cluster (no bootstrap Job present),
+// the reconciler skips Job submission and transitions the TalosCluster directly to
+// Ready. This is the idempotency guard for clusters already running when the CR
+// is applied. platform-schema.md §3 Parts 1 and 3.
+func TestTalosClusterReconcile_RunnerConfigAlreadyExistsSkipsJob(t *testing.T) {
+	scheme := buildDay2Scheme(t)
+	tc := buildManagementTalosCluster("ccs-mgmt", "seam-system")
+
+	// Pre-create the RunnerConfig, simulating a prior bootstrap sequence or
+	// a prior Platform session that left it behind.
+	existingRC := &controller.OperationalRunnerConfig{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "ccs-mgmt-bootstrap-rc",
+			Namespace: "seam-system",
+			Labels: map[string]string{
+				"platform.ontai.dev/cluster": "ccs-mgmt",
+			},
+		},
+		Spec: controller.OperationalRunnerConfigSpec{
+			ClusterRef:  "ccs-mgmt",
+			RunnerImage: "registry.ontai.dev/ontai-dev/conductor:latest",
+		},
+	}
+
+	c := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithObjects(tc, existingRC).
+		WithStatusSubresource(tc).
+		Build()
+	r := &controller.TalosClusterReconciler{
+		Client:   c,
+		Scheme:   scheme,
+		Recorder: record.NewFakeRecorder(32),
+	}
+
+	result, err := r.Reconcile(context.Background(), ctrl.Request{
+		NamespacedName: types.NamespacedName{Name: "ccs-mgmt", Namespace: "seam-system"},
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	// No requeue — management cluster acknowledged as operational.
+	if result.RequeueAfter != 0 {
+		t.Errorf("expected no requeue when RunnerConfig pre-exists and no Job, got RequeueAfter=%v",
+			result.RequeueAfter)
+	}
+
+	// No bootstrap Job must have been submitted.
+	jobList := &batchv1.JobList{}
+	if err := c.List(context.Background(), jobList); err != nil {
+		t.Fatalf("list Jobs: %v", err)
+	}
+	if len(jobList.Items) != 0 {
+		t.Errorf("expected 0 Jobs when RunnerConfig pre-exists, got %d", len(jobList.Items))
+	}
+
+	// TalosCluster must be Ready with origin=bootstrapped.
+	got := &platformv1alpha1.TalosCluster{}
+	if err := c.Get(context.Background(), types.NamespacedName{
+		Name: "ccs-mgmt", Namespace: "seam-system",
+	}, got); err != nil {
+		t.Fatalf("get TalosCluster: %v", err)
+	}
+	readyCond := platformv1alpha1.FindCondition(got.Status.Conditions, platformv1alpha1.ConditionTypeReady)
+	if readyCond == nil {
+		t.Fatal("Ready condition not set when RunnerConfig pre-exists and no Job")
+	}
+	if readyCond.Status != metav1.ConditionTrue {
+		t.Errorf("Ready = %s, want True", readyCond.Status)
+	}
+	if readyCond.Reason != platformv1alpha1.ReasonClusterReady {
+		t.Errorf("Ready reason = %q, want %q", readyCond.Reason, platformv1alpha1.ReasonClusterReady)
+	}
+	if got.Status.Origin != platformv1alpha1.TalosClusterOriginBootstrapped {
+		t.Errorf("Origin = %q, want bootstrapped", got.Status.Origin)
+	}
+}
+
+// TestTalosClusterReconcile_ManagementClusterReadyAfterRunnerConfigPresent verifies
+// Part 3: after a first-observation reconcile creates the RunnerConfig, a second
+// reconcile that finds the RunnerConfig present but no Job transitions the cluster
+// to Ready. This validates the two-pass idempotency sequence for a pre-existing
+// management cluster. platform-schema.md §3.
+func TestTalosClusterReconcile_ManagementClusterReadyAfterRunnerConfigPresent(t *testing.T) {
+	scheme := buildDay2Scheme(t)
+	tc := buildManagementTalosCluster("ccs-mgmt", "seam-system")
+
+	c := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithObjects(tc).
+		WithStatusSubresource(tc).
+		Build()
+	r := &controller.TalosClusterReconciler{
+		Client:   c,
+		Scheme:   scheme,
+		Recorder: record.NewFakeRecorder(32),
+	}
+	req := ctrl.Request{
+		NamespacedName: types.NamespacedName{Name: "ccs-mgmt", Namespace: "seam-system"},
+	}
+
+	// First reconcile: no RunnerConfig pre-exists → creates RunnerConfig and
+	// submits bootstrap Job (fresh bootstrap path).
+	if _, err := r.Reconcile(context.Background(), req); err != nil {
+		t.Fatalf("first reconcile error: %v", err)
+	}
+
+	// Remove the submitted Job to simulate the scenario where the cluster was already
+	// running (the Job was never submitted in reality — we simulate the state after
+	// the RunnerConfig exists but no Job is present).
+	jobList := &batchv1.JobList{}
+	if err := c.List(context.Background(), jobList); err != nil {
+		t.Fatalf("list Jobs: %v", err)
+	}
+	for i := range jobList.Items {
+		if err := c.Delete(context.Background(), &jobList.Items[i]); err != nil {
+			t.Fatalf("delete bootstrap Job: %v", err)
+		}
+	}
+
+	// Second reconcile: RunnerConfig now pre-exists, no Job → must transition to Ready.
+	if _, err := r.Reconcile(context.Background(), req); err != nil {
+		t.Fatalf("second reconcile error: %v", err)
+	}
+
+	got := &platformv1alpha1.TalosCluster{}
+	if err := c.Get(context.Background(), req.NamespacedName, got); err != nil {
+		t.Fatalf("get TalosCluster after second reconcile: %v", err)
+	}
+	readyCond := platformv1alpha1.FindCondition(got.Status.Conditions, platformv1alpha1.ConditionTypeReady)
+	if readyCond == nil {
+		t.Fatal("Ready condition not set on second reconcile with RunnerConfig present and no Job")
+	}
+	if readyCond.Status != metav1.ConditionTrue {
+		t.Errorf("Ready = %s, want True", readyCond.Status)
+	}
+	if got.Status.Origin != platformv1alpha1.TalosClusterOriginBootstrapped {
+		t.Errorf("Origin = %q, want bootstrapped", got.Status.Origin)
+	}
+}
+
 // TestTalosClusterReconcile_LineageSyncedInitialized verifies that the first reconcile
 // of a TalosCluster initializes the LineageSynced condition to False with reason
 // LineageControllerAbsent. This is a one-time write — InfrastructureLineageController

@@ -68,6 +68,7 @@ type TalosClusterReconciler struct {
 // +kubebuilder:rbac:groups="",resources=secrets,verbs=get;list;watch
 // +kubebuilder:rbac:groups=batch,resources=jobs,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups="",resources=configmaps,verbs=get;list;watch
+// +kubebuilder:rbac:groups=runner.ontai.dev,resources=runnerconfigs,verbs=get;list;watch;create
 // +kubebuilder:rbac:groups=infrastructure.cluster.x-k8s.io,resources=seaminfrastructuremachines,verbs=get;list;watch
 func (r *TalosClusterReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
 	logger := log.FromContext(ctx)
@@ -137,13 +138,43 @@ func (r *TalosClusterReconciler) Reconcile(ctx context.Context, req ctrl.Request
 }
 
 // reconcileDirectBootstrap handles the management cluster bootstrap path
-// (spec.capi.enabled=false). Submits a bootstrap Conductor Job if one does not
-// yet exist. Watches for Job completion and OperationResult.
-// platform-design.md §5.
+// (spec.capi.enabled=false). The reconciler implements a three-part contract
+// that prevents duplicate bootstrap Jobs when the TalosCluster CR is applied
+// to a cluster that already exists. platform-schema.md §3, platform-design.md §5.
+//
+// Part 1 — Idempotency guard: if a RunnerConfig already exists in the management
+// namespace before this reconcile creates one, the cluster was already running when
+// the CR was applied. Skip Job submission and transition directly to Ready.
+//
+// Part 2 — RunnerConfig creation: ensure a RunnerConfig exists in the management
+// namespace before any Job is submitted. Created on first observation when absent.
+//
+// Part 3 — Management cluster ready transition: after the idempotency guard fires,
+// set origin=bootstrapped and Ready=True to acknowledge the existing cluster.
 func (r *TalosClusterReconciler) reconcileDirectBootstrap(ctx context.Context, tc *platformv1alpha1.TalosCluster) (ctrl.Result, error) {
 	logger := log.FromContext(ctx)
 	logger.Info("reconciling TalosCluster via direct bootstrap path",
 		"name", tc.Name, "namespace", tc.Namespace)
+
+	// Part 1 — check whether a RunnerConfig pre-exists before this reconcile
+	// creates one. A pre-existing RunnerConfig signals that bootstrap already
+	// occurred (Platform created it in a prior session, or the compiler created it
+	// during the bootstrap sequence). The result is captured before any creation so
+	// that the distinction between "pre-existing" and "just created by us" is stable
+	// within this reconcile pass. platform-schema.md §3.
+	preExistingRC, err := r.getBootstrapRunnerConfig(ctx, tc.Namespace, tc.Name)
+	if err != nil {
+		return ctrl.Result{}, fmt.Errorf("reconcileDirectBootstrap: check RunnerConfig: %w", err)
+	}
+
+	// Part 2 — ensure RunnerConfig exists. On first observation create it now so
+	// that a RunnerConfig is always present before any Job is submitted or any
+	// status transition fires. Idempotent — no-op if it already exists.
+	if preExistingRC == nil {
+		if err := r.ensureBootstrapRunnerConfig(ctx, tc); err != nil {
+			return ctrl.Result{}, fmt.Errorf("reconcileDirectBootstrap: ensure RunnerConfig: %w", err)
+		}
+	}
 
 	// Check for an existing bootstrap Job for this TalosCluster.
 	jobName := bootstrapJobName(tc.Name)
@@ -153,7 +184,33 @@ func (r *TalosClusterReconciler) reconcileDirectBootstrap(ctx context.Context, t
 	}
 
 	if existingJob == nil {
-		// No bootstrap Job yet — submit one.
+		// Part 1 + Part 3 — idempotency guard: RunnerConfig pre-existed and no Job
+		// was ever submitted. The cluster was already running when this CR was applied.
+		// Acknowledge it as operational without submitting a bootstrap Job.
+		if preExistingRC != nil {
+			tc.Status.Origin = platformv1alpha1.TalosClusterOriginBootstrapped
+			platformv1alpha1.SetCondition(
+				&tc.Status.Conditions,
+				platformv1alpha1.ConditionTypeBootstrapping,
+				metav1.ConditionFalse,
+				platformv1alpha1.ReasonBootstrapJobComplete,
+				"Management cluster was already running when TalosCluster CR was applied. No bootstrap Job required.",
+				tc.Generation,
+			)
+			platformv1alpha1.SetCondition(
+				&tc.Status.Conditions,
+				platformv1alpha1.ConditionTypeReady,
+				metav1.ConditionTrue,
+				platformv1alpha1.ReasonClusterReady,
+				"Management cluster acknowledged as operational.",
+				tc.Generation,
+			)
+			logger.Info("management cluster pre-existing — transitioning to Ready without bootstrap Job",
+				"name", tc.Name)
+			return ctrl.Result{}, nil
+		}
+
+		// No pre-existing RunnerConfig and no Job — fresh bootstrap. Submit Job now.
 		if err := r.submitBootstrapJob(ctx, tc, jobName); err != nil {
 			platformv1alpha1.SetCondition(
 				&tc.Status.Conditions,
