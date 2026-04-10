@@ -56,6 +56,12 @@ type TalosClusterReconciler struct {
 	// Used exclusively in unit tests to inject a controlled availability response
 	// without a live target cluster kubeconfig.
 	RemoteConductorAvailableFn func(ctx context.Context, clusterName string) (bool, error)
+
+	// ConductorImage is the fully qualified conductor image reference used when
+	// creating RunnerConfig CRs (bootstrap and import paths). Set from the
+	// CONDUCTOR_IMAGE env var at startup. Must be non-empty in production.
+	// conductor-schema.md §17, platform-schema.md §3.
+	ConductorImage string
 }
 
 // Reconcile is the main reconciliation loop for TalosCluster.

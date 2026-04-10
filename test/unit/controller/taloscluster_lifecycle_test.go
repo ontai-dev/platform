@@ -70,9 +70,10 @@ func TestTalosClusterReconcile_ImportModeCreatesRunnerConfigAndTransitionsToRead
 		WithStatusSubresource(tc).
 		Build()
 	r := &controller.TalosClusterReconciler{
-		Client:   c,
-		Scheme:   scheme,
-		Recorder: record.NewFakeRecorder(32),
+		Client:         c,
+		Scheme:         scheme,
+		Recorder:       record.NewFakeRecorder(32),
+		ConductorImage: "10.20.0.1:5000/ontai-dev/conductor:dev",
 	}
 
 	result, err := r.Reconcile(context.Background(), ctrl.Request{
@@ -95,7 +96,7 @@ func TestTalosClusterReconcile_ImportModeCreatesRunnerConfigAndTransitionsToRead
 		t.Errorf("import mode must not submit a bootstrap Job, got %d Jobs", len(jobList.Items))
 	}
 
-	// RunnerConfig must exist in ont-system with the cluster name.
+	// RunnerConfig must exist in ont-system with the cluster name and correct image.
 	rcList := &controller.OperationalRunnerConfigList{}
 	if err := c.List(context.Background(), rcList); err != nil {
 		t.Fatalf("list RunnerConfigs: %v", err)
@@ -110,6 +111,10 @@ func TestTalosClusterReconcile_ImportModeCreatesRunnerConfigAndTransitionsToRead
 		}
 		if rc.Namespace != "ont-system" {
 			t.Errorf("RunnerConfig namespace = %q, want ont-system", rc.Namespace)
+		}
+		if rc.Spec.RunnerImage != "10.20.0.1:5000/ontai-dev/conductor:dev" {
+			t.Errorf("RunnerConfig RunnerImage = %q, want 10.20.0.1:5000/ontai-dev/conductor:dev",
+				rc.Spec.RunnerImage)
 		}
 	}
 

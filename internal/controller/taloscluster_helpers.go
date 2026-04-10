@@ -69,28 +69,36 @@ func (r *TalosClusterReconciler) getBootstrapRunnerConfig(ctx context.Context, c
 }
 
 // ensureBootstrapRunnerConfig creates the RunnerConfig CR in bootstrapRunnerConfigNamespace
-// (ont-system) for a management cluster bootstrap if it does not already exist.
+// (ont-system) for a management cluster bootstrap or import if it does not already exist.
 // Name equals TalosCluster.Name so Conductor can locate it by cluster-ref flag value.
-// Idempotent — returns nil when already present. platform-schema.md §3, CP-INV-003.
+// RunnerImage is taken from r.ConductorImage — populated from CONDUCTOR_IMAGE env var
+// at startup (main.go fails fast if absent). Idempotent — returns nil when already present.
+// platform-schema.md §3, CP-INV-003.
 func (r *TalosClusterReconciler) ensureBootstrapRunnerConfig(ctx context.Context, tc *platformv1alpha1.TalosCluster) error {
 	name := bootstrapRunnerConfigName(tc.Name)
-	rc := buildOperationalRunnerConfig(
-		name,
-		bootstrapRunnerConfigNamespace,
-		tc.Name,
-		nil, // no maintenanceTargetNodes — bootstrap is a cluster-creation operation
-		"",  // no leaderNode — management cluster has no pre-existing operator leader
-		[]OperationalStep{
-			{
-				Name:          "enable",
-				Capability:    bootstrapCapability,
-				HaltOnFailure: true,
-				Parameters: map[string]string{
-					"cluster": tc.Name,
+	rc := &OperationalRunnerConfig{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      name,
+			Namespace: bootstrapRunnerConfigNamespace,
+			Labels: map[string]string{
+				"platform.ontai.dev/cluster": tc.Name,
+			},
+		},
+		Spec: OperationalRunnerConfigSpec{
+			ClusterRef:  tc.Name,
+			RunnerImage: r.ConductorImage,
+			Steps: []OperationalStep{
+				{
+					Name:          "enable",
+					Capability:    bootstrapCapability,
+					HaltOnFailure: true,
+					Parameters: map[string]string{
+						"cluster": tc.Name,
+					},
 				},
 			},
 		},
-	)
+	}
 	if err := r.Client.Create(ctx, rc); err != nil && !apierrors.IsAlreadyExists(err) {
 		return fmt.Errorf("ensureBootstrapRunnerConfig: create RunnerConfig %s/%s: %w",
 			bootstrapRunnerConfigNamespace, name, err)
