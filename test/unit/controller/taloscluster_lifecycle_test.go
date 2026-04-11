@@ -168,15 +168,15 @@ func TestTalosClusterReconcile_ImportModeCreatesRunnerConfigAndTransitionsToRead
 	if readyCond.Reason != platformv1alpha1.ReasonClusterReady {
 		t.Errorf("Ready reason = %q, want %q", readyCond.Reason, platformv1alpha1.ReasonClusterReady)
 	}
-	bootstrapCond := platformv1alpha1.FindCondition(got.Status.Conditions, platformv1alpha1.ConditionTypeBootstrapping)
+	bootstrapCond := platformv1alpha1.FindCondition(got.Status.Conditions, platformv1alpha1.ConditionTypeBootstrapped)
 	if bootstrapCond == nil {
-		t.Fatal("Bootstrapping condition not set after import")
+		t.Fatal("Bootstrapped condition not set after import")
 	}
-	if bootstrapCond.Status != metav1.ConditionFalse {
-		t.Errorf("Bootstrapping = %s, want False", bootstrapCond.Status)
+	if bootstrapCond.Status != metav1.ConditionTrue {
+		t.Errorf("Bootstrapped = %s, want True", bootstrapCond.Status)
 	}
 	if bootstrapCond.Reason != platformv1alpha1.ReasonImportComplete {
-		t.Errorf("Bootstrapping reason = %q, want %q", bootstrapCond.Reason, platformv1alpha1.ReasonImportComplete)
+		t.Errorf("Bootstrapped reason = %q, want %q", bootstrapCond.Reason, platformv1alpha1.ReasonImportComplete)
 	}
 
 	// Kubeconfig Secret must exist in seam-system.
@@ -294,22 +294,22 @@ func TestTalosClusterReconcile_ManagementBootstrapJobSubmitted(t *testing.T) {
 		}
 	}
 
-	// Bootstrapping condition must be True with BootstrapJobSubmitted reason.
+	// Bootstrapped condition must be False with BootstrapJobSubmitted reason (in progress).
 	got := &platformv1alpha1.TalosCluster{}
 	if err := c.Get(context.Background(), types.NamespacedName{
 		Name: "ccs-mgmt", Namespace: "seam-system",
 	}, got); err != nil {
 		t.Fatalf("get TalosCluster: %v", err)
 	}
-	cond := platformv1alpha1.FindCondition(got.Status.Conditions, platformv1alpha1.ConditionTypeBootstrapping)
+	cond := platformv1alpha1.FindCondition(got.Status.Conditions, platformv1alpha1.ConditionTypeBootstrapped)
 	if cond == nil {
-		t.Fatal("Bootstrapping condition not set after bootstrap Job submission")
+		t.Fatal("Bootstrapped condition not set after bootstrap Job submission")
 	}
-	if cond.Status != metav1.ConditionTrue {
-		t.Errorf("Bootstrapping = %s, want True", cond.Status)
+	if cond.Status != metav1.ConditionFalse {
+		t.Errorf("Bootstrapped = %s, want False (job in progress)", cond.Status)
 	}
 	if cond.Reason != platformv1alpha1.ReasonBootstrapJobSubmitted {
-		t.Errorf("Bootstrapping reason = %q, want %q", cond.Reason, platformv1alpha1.ReasonBootstrapJobSubmitted)
+		t.Errorf("Bootstrapped reason = %q, want %q", cond.Reason, platformv1alpha1.ReasonBootstrapJobSubmitted)
 	}
 }
 

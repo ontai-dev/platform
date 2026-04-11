@@ -113,10 +113,10 @@ func TestTalosClusterReconcile_ScreenProviderNotImplemented(t *testing.T) {
 	if readyCond != nil && readyCond.Status == metav1.ConditionTrue {
 		t.Error("TalosCluster must not be Ready when screen provider is reserved — Screen may be implemented now")
 	}
-	// Bootstrapping=True would indicate CAPI or bootstrap path was entered.
-	bootstrappingCond := platformv1alpha1.FindCondition(got.Status.Conditions, platformv1alpha1.ConditionTypeBootstrapping)
+	// Bootstrapped=True would indicate CAPI or bootstrap path was entered.
+	bootstrappingCond := platformv1alpha1.FindCondition(got.Status.Conditions, platformv1alpha1.ConditionTypeBootstrapped)
 	if bootstrappingCond != nil && bootstrappingCond.Status == metav1.ConditionTrue {
-		t.Error("TalosCluster must not be Bootstrapping when screen provider is reserved — reconciler should have halted")
+		t.Error("TalosCluster must not be Bootstrapped when screen provider is reserved — reconciler should have halted")
 	}
 
 	// Assertion 3: spec.infrastructureProvider must be preserved.

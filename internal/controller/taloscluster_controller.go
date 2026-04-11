@@ -247,8 +247,8 @@ func (r *TalosClusterReconciler) reconcileDirectBootstrap(ctx context.Context, t
 		}
 		platformv1alpha1.SetCondition(
 			&tc.Status.Conditions,
-			platformv1alpha1.ConditionTypeBootstrapping,
-			metav1.ConditionFalse,
+			platformv1alpha1.ConditionTypeBootstrapped,
+			metav1.ConditionTrue,
 			platformv1alpha1.ReasonImportComplete,
 			fmt.Sprintf("%s cluster import: RunnerConfig created, kubeconfig generated, cluster adopted under Seam governance without bootstrap Job.", clusterRole),
 			tc.Generation,
@@ -281,8 +281,8 @@ func (r *TalosClusterReconciler) reconcileDirectBootstrap(ctx context.Context, t
 			tc.Status.Origin = platformv1alpha1.TalosClusterOriginBootstrapped
 			platformv1alpha1.SetCondition(
 				&tc.Status.Conditions,
-				platformv1alpha1.ConditionTypeBootstrapping,
-				metav1.ConditionFalse,
+				platformv1alpha1.ConditionTypeBootstrapped,
+				metav1.ConditionTrue,
 				platformv1alpha1.ReasonBootstrapJobComplete,
 				"Management cluster was already running when TalosCluster CR was applied. No bootstrap Job required.",
 				tc.Generation,
@@ -308,7 +308,7 @@ func (r *TalosClusterReconciler) reconcileDirectBootstrap(ctx context.Context, t
 		if err := r.submitBootstrapJob(ctx, tc, jobName); err != nil {
 			platformv1alpha1.SetCondition(
 				&tc.Status.Conditions,
-				platformv1alpha1.ConditionTypeBootstrapping,
+				platformv1alpha1.ConditionTypeBootstrapped,
 				metav1.ConditionFalse,
 				platformv1alpha1.ReasonBootstrapJobFailed,
 				fmt.Sprintf("Failed to submit bootstrap Job: %v", err),
@@ -318,8 +318,8 @@ func (r *TalosClusterReconciler) reconcileDirectBootstrap(ctx context.Context, t
 		}
 		platformv1alpha1.SetCondition(
 			&tc.Status.Conditions,
-			platformv1alpha1.ConditionTypeBootstrapping,
-			metav1.ConditionTrue,
+			platformv1alpha1.ConditionTypeBootstrapped,
+			metav1.ConditionFalse,
 			platformv1alpha1.ReasonBootstrapJobSubmitted,
 			fmt.Sprintf("Bootstrap Conductor Job %s submitted.", jobName),
 			tc.Generation,
@@ -335,7 +335,7 @@ func (r *TalosClusterReconciler) reconcileDirectBootstrap(ctx context.Context, t
 	if failed {
 		platformv1alpha1.SetCondition(
 			&tc.Status.Conditions,
-			platformv1alpha1.ConditionTypeBootstrapping,
+			platformv1alpha1.ConditionTypeBootstrapped,
 			metav1.ConditionFalse,
 			platformv1alpha1.ReasonBootstrapJobFailed,
 			fmt.Sprintf("Bootstrap Job %s failed: %s", jobName, result),
@@ -360,8 +360,8 @@ func (r *TalosClusterReconciler) reconcileDirectBootstrap(ctx context.Context, t
 	tc.Status.Origin = platformv1alpha1.TalosClusterOriginBootstrapped
 	platformv1alpha1.SetCondition(
 		&tc.Status.Conditions,
-		platformv1alpha1.ConditionTypeBootstrapping,
-		metav1.ConditionFalse,
+		platformv1alpha1.ConditionTypeBootstrapped,
+		metav1.ConditionTrue,
 		platformv1alpha1.ReasonBootstrapJobComplete,
 		"Bootstrap Conductor Job completed successfully.",
 		tc.Generation,
@@ -432,8 +432,8 @@ func (r *TalosClusterReconciler) reconcileCAPIPath(ctx context.Context, tc *plat
 	// Record CAPI objects created.
 	platformv1alpha1.SetCondition(
 		&tc.Status.Conditions,
-		platformv1alpha1.ConditionTypeBootstrapping,
-		metav1.ConditionTrue,
+		platformv1alpha1.ConditionTypeBootstrapped,
+		metav1.ConditionFalse,
 		platformv1alpha1.ReasonCAPIObjectsCreated,
 		"CAPI objects created. Waiting for CAPI Cluster to reach Running state.",
 		tc.Generation,
@@ -476,8 +476,8 @@ func (r *TalosClusterReconciler) reconcileCAPIPath(ctx context.Context, tc *plat
 	)
 	platformv1alpha1.SetCondition(
 		&tc.Status.Conditions,
-		platformv1alpha1.ConditionTypeBootstrapping,
-		metav1.ConditionFalse,
+		platformv1alpha1.ConditionTypeBootstrapped,
+		metav1.ConditionTrue,
 		platformv1alpha1.ReasonCAPIClusterRunning,
 		"CAPI Cluster reached Running state.",
 		tc.Generation,

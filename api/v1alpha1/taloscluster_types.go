@@ -98,7 +98,13 @@ const (
 
 	// ConditionTypeBootstrapping indicates a bootstrap operation is in progress.
 	// Set when a bootstrap Conductor Job has been submitted and not yet completed.
+	// Deprecated: use ConditionTypeBootstrapped. Kept for backward compatibility.
 	ConditionTypeBootstrapping = "Bootstrapping"
+
+	// ConditionTypeBootstrapped indicates whether the bootstrap phase has completed.
+	// True means bootstrap/import succeeded. False means in progress or failed.
+	// Replaces the confusing Bootstrapping=False-means-complete pattern.
+	ConditionTypeBootstrapped = "Bootstrapped"
 
 	// ConditionTypeImporting indicates an import operation is in progress.
 	ConditionTypeImporting = "Importing"
@@ -239,6 +245,7 @@ type CAPIWorkerPool struct {
 	Name string `json:"name"`
 
 	// Replicas is the desired number of worker nodes in this pool.
+	// +kubebuilder:validation:Optional
 	Replicas int32 `json:"replicas,omitempty"`
 
 	// SeamInfrastructureMachineNames lists the SeamInfrastructureMachine CR names
@@ -252,6 +259,7 @@ type CAPIWorkerPool struct {
 // target cluster.
 type CAPIControlPlaneConfig struct {
 	// Replicas is the desired number of control plane nodes.
+	// +kubebuilder:validation:Optional
 	Replicas int32 `json:"replicas,omitempty"`
 }
 
