@@ -75,7 +75,7 @@ type TalosClusterReconciler struct {
 // +kubebuilder:rbac:groups="",resources=secrets,verbs=get;list;watch
 // +kubebuilder:rbac:groups=batch,resources=jobs,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups="",resources=configmaps,verbs=get;list;watch
-// +kubebuilder:rbac:groups=runner.ontai.dev,resources=runnerconfigs,verbs=get;list;watch;create
+// +kubebuilder:rbac:groups=runner.ontai.dev,resources=runnerconfigs,verbs=get;list;watch;create;delete
 // +kubebuilder:rbac:groups=infrastructure.cluster.x-k8s.io,resources=seaminfrastructuremachines,verbs=get;list;watch
 func (r *TalosClusterReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
 	logger := log.FromContext(ctx)
@@ -92,6 +92,13 @@ func (r *TalosClusterReconciler) Reconcile(ctx context.Context, req ctrl.Request
 		return ctrl.Result{}, fmt.Errorf("failed to get TalosCluster %s: %w", req.NamespacedName, err)
 	}
 
+	// Step A2 — Handle deletion. If DeletionTimestamp is set, run cleanup and return.
+	// The finalizer was added on first reconcile when ontai.dev/owns-runnerconfig=true.
+	// Bug 3: RunnerConfig in ont-system is deleted before the TalosCluster is released.
+	if !tc.DeletionTimestamp.IsZero() {
+		return r.handleTalosClusterDeletion(ctx, tc)
+	}
+
 	// Step B — Set up deferred status patch.
 	patchBase := client.MergeFrom(tc.DeepCopy())
 	defer func() {
@@ -105,6 +112,12 @@ func (r *TalosClusterReconciler) Reconcile(ctx context.Context, req ctrl.Request
 
 	// Step C — Advance ObservedGeneration.
 	tc.Status.ObservedGeneration = tc.Generation
+
+	// Step C1 — Ensure RunnerConfig cleanup finalizer is present when the compiler
+	// annotation ontai.dev/owns-runnerconfig=true is set. Idempotent. Bug 3.
+	if err := r.ensureRunnerConfigCleanupFinalizer(ctx, tc); err != nil {
+		return ctrl.Result{}, fmt.Errorf("reconcile: ensure runnerconfig-cleanup finalizer: %w", err)
+	}
 
 	// Step C2 — Initialize LineageSynced on first observation (one-time write).
 	// InfrastructureLineageController takes ownership when deployed.

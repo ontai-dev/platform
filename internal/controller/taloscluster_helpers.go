@@ -18,6 +18,7 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/tools/clientcmd"
+	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 
@@ -78,6 +79,11 @@ func bootstrapJobName(clusterName string) string {
 // RunnerConfig CRs are created and where Conductor looks them up.
 // conductor-schema.md §17, platform-schema.md §3.
 const bootstrapRunnerConfigNamespace = "ont-system"
+
+// finalizerRunnerConfigCleanup is placed on TalosCluster objects that carry the
+// ontai.dev/owns-runnerconfig=true annotation so the RunnerConfig in ont-system
+// is deleted before the TalosCluster is garbage-collected. Bug 3.
+const finalizerRunnerConfigCleanup = "platform.ontai.dev/runnerconfig-cleanup"
 
 // bootstrapRunnerConfigName returns the name of the RunnerConfig for a management
 // cluster bootstrap. The name is the cluster name exactly — Conductor resolves the
@@ -850,6 +856,64 @@ func BuildConductorAgentDeployment(clusterName string) *appsv1.Deployment {
 
 // boolPtr returns a pointer to a bool value.
 func boolPtr(b bool) *bool { return &b }
+
+// --- Bug 3: RunnerConfig cleanup finalizer ---
+
+// ensureRunnerConfigCleanupFinalizer adds finalizerRunnerConfigCleanup to tc when
+// the ontai.dev/owns-runnerconfig=true annotation is set and the finalizer is not
+// yet present. The Update is issued immediately so the finalizer is persisted before
+// any reconcile logic proceeds. Bug 3.
+func (r *TalosClusterReconciler) ensureRunnerConfigCleanupFinalizer(
+	ctx context.Context,
+	tc *platformv1alpha1.TalosCluster,
+) error {
+	if tc.Annotations["ontai.dev/owns-runnerconfig"] != "true" {
+		return nil
+	}
+	if controllerutil.ContainsFinalizer(tc, finalizerRunnerConfigCleanup) {
+		return nil
+	}
+	controllerutil.AddFinalizer(tc, finalizerRunnerConfigCleanup)
+	if err := r.Client.Update(ctx, tc); err != nil {
+		return fmt.Errorf("ensureRunnerConfigCleanupFinalizer: add finalizer: %w", err)
+	}
+	return nil
+}
+
+// handleTalosClusterDeletion is called when tc.DeletionTimestamp is set. If the
+// RunnerConfig cleanup finalizer is present, deletes the RunnerConfig named after
+// the cluster from ont-system, then removes the finalizer. Idempotent on NotFound.
+// Bug 3.
+func (r *TalosClusterReconciler) handleTalosClusterDeletion(
+	ctx context.Context,
+	tc *platformv1alpha1.TalosCluster,
+) (ctrl.Result, error) {
+	if !controllerutil.ContainsFinalizer(tc, finalizerRunnerConfigCleanup) {
+		return ctrl.Result{}, nil
+	}
+
+	rc := &OperationalRunnerConfig{}
+	err := r.Client.Get(ctx, types.NamespacedName{
+		Name:      tc.Name,
+		Namespace: bootstrapRunnerConfigNamespace,
+	}, rc)
+	if err != nil && !apierrors.IsNotFound(err) {
+		return ctrl.Result{}, fmt.Errorf("handleTalosClusterDeletion: get RunnerConfig %s/%s: %w",
+			bootstrapRunnerConfigNamespace, tc.Name, err)
+	}
+	if err == nil {
+		if delErr := r.Client.Delete(ctx, rc); delErr != nil && !apierrors.IsNotFound(delErr) {
+			return ctrl.Result{}, fmt.Errorf("handleTalosClusterDeletion: delete RunnerConfig %s/%s: %w",
+				bootstrapRunnerConfigNamespace, tc.Name, delErr)
+		}
+	}
+
+	controllerutil.RemoveFinalizer(tc, finalizerRunnerConfigCleanup)
+	if err := r.Client.Update(ctx, tc); err != nil {
+		return ctrl.Result{}, fmt.Errorf("handleTalosClusterDeletion: remove finalizer: %w", err)
+	}
+	return ctrl.Result{}, nil
+}
 
 // --- WS1/WS2: tenant and management onboarding helpers ---
 
