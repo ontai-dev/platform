@@ -31,8 +31,9 @@ const (
 	capiPollInterval = 20 * time.Second
 
 	// bootstrapCapability is the Conductor executor capability for cluster bootstrap.
-	// Verify against conductor-schema.md §capabilities table.
-	bootstrapCapability = "cluster-bootstrap"
+	// Must match runnerlib.CapabilityBootstrap = "bootstrap". conductor-schema.md §6.
+	// WS2: was incorrectly "cluster-bootstrap" — corrected to "bootstrap".
+	bootstrapCapability = "bootstrap"
 
 	// operationResultConfigMapSuffix is appended to the job name to form the
 	// OperationResult ConfigMap name.

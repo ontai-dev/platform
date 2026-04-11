@@ -205,12 +205,29 @@ func (r *TalosClusterReconciler) reconcileDirectBootstrap(ctx context.Context, t
 			return result, nil
 		}
 
+		// Role=tenant on the direct path: create the seam-tenant namespace and copy
+		// the kubeconfig Secret there so operators can locate it alongside other
+		// tenant-scoped resources. CP-INV-004: Platform is the sole namespace creation
+		// authority. WS5.
+		if tc.Spec.Role == platformv1alpha1.TalosClusterRoleTenant {
+			if err := r.ensureTenantNamespace(ctx, tc); err != nil {
+				return ctrl.Result{}, fmt.Errorf("reconcileDirectBootstrap: ensure tenant namespace for role=tenant: %w", err)
+			}
+			if err := r.ensureTenantKubeconfigCopy(ctx, tc); err != nil {
+				return ctrl.Result{}, fmt.Errorf("reconcileDirectBootstrap: copy kubeconfig to tenant namespace: %w", err)
+			}
+		}
+
+		clusterRole := "management"
+		if tc.Spec.Role == platformv1alpha1.TalosClusterRoleTenant {
+			clusterRole = "tenant"
+		}
 		platformv1alpha1.SetCondition(
 			&tc.Status.Conditions,
 			platformv1alpha1.ConditionTypeBootstrapping,
 			metav1.ConditionFalse,
 			platformv1alpha1.ReasonImportComplete,
-			"Management cluster import: RunnerConfig created, kubeconfig generated, cluster adopted under Seam governance without bootstrap Job.",
+			fmt.Sprintf("%s cluster import: RunnerConfig created, kubeconfig generated, cluster adopted under Seam governance without bootstrap Job.", clusterRole),
 			tc.Generation,
 		)
 		platformv1alpha1.SetCondition(
@@ -218,11 +235,11 @@ func (r *TalosClusterReconciler) reconcileDirectBootstrap(ctx context.Context, t
 			platformv1alpha1.ConditionTypeReady,
 			metav1.ConditionTrue,
 			platformv1alpha1.ReasonClusterReady,
-			"Management cluster imported and Ready.",
+			fmt.Sprintf("%s cluster imported and Ready.", clusterRole),
 			tc.Generation,
 		)
-		logger.Info("management cluster import — RunnerConfig created, kubeconfig generated, transitioning to Ready",
-			"name", tc.Name)
+		logger.Info("cluster import complete — transitioning to Ready",
+			"name", tc.Name, "role", clusterRole)
 		return ctrl.Result{}, nil
 	}
 

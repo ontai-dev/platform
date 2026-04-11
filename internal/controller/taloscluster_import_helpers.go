@@ -181,3 +181,57 @@ func (r *TalosClusterReconciler) ensureKubeconfigSecret(ctx context.Context, tc 
 
 	return ctrl.Result{}, nil
 }
+
+// tenantKubeconfigSecretName is the name of the kubeconfig Secret written to the
+// seam-tenant-{clusterName} namespace for role=tenant clusters on the direct import path.
+// Operators look for this name when routing target cluster API access. WS5.
+const tenantKubeconfigSecretName = "target-cluster-kubeconfig"
+
+// ensureTenantKubeconfigCopy copies the kubeconfig Secret from seam-system into the
+// seam-tenant-{clusterName} namespace as "target-cluster-kubeconfig". This makes the
+// kubeconfig available alongside other tenant-scoped resources for operators that look
+// in seam-tenant-* namespaces. Only called for role=tenant clusters on the direct path.
+// Idempotent — returns nil if the copy already exists. WS5.
+func (r *TalosClusterReconciler) ensureTenantKubeconfigCopy(ctx context.Context, tc *platformv1alpha1.TalosCluster) error {
+	tenantNS := "seam-tenant-" + tc.Name
+
+	// Idempotency: skip if the copy already exists.
+	existing := &corev1.Secret{}
+	if err := r.Client.Get(ctx, types.NamespacedName{
+		Name:      tenantKubeconfigSecretName,
+		Namespace: tenantNS,
+	}, existing); err == nil {
+		return nil // already present
+	} else if !apierrors.IsNotFound(err) {
+		return fmt.Errorf("ensureTenantKubeconfigCopy: check existing secret %s/%s: %w",
+			tenantNS, tenantKubeconfigSecretName, err)
+	}
+
+	// Read the kubeconfig from seam-system.
+	sourceName := kubeconfigSecretName(tc.Name)
+	source := &corev1.Secret{}
+	if err := r.Client.Get(ctx, types.NamespacedName{
+		Name:      sourceName,
+		Namespace: importSecretsNamespace,
+	}, source); err != nil {
+		return fmt.Errorf("ensureTenantKubeconfigCopy: read source kubeconfig %s/%s: %w",
+			importSecretsNamespace, sourceName, err)
+	}
+
+	// Write the copy to seam-tenant-{clusterName}.
+	copy := &corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      tenantKubeconfigSecretName,
+			Namespace: tenantNS,
+			Labels: map[string]string{
+				importClusterLabel: tc.Name,
+			},
+		},
+		Data: source.Data,
+	}
+	if err := r.Client.Create(ctx, copy); err != nil && !apierrors.IsAlreadyExists(err) {
+		return fmt.Errorf("ensureTenantKubeconfigCopy: create kubeconfig copy %s/%s: %w",
+			tenantNS, tenantKubeconfigSecretName, err)
+	}
+	return nil
+}

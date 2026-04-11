@@ -50,6 +50,29 @@ const (
 	InfrastructureProviderScreen InfrastructureProvider = "screen"
 )
 
+// TalosClusterRole declares the role of this cluster in the Seam topology.
+// Management clusters host the Seam control plane. Tenant clusters are governed
+// by the management cluster. This field is required on the direct bootstrap path
+// (capi.enabled=false) to determine namespace creation and kubeconfig routing.
+// platform-schema.md §5. WS5.
+//
+// +kubebuilder:validation:Enum=management;tenant
+type TalosClusterRole string
+
+const (
+	// TalosClusterRoleManagement declares this cluster as the Seam management cluster.
+	// On the direct bootstrap path (capi.enabled=false): no seam-tenant namespace is
+	// created; kubeconfig is written to seam-system only. There is exactly one
+	// management cluster per Seam installation.
+	TalosClusterRoleManagement TalosClusterRole = "management"
+
+	// TalosClusterRoleTenant declares this cluster as a Seam target (tenant) cluster.
+	// On the direct bootstrap path (capi.enabled=false, mode=import): a seam-tenant
+	// namespace is created and the kubeconfig is copied there as target-cluster-kubeconfig
+	// so that operators can locate it alongside other tenant-scoped resources.
+	TalosClusterRoleTenant TalosClusterRole = "tenant"
+)
+
 // TalosClusterOrigin records how the cluster came to exist.
 //
 // +kubebuilder:validation:Enum=bootstrapped;imported
@@ -308,6 +331,15 @@ type TalosClusterSpec struct {
 	// +kubebuilder:default=native
 	// +optional
 	InfrastructureProvider InfrastructureProvider `json:"infrastructureProvider,omitempty"`
+
+	// Role declares whether this TalosCluster is the Seam management cluster or a
+	// tenant (target) cluster. Required on the direct bootstrap path (capi.enabled=false)
+	// to determine namespace creation and kubeconfig routing. When absent, the
+	// reconciler defaults to management behaviour (no seam-tenant namespace).
+	// platform-schema.md §5. WS5.
+	// +kubebuilder:validation:Enum=management;tenant
+	// +optional
+	Role TalosClusterRole `json:"role,omitempty"`
 
 	// Lineage is the sealed causal chain record for this root declaration.
 	// Authored once at object creation time and immutable thereafter.
