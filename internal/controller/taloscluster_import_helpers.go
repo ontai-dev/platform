@@ -134,11 +134,11 @@ func (r *TalosClusterReconciler) ensureKubeconfigSecret(ctx context.Context, tc 
 			return ctrl.Result{}, fmt.Errorf("ensureKubeconfigSecret: parse talosconfig for cluster %s: %w", tc.Name, err)
 		}
 
-		// Use spec.clusterEndpoint as the endpoint override so the kubeconfig target
-		// address is the cluster VIP, not whatever is recorded in the talosconfig.
+		// Use the talosconfig endpoints directly. The talosconfig already contains
+		// the correct node IPs (port 50000). Do not override with ClusterEndpoint —
+		// that is the Kubernetes API VIP (port 6443) which does not serve the Talos API.
 		talosC, err := talos_client.New(ctx,
 			talos_client.WithConfig(cfg),
-			talos_client.WithEndpoints(tc.Spec.ClusterEndpoint),
 		)
 		if err != nil {
 			return ctrl.Result{}, fmt.Errorf("ensureKubeconfigSecret: build talos client for cluster %s: %w", tc.Name, err)
