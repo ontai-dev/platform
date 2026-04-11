@@ -89,8 +89,6 @@ spec:
                           nodes.
                         format: int32
                         type: integer
-                    required:
-                    - replicas
                     type: object
                   enabled:
                     description: |-
@@ -137,7 +135,6 @@ spec:
                           type: array
                       required:
                       - name
-                      - replicas
                       type: object
                     type: array
                 required:
@@ -260,6 +257,21 @@ spec:
                 items:
                   type: string
                 type: array
+              role:
+                allOf:
+                - enum:
+                  - management
+                  - tenant
+                - enum:
+                  - management
+                  - tenant
+                description: |-
+                  Role declares whether this TalosCluster is the Seam management cluster or a
+                  tenant (target) cluster. Required on the direct bootstrap path (capi.enabled=false)
+                  to determine namespace creation and kubeconfig routing. When absent, the
+                  reconciler defaults to management behaviour (no seam-tenant namespace).
+                  platform-schema.md §5. WS5.
+                type: string
               talosVersion:
                 description: |-
                   TalosVersion is the Talos version running on this cluster (e.g. "v1.9.3").

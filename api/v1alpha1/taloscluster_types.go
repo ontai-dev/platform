@@ -239,7 +239,7 @@ type CAPIWorkerPool struct {
 	Name string `json:"name"`
 
 	// Replicas is the desired number of worker nodes in this pool.
-	Replicas int32 `json:"replicas"`
+	Replicas int32 `json:"replicas,omitempty"`
 
 	// SeamInfrastructureMachineNames lists the SeamInfrastructureMachine CR names
 	// pre-provisioned for this pool. One per node. The Seam Infrastructure Provider
@@ -252,7 +252,7 @@ type CAPIWorkerPool struct {
 // target cluster.
 type CAPIControlPlaneConfig struct {
 	// Replicas is the desired number of control plane nodes.
-	Replicas int32 `json:"replicas"`
+	Replicas int32 `json:"replicas,omitempty"`
 }
 
 // CAPIConfig holds the CAPI-specific configuration fields for a TalosCluster.
