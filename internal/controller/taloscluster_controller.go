@@ -216,6 +216,16 @@ func (r *TalosClusterReconciler) reconcileDirectBootstrap(ctx context.Context, t
 			if err := r.ensureTenantKubeconfigCopy(ctx, tc); err != nil {
 				return ctrl.Result{}, fmt.Errorf("reconcileDirectBootstrap: copy kubeconfig to tenant namespace: %w", err)
 			}
+			// WS1: register the tenant cluster in guardian RBAC policy/profiles and
+			// create the Kueue LocalQueue so pack deployments can be admitted.
+			if err := r.ensureTenantOnboarding(ctx, tc); err != nil {
+				return ctrl.Result{}, fmt.Errorf("reconcileDirectBootstrap: tenant onboarding: %w", err)
+			}
+		} else {
+			// WS2: register the management cluster in the platform RBAC policy.
+			if err := r.ensureManagementOnboarding(ctx); err != nil {
+				return ctrl.Result{}, fmt.Errorf("reconcileDirectBootstrap: management onboarding (import): %w", err)
+			}
 		}
 
 		clusterRole := "management"
@@ -272,6 +282,10 @@ func (r *TalosClusterReconciler) reconcileDirectBootstrap(ctx context.Context, t
 				"Management cluster acknowledged as operational.",
 				tc.Generation,
 			)
+			// WS2: register management cluster in the platform RBAC policy.
+			if err := r.ensureManagementOnboarding(ctx); err != nil {
+				return ctrl.Result{}, fmt.Errorf("reconcileDirectBootstrap: management onboarding (pre-existing): %w", err)
+			}
 			logger.Info("management cluster pre-existing — transitioning to Ready without bootstrap Job",
 				"name", tc.Name)
 			return ctrl.Result{}, nil
@@ -347,6 +361,10 @@ func (r *TalosClusterReconciler) reconcileDirectBootstrap(ctx context.Context, t
 		"Management cluster bootstrapped and Ready.",
 		tc.Generation,
 	)
+	// WS2: register management cluster in the platform RBAC policy.
+	if err := r.ensureManagementOnboarding(ctx); err != nil {
+		return ctrl.Result{}, fmt.Errorf("reconcileDirectBootstrap: management onboarding (bootstrap complete): %w", err)
+	}
 	logger.Info("management cluster bootstrap complete, cluster Ready",
 		"name", tc.Name)
 	return ctrl.Result{}, nil

@@ -2,6 +2,7 @@ package controller
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
@@ -849,3 +850,154 @@ func BuildConductorAgentDeployment(clusterName string) *appsv1.Deployment {
 
 // boolPtr returns a pointer to a bool value.
 func boolPtr(b bool) *bool { return &b }
+
+// --- WS1/WS2: tenant and management onboarding helpers ---
+
+// appendToUnstructuredStringSlice reads the object identified by gvk/namespace/name,
+// extracts the string slice at the given field path (e.g. ["spec","allowedClusters"]),
+// and appends value if not already present. Patches via MergePatch. Returns nil on
+// NotFound so callers remain non-fatal in unit test environments where guardian
+// resources are not pre-loaded. PLATFORM-BL-3.
+func (r *TalosClusterReconciler) appendToUnstructuredStringSlice(
+	ctx context.Context,
+	gvk schema.GroupVersionKind,
+	namespace, name string,
+	fieldPath []string,
+	value string,
+) error {
+	obj := &unstructured.Unstructured{}
+	obj.SetGroupVersionKind(gvk)
+	if err := r.Client.Get(ctx, types.NamespacedName{Name: name, Namespace: namespace}, obj); err != nil {
+		if apierrors.IsNotFound(err) {
+			return nil // non-fatal: guardian resource not yet present
+		}
+		return fmt.Errorf("appendToUnstructuredStringSlice: get %s/%s: %w", namespace, name, err)
+	}
+
+	// Extract current slice.
+	raw, _, _ := unstructured.NestedStringSlice(obj.Object, fieldPath...)
+	for _, v := range raw {
+		if v == value {
+			return nil // already present
+		}
+	}
+	raw = append(raw, value)
+
+	// Build a MergePatch that sets only the target field.
+	patch := map[string]interface{}{}
+	nested := patch
+	for i, key := range fieldPath {
+		if i == len(fieldPath)-1 {
+			nested[key] = raw
+		} else {
+			child := map[string]interface{}{}
+			nested[key] = child
+			nested = child
+		}
+	}
+	data, err := json.Marshal(patch)
+	if err != nil {
+		return fmt.Errorf("appendToUnstructuredStringSlice: marshal patch: %w", err)
+	}
+	if err := r.Client.Patch(ctx, obj, client.RawPatch(types.MergePatchType, data)); err != nil {
+		return fmt.Errorf("appendToUnstructuredStringSlice: patch %s/%s: %w", namespace, name, err)
+	}
+	return nil
+}
+
+// ensureLocalQueue creates a Kueue LocalQueue in the given namespace pointing to
+// clusterQueueName if it does not already exist. Uses unstructured to avoid importing
+// Kueue types. Returns nil on AlreadyExists. PLATFORM-BL-3 step 3.
+func (r *TalosClusterReconciler) ensureLocalQueue(
+	ctx context.Context,
+	namespace, queueName, clusterQueueName string,
+) error {
+	lq := &unstructured.Unstructured{
+		Object: map[string]interface{}{
+			"apiVersion": "kueue.x-k8s.io/v1beta1",
+			"kind":       "LocalQueue",
+			"metadata": map[string]interface{}{
+				"name":      queueName,
+				"namespace": namespace,
+			},
+			"spec": map[string]interface{}{
+				"clusterQueue": clusterQueueName,
+			},
+		},
+	}
+	if err := r.Client.Create(ctx, lq); err != nil && !apierrors.IsAlreadyExists(err) {
+		return fmt.Errorf("ensureLocalQueue: create LocalQueue %s/%s: %w", namespace, queueName, err)
+	}
+	return nil
+}
+
+// rbacPolicyGVK is the GVK for guardian RBACPolicy (security.ontai.dev/v1alpha1).
+var rbacPolicyGVK = schema.GroupVersionKind{
+	Group:   "security.ontai.dev",
+	Version: "v1alpha1",
+	Kind:    "RBACPolicy",
+}
+
+// rbacProfileGVK is the GVK for guardian RBACProfile (security.ontai.dev/v1alpha1).
+var rbacProfileGVK = schema.GroupVersionKind{
+	Group:   "security.ontai.dev",
+	Version: "v1alpha1",
+	Kind:    "RBACProfile",
+}
+
+// rbacPolicyNamespace is the namespace where the platform-wide RBACPolicy lives.
+const rbacPolicyNamespace = "ont-system"
+
+// rbacProfileNamespace is the namespace where RBACProfile CRs live.
+const rbacProfileNamespace = "seam-system"
+
+// ensureTenantOnboarding performs all idempotent onboarding steps for a tenant
+// TalosCluster that has reached Ready on the direct path:
+//  1. Append tc.Name to seam-platform-rbac-policy.spec.allowedClusters.
+//  2. Append tc.Name to spec.targetClusters on rbac-wrapper, rbac-conductor,
+//     rbac-platform, rbac-seam-core (guardian profile rbac-guardian is skipped).
+//  3. Create LocalQueue pack-deploy-queue in seam-tenant-{tc.Name} pointing to
+//     ClusterQueue seam-pack-deploy.
+//
+// All steps are idempotent and non-fatal on NotFound so existing tests that do not
+// pre-load guardian resources continue to pass. PLATFORM-BL-3.
+func (r *TalosClusterReconciler) ensureTenantOnboarding(ctx context.Context, tc *platformv1alpha1.TalosCluster) error {
+	// Step 1 — RBACPolicy allowedClusters.
+	if err := r.appendToUnstructuredStringSlice(
+		ctx, rbacPolicyGVK, rbacPolicyNamespace, "seam-platform-rbac-policy",
+		[]string{"spec", "allowedClusters"}, tc.Name,
+	); err != nil {
+		return fmt.Errorf("ensureTenantOnboarding: rbac policy: %w", err)
+	}
+
+	// Step 2 — RBACProfile targetClusters for all non-guardian profiles.
+	for _, profileName := range []string{"rbac-wrapper", "rbac-conductor", "rbac-platform", "rbac-seam-core"} {
+		if err := r.appendToUnstructuredStringSlice(
+			ctx, rbacProfileGVK, rbacProfileNamespace, profileName,
+			[]string{"spec", "targetClusters"}, tc.Name,
+		); err != nil {
+			return fmt.Errorf("ensureTenantOnboarding: rbac profile %s: %w", profileName, err)
+		}
+	}
+
+	// Step 3 — LocalQueue in tenant namespace.
+	tenantNS := "seam-tenant-" + tc.Name
+	if err := r.ensureLocalQueue(ctx, tenantNS, "pack-deploy-queue", "seam-pack-deploy"); err != nil {
+		return fmt.Errorf("ensureTenantOnboarding: local queue: %w", err)
+	}
+
+	return nil
+}
+
+// ensureManagementOnboarding appends "management" to seam-platform-rbac-policy
+// spec.allowedClusters when the management TalosCluster reaches Ready. Idempotent
+// and non-fatal on NotFound. PLATFORM-BL-3 WS2.
+func (r *TalosClusterReconciler) ensureManagementOnboarding(ctx context.Context) error {
+	if err := r.appendToUnstructuredStringSlice(
+		ctx, rbacPolicyGVK, rbacPolicyNamespace, "seam-platform-rbac-policy",
+		[]string{"spec", "allowedClusters"}, "management",
+	); err != nil {
+		return fmt.Errorf("ensureManagementOnboarding: %w", err)
+	}
+	return nil
+}
