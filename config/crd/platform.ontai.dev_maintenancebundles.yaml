@@ -1,0 +1,286 @@
+---
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  annotations:
+    controller-gen.kubebuilder.io/version: v0.16.1
+  name: maintenancebundles.platform.ontai.dev
+spec:
+  group: platform.ontai.dev
+  names:
+    kind: MaintenanceBundle
+    listKind: MaintenanceBundleList
+    plural: maintenancebundles
+    shortNames:
+    - mb
+    singular: maintenancebundle
+  scope: Namespaced
+  versions:
+  - additionalPrinterColumns:
+    - jsonPath: .spec.operation
+      name: Operation
+      type: string
+    - jsonPath: .spec.clusterRef.name
+      name: Cluster
+      type: string
+    - jsonPath: .status.conditions[?(@.type=="Ready")].status
+      name: Ready
+      type: string
+    - jsonPath: .metadata.creationTimestamp
+      name: Age
+      type: date
+    name: v1alpha1
+    schema:
+      openAPIV3Schema:
+        description: |-
+          MaintenanceBundle is a pre-compiled scheduling artifact produced by
+          `compiler maintenance`. Carries pre-resolved scheduling context so neither
+          Platform nor Conductor need to perform cluster queries at execution time.
+          conductor-schema.md §9. API group: platform.ontai.dev.
+        properties:
+          apiVersion:
+            description: |-
+              APIVersion defines the versioned schema of this representation of an object.
+              Servers should convert recognized schemas to the latest internal value, and
+              may reject unrecognized values.
+              More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#resources
+            type: string
+          kind:
+            description: |-
+              Kind is a string value representing the REST resource this object represents.
+              Servers may infer this from the endpoint the client submits requests to.
+              Cannot be updated.
+              In CamelCase.
+              More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#types-kinds
+            type: string
+          metadata:
+            type: object
+          spec:
+            description: |-
+              MaintenanceBundleSpec defines the desired state of MaintenanceBundle.
+              All fields are pre-resolved by `compiler maintenance` at compile time.
+              conductor-schema.md §9.
+            properties:
+              clusterRef:
+                description: ClusterRef references the TalosCluster this bundle targets.
+                properties:
+                  name:
+                    description: Name is the object name.
+                    type: string
+                  namespace:
+                    description: Namespace is the object namespace. May be empty for
+                      cluster-scoped objects.
+                    type: string
+                required:
+                - name
+                type: object
+              lineage:
+                description: |-
+                  Lineage is the sealed causal chain record for this root declaration.
+                  Authored once at object creation time and immutable thereafter.
+                  seam-core-schema.md §5, CLAUDE.md §14 Decision 1.
+                properties:
+                  creatingOperator:
+                    description: |-
+                      CreatingOperator identifies the Seam Operator that created this object.
+                      This is a structured identity carrying the operator name and its deployed
+                      version at creation time.
+                    properties:
+                      name:
+                        description: |-
+                          Name is the canonical name of the Seam Operator (e.g., platform, guardian,
+                          wrapper, conductor).
+                        type: string
+                      version:
+                        description: |-
+                          Version is the deployed version of the operator at the time the object was
+                          created (e.g., v1.26.5-r3). This allows audit tooling to correlate objects
+                          with the operator version that produced them.
+                        type: string
+                    required:
+                    - name
+                    - version
+                    type: object
+                  creationRationale:
+                    description: |-
+                      CreationRationale is the reason this object was created, drawn from the
+                      Seam Core controlled vocabulary defined in rationale.go. It is not a
+                      free-text field.
+                    enum:
+                    - ClusterProvision
+                    - ClusterDecommission
+                    - SecurityEnforcement
+                    - PackExecution
+                    - VirtualizationFulfillment
+                    - ConductorAssignment
+                    - VortexBinding
+                    type: string
+                  rootGenerationAtCreation:
+                    description: |-
+                      RootGenerationAtCreation is the metadata.generation of the root declaration
+                      at the time this object was created. Together with RootUID, it provides a
+                      complete temporal anchor for the derivation record.
+                    format: int64
+                    type: integer
+                  rootKind:
+                    description: |-
+                      RootKind is the kind of the root declaration that caused this object to
+                      exist (e.g., TalosCluster, PackExecution, RBACPolicy).
+                    type: string
+                  rootName:
+                    description: RootName is the name of the root declaration.
+                    type: string
+                  rootNamespace:
+                    description: RootNamespace is the namespace of the root declaration.
+                    type: string
+                  rootUID:
+                    description: |-
+                      RootUID is the UID of the root declaration at the time this object was
+                      created. Used to verify that no root declaration replacement has occurred.
+                    type: string
+                required:
+                - creatingOperator
+                - creationRationale
+                - rootGenerationAtCreation
+                - rootKind
+                - rootName
+                - rootNamespace
+                - rootUID
+                type: object
+              maintenanceTargetNodes:
+                description: |-
+                  MaintenanceTargetNodes is the pre-resolved list of nodes targeted by the
+                  operation. Validated against the live cluster by `compiler maintenance`.
+                  Directly populates RunnerConfig.MaintenanceTargetNodes at execution time.
+                items:
+                  type: string
+                type: array
+              operation:
+                allOf:
+                - enum:
+                  - drain
+                  - upgrade
+                  - etcd-backup
+                  - machineconfig-rotation
+                - enum:
+                  - drain
+                  - upgrade
+                  - etcd-backup
+                  - machineconfig-rotation
+                description: |-
+                  Operation declares the maintenance operation type.
+                  Determines which Conductor capability the resulting RunnerConfig targets.
+                  conductor-schema.md §9.
+                type: string
+              operatorLeaderNode:
+                description: |-
+                  OperatorLeaderNode is the node hosting the leader pod of the Platform operator
+                  at compile time, resolved from the platform-leader Lease in seam-system.
+                  Directly populates RunnerConfig.OperatorLeaderNode at execution time.
+                  conductor-schema.md §13.
+                type: string
+              s3ConfigSecretRef:
+                description: |-
+                  S3ConfigSecretRef references the S3 configuration Secret, pre-resolved and
+                  validated to exist by `compiler maintenance`. Follows the platform-schema.md §10
+                  S3 resolution hierarchy. A MaintenanceBundle is never committed without a valid
+                  S3 reference when the operation requires it (etcd-backup).
+                properties:
+                  name:
+                    description: name is unique within a namespace to reference a
+                      secret resource.
+                    type: string
+                  namespace:
+                    description: namespace defines the space within which the secret
+                      name must be unique.
+                    type: string
+                type: object
+                x-kubernetes-map-type: atomic
+            required:
+            - clusterRef
+            - operation
+            type: object
+          status:
+            description: MaintenanceBundleStatus defines the observed state of MaintenanceBundle.
+            properties:
+              conditions:
+                description: |-
+                  Conditions is the list of status conditions for this MaintenanceBundle.
+                  Condition types: Ready, Pending, Degraded, LineageSynced.
+                items:
+                  description: Condition contains details for one aspect of the current
+                    state of this API Resource.
+                  properties:
+                    lastTransitionTime:
+                      description: |-
+                        lastTransitionTime is the last time the condition transitioned from one status to another.
+                        This should be when the underlying condition changed.  If that is not known, then using the time when the API field changed is acceptable.
+                      format: date-time
+                      type: string
+                    message:
+                      description: |-
+                        message is a human readable message indicating details about the transition.
+                        This may be an empty string.
+                      maxLength: 32768
+                      type: string
+                    observedGeneration:
+                      description: |-
+                        observedGeneration represents the .metadata.generation that the condition was set based upon.
+                        For instance, if .metadata.generation is currently 12, but the .status.conditions[x].observedGeneration is 9, the condition is out of date
+                        with respect to the current state of the instance.
+                      format: int64
+                      minimum: 0
+                      type: integer
+                    reason:
+                      description: |-
+                        reason contains a programmatic identifier indicating the reason for the condition's last transition.
+                        Producers of specific condition types may define expected values and meanings for this field,
+                        and whether the values are considered a guaranteed API.
+                        The value should be a CamelCase string.
+                        This field may not be empty.
+                      maxLength: 1024
+                      minLength: 1
+                      pattern: ^[A-Za-z]([A-Za-z0-9_,:]*[A-Za-z0-9_])?$
+                      type: string
+                    status:
+                      description: status of the condition, one of True, False, Unknown.
+                      enum:
+                      - "True"
+                      - "False"
+                      - Unknown
+                      type: string
+                    type:
+                      description: type of condition in CamelCase or in foo.example.com/CamelCase.
+                      maxLength: 316
+                      pattern: ^([a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*/)?(([A-Za-z0-9][-A-Za-z0-9_.]*)?[A-Za-z0-9])$
+                      type: string
+                  required:
+                  - lastTransitionTime
+                  - message
+                  - reason
+                  - status
+                  - type
+                  type: object
+                type: array
+                x-kubernetes-list-map-keys:
+                - type
+                x-kubernetes-list-type: map
+              jobName:
+                description: JobName is the name of the Conductor executor Job submitted
+                  for this bundle.
+                type: string
+              observedGeneration:
+                description: ObservedGeneration is the generation of the spec last
+                  reconciled.
+                format: int64
+                type: integer
+              operationResult:
+                description: OperationResult carries the result message written by
+                  the Conductor executor Job.
+                type: string
+            type: object
+        type: object
+    served: true
+    storage: true
+    subresources:
+      status: {}
