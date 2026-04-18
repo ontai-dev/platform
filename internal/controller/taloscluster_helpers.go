@@ -506,7 +506,10 @@ func (r *TalosClusterReconciler) ensureTalosControlPlane(ctx context.Context, tc
 		}
 		tcp.SetOwnerReferences([]metav1.OwnerReference{ownerRef})
 
-		replicas := int64(tc.Spec.CAPI.ControlPlane.Replicas)
+		var replicas int64
+		if tc.Spec.CAPI.ControlPlane != nil {
+			replicas = int64(tc.Spec.CAPI.ControlPlane.Replicas)
+		}
 		if err := unstructured.SetNestedField(tcp.Object, map[string]interface{}{
 			"replicas": replicas,
 			"version":  tc.Spec.CAPI.KubernetesVersion,

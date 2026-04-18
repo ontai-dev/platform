@@ -1,4 +1,4 @@
-// Binary ont-platform is the controller-runtime manager entry point for the
+// Binary platform is the controller-runtime manager entry point for the
 // platform operator.
 //
 // It registers the TalosClusterReconciler and starts the manager with leader

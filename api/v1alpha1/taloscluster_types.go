@@ -284,8 +284,10 @@ type CAPIConfig struct {
 	KubernetesVersion string `json:"kubernetesVersion,omitempty"`
 
 	// ControlPlane holds control plane configuration. Required when Enabled=true.
+	// Pointer so that a nil value is omitted from serialization — prevents
+	// controlPlane: {} noise when capi.enabled=false.
 	// +optional
-	ControlPlane CAPIControlPlaneConfig `json:"controlPlane,omitempty"`
+	ControlPlane *CAPIControlPlaneConfig `json:"controlPlane,omitempty"`
 
 	// Workers is the list of worker node pools. Each pool maps to a
 	// MachineDeployment + SeamInfrastructureMachineTemplate.

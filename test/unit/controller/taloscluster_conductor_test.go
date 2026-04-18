@@ -114,7 +114,7 @@ func TestTalosClusterReconcile_CAPIPathDoesNotBreakOnAbsentKubeconfig(t *testing
 				Enabled:           true,
 				TalosVersion:      "v1.7.0",
 				KubernetesVersion: "v1.31.0",
-				ControlPlane: platformv1alpha1.CAPIControlPlaneConfig{
+				ControlPlane: &platformv1alpha1.CAPIControlPlaneConfig{
 					Replicas: 3,
 				},
 				// No CiliumPackRef — skips the Cilium gate and goes to dev-mode path.
@@ -153,7 +153,7 @@ func buildCAPITalosCluster(name, namespace string) *platformv1alpha1.TalosCluste
 				Enabled:           true,
 				TalosVersion:      "v1.7.0",
 				KubernetesVersion: "v1.31.0",
-				ControlPlane:      platformv1alpha1.CAPIControlPlaneConfig{Replicas: 3},
+				ControlPlane:      &platformv1alpha1.CAPIControlPlaneConfig{Replicas: 3},
 			},
 		},
 	}
@@ -314,7 +314,7 @@ func TestConductorReady_Available_TransitionsClusterToReady(t *testing.T) {
 				Enabled:           true,
 				TalosVersion:      "v1.7.0",
 				KubernetesVersion: "v1.31.0",
-				ControlPlane:      platformv1alpha1.CAPIControlPlaneConfig{Replicas: 3},
+				ControlPlane:      &platformv1alpha1.CAPIControlPlaneConfig{Replicas: 3},
 				// No CiliumPackRef — dev mode, skips Cilium gate.
 			},
 		},
@@ -388,7 +388,7 @@ func TestConductorReady_Unavailable_Requeues(t *testing.T) {
 				Enabled:           true,
 				TalosVersion:      "v1.7.0",
 				KubernetesVersion: "v1.31.0",
-				ControlPlane:      platformv1alpha1.CAPIControlPlaneConfig{Replicas: 3},
+				ControlPlane:      &platformv1alpha1.CAPIControlPlaneConfig{Replicas: 3},
 			},
 		},
 	}
@@ -457,7 +457,7 @@ func TestConductorReady_ConditionTransition(t *testing.T) {
 				Enabled:           true,
 				TalosVersion:      "v1.7.0",
 				KubernetesVersion: "v1.31.0",
-				ControlPlane:      platformv1alpha1.CAPIControlPlaneConfig{Replicas: 3},
+				ControlPlane:      &platformv1alpha1.CAPIControlPlaneConfig{Replicas: 3},
 			},
 		},
 	}

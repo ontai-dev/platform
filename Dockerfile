@@ -13,11 +13,11 @@ COPY seam-core/ ../seam-core/
 RUN CGO_ENABLED=0 GOOS=linux go build \
     -trimpath \
     -ldflags="-s -w" \
-    -o /bin/ont-platform \
-    ./cmd/ont-platform
+    -o /bin/platform \
+    ./cmd/platform
 
 FROM gcr.io/distroless/base:nonroot
-COPY --from=builder /bin/ont-platform /usr/local/bin/ont-platform
+COPY --from=builder /bin/platform /usr/local/bin/platform
 
 USER 65532:65532
-ENTRYPOINT ["/usr/local/bin/ont-platform"]
+ENTRYPOINT ["/usr/local/bin/platform"]
