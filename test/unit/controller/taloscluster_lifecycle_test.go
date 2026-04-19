@@ -757,8 +757,8 @@ func TestTalosClusterReconcile_TenantImport_CreatesLocalQueue(t *testing.T) {
 
 	tc := &platformv1alpha1.TalosCluster{
 		ObjectMeta: metav1.ObjectMeta{
-			Name:       "ccs-dev",
-			Namespace:  "seam-system",
+			Name:      "ccs-dev",
+			Namespace: "seam-system",
 			Generation: 1,
 		},
 		Spec: platformv1alpha1.TalosClusterSpec{
