@@ -23,6 +23,8 @@ import (
 	batchv1 "k8s.io/api/batch/v1"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
+	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/tools/record"
 	ctrl "sigs.k8s.io/controller-runtime"
@@ -747,5 +749,72 @@ func TestTalosClusterReconcile_StatusPatchRetryOnConflict(t *testing.T) {
 	if got.Status.ObservedGeneration != tc.Generation {
 		t.Errorf("ObservedGeneration = %d after reconcile; want %d (deferred status patch must fire)",
 			got.Status.ObservedGeneration, tc.Generation)
+	}
+}
+
+// TestTalosClusterReconcile_TenantImport_CreatesLocalQueue verifies PLATFORM-BL-3:
+// when a Role=Tenant TalosCluster is imported (spec.mode=import), the reconciler
+// creates a Kueue LocalQueue named pack-deploy-queue in seam-tenant-{cluster-name}
+// pointing to ClusterQueue seam-pack-deploy.
+func TestTalosClusterReconcile_TenantImport_CreatesLocalQueue(t *testing.T) {
+	scheme := buildDay2Scheme(t)
+
+	tc := &platformv1alpha1.TalosCluster{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "ccs-dev",
+			Namespace: "seam-system",
+			Generation: 1,
+		},
+		Spec: platformv1alpha1.TalosClusterSpec{
+			Mode:         platformv1alpha1.TalosClusterModeImport,
+			TalosVersion: "v1.9.3",
+			Role:         platformv1alpha1.TalosClusterRoleTenant,
+			CAPI:         platformv1alpha1.CAPIConfig{Enabled: false},
+		},
+	}
+	talosconfigSecret := buildFakeTalosconfigSecret("ccs-dev")
+
+	c := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithObjects(tc, talosconfigSecret).
+		WithStatusSubresource(tc).
+		Build()
+	r := &controller.TalosClusterReconciler{
+		Client:                c,
+		Scheme:                scheme,
+		Recorder:              record.NewFakeRecorder(32),
+		KubeconfigGeneratorFn: fakeKubeconfigGenerator,
+	}
+
+	_, err := r.Reconcile(context.Background(), ctrl.Request{
+		NamespacedName: types.NamespacedName{Name: "ccs-dev", Namespace: "seam-system"},
+	})
+	if err != nil {
+		t.Fatalf("unexpected reconcile error: %v", err)
+	}
+
+	// Verify the LocalQueue was created in seam-tenant-ccs-dev.
+	lq := &unstructured.Unstructured{}
+	lq.SetGroupVersionKind(schema.GroupVersionKind{
+		Group:   "kueue.x-k8s.io",
+		Version: "v1beta1",
+		Kind:    "LocalQueue",
+	})
+	err = c.Get(context.Background(), types.NamespacedName{
+		Name:      "pack-deploy-queue",
+		Namespace: "seam-tenant-ccs-dev",
+	}, lq)
+	if err != nil {
+		t.Fatalf("LocalQueue pack-deploy-queue not found in seam-tenant-ccs-dev: %v", err)
+	}
+
+	// Verify the clusterQueue field points to the right ClusterQueue.
+	spec, ok := lq.Object["spec"].(map[string]interface{})
+	if !ok {
+		t.Fatal("LocalQueue spec is not a map")
+	}
+	clusterQueue, _ := spec["clusterQueue"].(string)
+	if clusterQueue != "seam-pack-deploy" {
+		t.Errorf("LocalQueue spec.clusterQueue = %q; want %q", clusterQueue, "seam-pack-deploy")
 	}
 }
