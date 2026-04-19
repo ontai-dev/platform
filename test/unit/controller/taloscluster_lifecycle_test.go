@@ -699,3 +699,53 @@ func TestTalosClusterReconcile_LineageSyncedNotUpdatedOnSecondReconcile(t *testi
 			cond.Status)
 	}
 }
+
+// TestTalosClusterReconcile_StatusPatchRetryOnConflict verifies that the status
+// patch deferred closure writes computed status correctly. The fake client does
+// not simulate 409 Conflict, but this test confirms the re-fetch path in
+// RetryOnConflict does not regress: after reconcile, the fresh Get inside the
+// retry closure sees the latest object and the computed status is applied.
+// PLATFORM-BL-STATUS-PATCH-CONFLICT.
+func TestTalosClusterReconcile_StatusPatchRetryOnConflict(t *testing.T) {
+	scheme := buildDay2Scheme(t)
+	tc := buildManagementTalosCluster("ccs-mgmt", "seam-system")
+
+	// Pre-create a bootstrap Job so the reconciler doesn't try to submit one
+	// (which would require RunnerConfig).
+	existingJob := &batchv1.Job{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "ccs-mgmt-bootstrap",
+			Namespace: "seam-system",
+		},
+	}
+
+	c := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithObjects(tc, existingJob).
+		WithStatusSubresource(tc).
+		Build()
+	r := &controller.TalosClusterReconciler{
+		Client:   c,
+		Scheme:   scheme,
+		Recorder: record.NewFakeRecorder(32),
+	}
+
+	_, err := r.Reconcile(context.Background(), ctrl.Request{
+		NamespacedName: types.NamespacedName{Name: "ccs-mgmt", Namespace: "seam-system"},
+	})
+	if err != nil {
+		t.Fatalf("unexpected reconcile error: %v", err)
+	}
+
+	got := &platformv1alpha1.TalosCluster{}
+	if err := c.Get(context.Background(), types.NamespacedName{
+		Name: "ccs-mgmt", Namespace: "seam-system",
+	}, got); err != nil {
+		t.Fatalf("get TalosCluster: %v", err)
+	}
+	// The deferred status patch must have applied at least ObservedGeneration.
+	if got.Status.ObservedGeneration != tc.Generation {
+		t.Errorf("ObservedGeneration = %d after reconcile; want %d (deferred status patch must fire)",
+			got.Status.ObservedGeneration, tc.Generation)
+	}
+}
