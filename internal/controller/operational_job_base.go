@@ -226,42 +226,6 @@ func operationalJobName(crName, capability string) string {
 	return fmt.Sprintf("%s-%s", crName, capability)
 }
 
-// operationalRunnerConfigName returns the name for the OperationalRunnerConfig
-// created by an operational day-2 reconciler. Each CR produces exactly one
-// RunnerConfig. Format: {crName} — deterministic, stable, namespace-scoped.
-// conductor-schema.md §17.
-func operationalRunnerConfigName(crName string) string {
-	return crName
-}
-
-// buildOperationalRunnerConfig constructs an OperationalRunnerConfig CR for
-// the given day-2 operation. maintenanceTargetNodes and leaderNode are stored
-// on spec so the Conductor executor can exclude them from step Job scheduling.
-// conductor-schema.md §13, §17.
-func buildOperationalRunnerConfig(
-	name, namespace, clusterRef string,
-	maintenanceTargetNodes []string,
-	leaderNode string,
-	steps []OperationalStep,
-) *OperationalRunnerConfig {
-	return &OperationalRunnerConfig{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      name,
-			Namespace: namespace,
-			Labels: map[string]string{
-				"platform.ontai.dev/cluster": clusterRef,
-			},
-		},
-		Spec: OperationalRunnerConfigSpec{
-			ClusterRef:             clusterRef,
-			RunnerImage:            conductorImage,
-			MaintenanceTargetNodes: maintenanceTargetNodes,
-			OperatorLeaderNode:     leaderNode,
-			Steps:                  steps,
-		},
-	}
-}
-
 // getClusterRunnerConfig returns the cluster-level RunnerConfig from ont-system
 // for the given cluster name. Returns nil when the RunnerConfig does not yet
 // exist — normal during Conductor agent startup. Day-2 reconcilers call this
@@ -294,23 +258,4 @@ func getOperationalRunnerConfig(ctx context.Context, c client.Client, namespace,
 		return nil, fmt.Errorf("get RunnerConfig %s/%s: %w", namespace, name, err)
 	}
 	return rc, nil
-}
-
-// readRunnerConfigTerminalCondition returns the terminal execution state of an
-// OperationalRunnerConfig written by the Conductor executor.
-// Returns (complete, failed, failedStep):
-//   - complete=true, failed=false: Conductor reached Completed (all steps succeeded).
-//   - complete=false, failed=true: Conductor reached Failed (failedStep has the step name).
-//   - complete=false, failed=false: execution is still in progress.
-//
-// conductor-schema.md §17.
-func readRunnerConfigTerminalCondition(rc *OperationalRunnerConfig) (complete, failed bool, failedStep string) {
-	switch rc.Status.Phase {
-	case "Completed":
-		return true, false, ""
-	case "Failed":
-		return false, true, rc.Status.FailedStep
-	default:
-		return false, false, ""
-	}
 }
