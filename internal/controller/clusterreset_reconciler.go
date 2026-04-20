@@ -116,7 +116,7 @@ func (r *ClusterResetReconciler) Reconcile(ctx context.Context, req ctrl.Request
 			fmt.Sprintf("Waiting for human approval. Set annotation %s=true to proceed.", platformv1alpha1.ResetApprovalAnnotation),
 			crst.Generation,
 		)
-		r.Recorder.Eventf(crst, nil, "Warning", "ApprovalRequired", "",
+		r.Recorder.Eventf(crst, nil, "Warning", "ApprovalRequired", "ApprovalRequired",
 			"ClusterReset %s/%s is waiting for annotation %s=true",
 			crst.Namespace, crst.Name, platformv1alpha1.ResetApprovalAnnotation)
 		logger.Info("ClusterReset waiting for human approval",
@@ -183,7 +183,7 @@ func (r *ClusterResetReconciler) reconcileCAPIReset(ctx context.Context, crst *p
 				"CAPI Cluster deletion initiated. Waiting for Machine objects to reach Deleted phase.",
 				crst.Generation,
 			)
-			r.Recorder.Eventf(crst, nil, "Normal", "CAPIClusterDeleting", "",
+			r.Recorder.Eventf(crst, nil, "Normal", "CAPIClusterDeleting", "CAPIClusterDeleting",
 				"Deleted CAPI Cluster %s/%s — waiting for machines to drain",
 				tenantNS, crst.Spec.ClusterRef.Name)
 		}
@@ -274,7 +274,7 @@ func (r *ClusterResetReconciler) submitAndWatchResetRC(ctx context.Context, crst
 			fmt.Sprintf("RunnerConfig %s submitted for cluster-reset.", rcName),
 			crst.Generation,
 		)
-		r.Recorder.Eventf(crst, nil, "Normal", "RunnerConfigSubmitted", "",
+		r.Recorder.Eventf(crst, nil, "Normal", "RunnerConfigSubmitted", "RunnerConfigSubmitted",
 			"Submitted RunnerConfig %s for cluster-reset", rcName)
 		logger.Info("submitted cluster-reset RunnerConfig",
 			"name", crst.Name, "rcName", rcName)
@@ -293,7 +293,7 @@ func (r *ClusterResetReconciler) submitAndWatchResetRC(ctx context.Context, crst
 			fmt.Sprintf("RunnerConfig %s failed at step %q.", rcName, failedStep),
 			crst.Generation,
 		)
-		r.Recorder.Eventf(crst, nil, "Warning", "RunnerConfigFailed", "",
+		r.Recorder.Eventf(crst, nil, "Warning", "RunnerConfigFailed", "RunnerConfigFailed",
 			"RunnerConfig %s failed at step %q", rcName, failedStep)
 		return ctrl.Result{}, nil
 	}
@@ -311,7 +311,7 @@ func (r *ClusterResetReconciler) submitAndWatchResetRC(ctx context.Context, crst
 		fmt.Sprintf("Cluster reset complete. RunnerConfig %s succeeded.", rcName),
 		crst.Generation,
 	)
-	r.Recorder.Eventf(crst, nil, "Normal", "ResetComplete", "",
+	r.Recorder.Eventf(crst, nil, "Normal", "ResetComplete", "ResetComplete",
 		"Cluster %s reset complete", crst.Spec.ClusterRef.Name)
 	logger.Info("ClusterReset complete",
 		"name", crst.Name, "cluster", crst.Spec.ClusterRef.Name)

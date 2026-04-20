@@ -149,7 +149,7 @@ func (r *UpgradePolicyReconciler) reconcileCAPIUpgrade(ctx context.Context, up *
 		"CAPI objects patched. Upgrade progression managed by CAPI controllers.",
 		up.Generation,
 	)
-	r.Recorder.Eventf(up, nil, "Normal", "CAPIDelegated", "",
+	r.Recorder.Eventf(up, nil, "Normal", "CAPIDelegated", "CAPIDelegated",
 		"Upgrade for cluster %s delegated to CAPI", up.Spec.ClusterRef.Name)
 	logger.Info("UpgradePolicy reconciled via CAPI delegation",
 		"name", up.Name, "upgradeType", up.Spec.UpgradeType,
@@ -261,7 +261,7 @@ func (r *UpgradePolicyReconciler) reconcileDirectUpgrade(ctx context.Context, up
 			fmt.Sprintf("RunnerConfig %s submitted (%d step(s)).", rcName, len(steps)),
 			up.Generation,
 		)
-		r.Recorder.Eventf(up, nil, "Normal", "RunnerConfigSubmitted", "",
+		r.Recorder.Eventf(up, nil, "Normal", "RunnerConfigSubmitted", "RunnerConfigSubmitted",
 			"Submitted RunnerConfig %s for %s (%d step(s))", rcName, up.Spec.UpgradeType, len(steps))
 		logger.Info("submitted upgrade RunnerConfig",
 			"name", up.Name, "rcName", rcName, "upgradeType", up.Spec.UpgradeType)
@@ -280,7 +280,7 @@ func (r *UpgradePolicyReconciler) reconcileDirectUpgrade(ctx context.Context, up
 			fmt.Sprintf("RunnerConfig %s failed at step %q.", rcName, failedStep),
 			up.Generation,
 		)
-		r.Recorder.Eventf(up, nil, "Warning", "RunnerConfigFailed", "",
+		r.Recorder.Eventf(up, nil, "Warning", "RunnerConfigFailed", "RunnerConfigFailed",
 			"RunnerConfig %s failed at step %q", rcName, failedStep)
 		return ctrl.Result{}, nil
 	}
@@ -297,7 +297,7 @@ func (r *UpgradePolicyReconciler) reconcileDirectUpgrade(ctx context.Context, up
 		fmt.Sprintf("RunnerConfig %s completed successfully.", rcName),
 		up.Generation,
 	)
-	r.Recorder.Eventf(up, nil, "Normal", "RunnerConfigComplete", "",
+	r.Recorder.Eventf(up, nil, "Normal", "RunnerConfigComplete", "RunnerConfigComplete",
 		"RunnerConfig %s completed successfully", rcName)
 	logger.Info("UpgradePolicy complete", "name", up.Name, "upgradeType", up.Spec.UpgradeType)
 	return ctrl.Result{}, nil

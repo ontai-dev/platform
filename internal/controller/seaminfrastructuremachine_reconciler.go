@@ -277,7 +277,7 @@ func (r *SeamInfrastructureMachineReconciler) Reconcile(ctx context.Context, req
 				fmt.Sprintf("Port %d unreachable after %d attempt(s).", port, sim.Status.ApplyAttempts),
 				sim.Generation,
 			)
-			r.Recorder.Eventf(sim, nil, "Warning", "ApplyConfigurationFailed", "",
+			r.Recorder.Eventf(sim, nil, "Warning", "ApplyConfigurationFailed", "ApplyConfigurationFailed",
 				"ApplyConfiguration attempt %d failed for %s at %s:%d: %v",
 				sim.Status.ApplyAttempts, sim.Name, sim.Spec.Address, port, err)
 			logger.Error(err, "ApplyConfiguration failed — exponential backoff",

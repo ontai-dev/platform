@@ -168,7 +168,7 @@ func (r *NodeMaintenanceReconciler) Reconcile(ctx context.Context, req ctrl.Requ
 			fmt.Sprintf("RunnerConfig %s submitted (cordon→drain→%s→uncordon).", rcName, operationCapability),
 			nm.Generation,
 		)
-		r.Recorder.Eventf(nm, nil, "Normal", "RunnerConfigSubmitted", "",
+		r.Recorder.Eventf(nm, nil, "Normal", "RunnerConfigSubmitted", "RunnerConfigSubmitted",
 			"Submitted RunnerConfig %s for %s (4-step sequence)", rcName, operationCapability)
 		logger.Info("submitted NodeMaintenance RunnerConfig",
 			"name", nm.Name, "rcName", rcName, "capability", operationCapability)
@@ -187,7 +187,7 @@ func (r *NodeMaintenanceReconciler) Reconcile(ctx context.Context, req ctrl.Requ
 			fmt.Sprintf("RunnerConfig %s failed at step %q.", rcName, failedStep),
 			nm.Generation,
 		)
-		r.Recorder.Eventf(nm, nil, "Warning", "RunnerConfigFailed", "",
+		r.Recorder.Eventf(nm, nil, "Warning", "RunnerConfigFailed", "RunnerConfigFailed",
 			"RunnerConfig %s failed at step %q", rcName, failedStep)
 		return ctrl.Result{}, nil
 	}
@@ -204,7 +204,7 @@ func (r *NodeMaintenanceReconciler) Reconcile(ctx context.Context, req ctrl.Requ
 		fmt.Sprintf("RunnerConfig %s completed successfully.", rcName),
 		nm.Generation,
 	)
-	r.Recorder.Eventf(nm, nil, "Normal", "RunnerConfigComplete", "",
+	r.Recorder.Eventf(nm, nil, "Normal", "RunnerConfigComplete", "RunnerConfigComplete",
 		"RunnerConfig %s completed successfully", rcName)
 	logger.Info("NodeMaintenance complete", "name", nm.Name, "capability", operationCapability)
 	return ctrl.Result{}, nil

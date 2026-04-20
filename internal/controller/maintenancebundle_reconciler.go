@@ -138,7 +138,7 @@ func (r *MaintenanceBundleReconciler) Reconcile(ctx context.Context, req ctrl.Re
 			fmt.Sprintf("Conductor executor Job %s submitted for %s.", jobName, capability),
 			mb.Generation,
 		)
-		r.Recorder.Eventf(mb, nil, "Normal", "JobSubmitted", "",
+		r.Recorder.Eventf(mb, nil, "Normal", "JobSubmitted", "JobSubmitted",
 			"Submitted Conductor executor Job %s for %s", jobName, capability)
 		logger.Info("submitted Conductor executor Job",
 			"name", mb.Name, "jobName", jobName, "capability", capability)
@@ -165,7 +165,7 @@ func (r *MaintenanceBundleReconciler) Reconcile(ctx context.Context, req ctrl.Re
 			"Job failed.",
 			mb.Generation,
 		)
-		r.Recorder.Eventf(mb, nil, "Warning", "JobFailed", "",
+		r.Recorder.Eventf(mb, nil, "Warning", "JobFailed", "JobFailed",
 			"Conductor executor Job %s failed: %s", jobName, result)
 		return ctrl.Result{}, nil
 	}
@@ -191,7 +191,7 @@ func (r *MaintenanceBundleReconciler) Reconcile(ctx context.Context, req ctrl.Re
 		fmt.Sprintf("Conductor executor Job %s completed successfully.", jobName),
 		mb.Generation,
 	)
-	r.Recorder.Eventf(mb, nil, "Normal", "JobComplete", "",
+	r.Recorder.Eventf(mb, nil, "Normal", "JobComplete", "JobComplete",
 		"Conductor executor Job %s completed successfully", jobName)
 	logger.Info("MaintenanceBundle complete",
 		"name", mb.Name, "capability", capability)

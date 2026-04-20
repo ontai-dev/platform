@@ -177,7 +177,7 @@ func (r *EtcdMaintenanceReconciler) Reconcile(ctx context.Context, req ctrl.Requ
 			fmt.Sprintf("RunnerConfig %s submitted for %s.", rcName, capability),
 			em.Generation,
 		)
-		r.Recorder.Eventf(em, nil, "Normal", "RunnerConfigSubmitted", "",
+		r.Recorder.Eventf(em, nil, "Normal", "RunnerConfigSubmitted", "RunnerConfigSubmitted",
 			"Submitted RunnerConfig %s for %s", rcName, capability)
 		logger.Info("submitted RunnerConfig",
 			"name", em.Name, "rcName", rcName, "capability", capability)
@@ -204,7 +204,7 @@ func (r *EtcdMaintenanceReconciler) Reconcile(ctx context.Context, req ctrl.Requ
 			"RunnerConfig failed.",
 			em.Generation,
 		)
-		r.Recorder.Eventf(em, nil, "Warning", "RunnerConfigFailed", "",
+		r.Recorder.Eventf(em, nil, "Warning", "RunnerConfigFailed", "RunnerConfigFailed",
 			"RunnerConfig %s failed at step %q", rcName, failedStep)
 		return ctrl.Result{}, nil
 	}
@@ -230,7 +230,7 @@ func (r *EtcdMaintenanceReconciler) Reconcile(ctx context.Context, req ctrl.Requ
 		fmt.Sprintf("RunnerConfig %s completed successfully.", rcName),
 		em.Generation,
 	)
-	r.Recorder.Eventf(em, nil, "Normal", "RunnerConfigComplete", "",
+	r.Recorder.Eventf(em, nil, "Normal", "RunnerConfigComplete", "RunnerConfigComplete",
 		"RunnerConfig %s completed successfully", rcName)
 	logger.Info("EtcdMaintenance complete",
 		"name", em.Name, "capability", capability)

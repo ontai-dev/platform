@@ -159,7 +159,7 @@ func (r *NodeOperationReconciler) reconcileCAPINodeOp(ctx context.Context, nop *
 		"CAPI objects updated. Operation progression managed by CAPI controllers.",
 		nop.Generation,
 	)
-	r.Recorder.Eventf(nop, nil, "Normal", "CAPIDelegated", "",
+	r.Recorder.Eventf(nop, nil, "Normal", "CAPIDelegated", "CAPIDelegated",
 		"NodeOperation %s for cluster %s delegated to CAPI", nop.Spec.Operation, nop.Spec.ClusterRef.Name)
 	logger.Info("NodeOperation reconciled via CAPI delegation",
 		"name", nop.Name, "operation", nop.Spec.Operation, "cluster", nop.Spec.ClusterRef.Name)
@@ -305,7 +305,7 @@ func (r *NodeOperationReconciler) reconcileDirectNodeOp(ctx context.Context, nop
 			fmt.Sprintf("RunnerConfig %s submitted for %s.", rcName, capability),
 			nop.Generation,
 		)
-		r.Recorder.Eventf(nop, nil, "Normal", "RunnerConfigSubmitted", "",
+		r.Recorder.Eventf(nop, nil, "Normal", "RunnerConfigSubmitted", "RunnerConfigSubmitted",
 			"Submitted RunnerConfig %s for %s", rcName, capability)
 		logger.Info("submitted NodeOperation RunnerConfig",
 			"name", nop.Name, "rcName", rcName, "capability", capability)
@@ -324,7 +324,7 @@ func (r *NodeOperationReconciler) reconcileDirectNodeOp(ctx context.Context, nop
 			fmt.Sprintf("RunnerConfig %s failed at step %q.", rcName, failedStep),
 			nop.Generation,
 		)
-		r.Recorder.Eventf(nop, nil, "Warning", "RunnerConfigFailed", "",
+		r.Recorder.Eventf(nop, nil, "Warning", "RunnerConfigFailed", "RunnerConfigFailed",
 			"RunnerConfig %s failed at step %q", rcName, failedStep)
 		return ctrl.Result{}, nil
 	}
@@ -341,7 +341,7 @@ func (r *NodeOperationReconciler) reconcileDirectNodeOp(ctx context.Context, nop
 		fmt.Sprintf("RunnerConfig %s completed successfully.", rcName),
 		nop.Generation,
 	)
-	r.Recorder.Eventf(nop, nil, "Normal", "RunnerConfigComplete", "",
+	r.Recorder.Eventf(nop, nil, "Normal", "RunnerConfigComplete", "RunnerConfigComplete",
 		"RunnerConfig %s completed successfully", rcName)
 	logger.Info("NodeOperation complete", "name", nop.Name, "capability", capability)
 	return ctrl.Result{}, nil

@@ -643,7 +643,7 @@ func (r *TalosClusterReconciler) checkMachineReachability(ctx context.Context, t
 			fmt.Sprintf("Control plane node(s) unreachable on port 50000 after %d attempts. Halting reconciliation.", machineApplyAttemptsHaltThreshold),
 			tc.Generation,
 		)
-		r.Recorder.Eventf(tc, nil, "Warning", "ControlPlaneUnreachable", "",
+		r.Recorder.Eventf(tc, nil, "Warning", "ControlPlaneUnreachable", "ControlPlaneUnreachable",
 			"Control plane node(s) unreachable on port 50000 after %d attempts", machineApplyAttemptsHaltThreshold)
 		logger.Info("halting TalosCluster reconcile — control plane port-50000 unreachable",
 			"name", tc.Name, "threshold", machineApplyAttemptsHaltThreshold)
@@ -669,7 +669,7 @@ func (r *TalosClusterReconciler) checkMachineReachability(ctx context.Context, t
 			fmt.Sprintf("Worker node(s) unreachable on port 50000 after %d attempts. Proceeding with available workers.", machineApplyAttemptsHaltThreshold),
 			tc.Generation,
 		)
-		r.Recorder.Eventf(tc, nil, "Warning", "PartialWorkerAvailability", "",
+		r.Recorder.Eventf(tc, nil, "Warning", "PartialWorkerAvailability", "PartialWorkerAvailability",
 			"Worker node(s) unreachable on port 50000 after %d attempts — proceeding with available workers",
 			machineApplyAttemptsHaltThreshold)
 	} else {

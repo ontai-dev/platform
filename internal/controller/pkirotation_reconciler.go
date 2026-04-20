@@ -123,7 +123,7 @@ func (r *PKIRotationReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 			fmt.Sprintf("RunnerConfig %s submitted for pki-rotate.", rcName),
 			pkir.Generation,
 		)
-		r.Recorder.Eventf(pkir, nil, "Normal", "RunnerConfigSubmitted", "",
+		r.Recorder.Eventf(pkir, nil, "Normal", "RunnerConfigSubmitted", "RunnerConfigSubmitted",
 			"Submitted RunnerConfig %s for pki-rotate", rcName)
 		logger.Info("submitted PKIRotation RunnerConfig",
 			"name", pkir.Name, "rcName", rcName)
@@ -142,7 +142,7 @@ func (r *PKIRotationReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 			fmt.Sprintf("RunnerConfig %s failed at step %q.", rcName, failedStep),
 			pkir.Generation,
 		)
-		r.Recorder.Eventf(pkir, nil, "Warning", "RunnerConfigFailed", "",
+		r.Recorder.Eventf(pkir, nil, "Warning", "RunnerConfigFailed", "RunnerConfigFailed",
 			"RunnerConfig %s failed at step %q", rcName, failedStep)
 		return ctrl.Result{}, nil
 	}
@@ -159,7 +159,7 @@ func (r *PKIRotationReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 		fmt.Sprintf("RunnerConfig %s completed successfully.", rcName),
 		pkir.Generation,
 	)
-	r.Recorder.Eventf(pkir, nil, "Normal", "RunnerConfigComplete", "",
+	r.Recorder.Eventf(pkir, nil, "Normal", "RunnerConfigComplete", "RunnerConfigComplete",
 		"RunnerConfig %s completed successfully", rcName)
 	logger.Info("PKIRotation complete", "name", pkir.Name)
 	return ctrl.Result{}, nil
