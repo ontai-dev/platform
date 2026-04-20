@@ -17,7 +17,7 @@ import (
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
-	"k8s.io/client-go/tools/record"
+	clientevents "k8s.io/client-go/tools/events"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
@@ -38,7 +38,7 @@ const (
 type MaintenanceBundleReconciler struct {
 	Client   client.Client
 	Scheme   *runtime.Scheme
-	Recorder record.EventRecorder
+	Recorder clientevents.EventRecorder
 }
 
 // +kubebuilder:rbac:groups=platform.ontai.dev,resources=maintenancebundles,verbs=get;list;watch;create;update;patch;delete
@@ -138,7 +138,7 @@ func (r *MaintenanceBundleReconciler) Reconcile(ctx context.Context, req ctrl.Re
 			fmt.Sprintf("Conductor executor Job %s submitted for %s.", jobName, capability),
 			mb.Generation,
 		)
-		r.Recorder.Eventf(mb, "Normal", "JobSubmitted",
+		r.Recorder.Eventf(mb, nil, "Normal", "JobSubmitted", "",
 			"Submitted Conductor executor Job %s for %s", jobName, capability)
 		logger.Info("submitted Conductor executor Job",
 			"name", mb.Name, "jobName", jobName, "capability", capability)
@@ -165,7 +165,7 @@ func (r *MaintenanceBundleReconciler) Reconcile(ctx context.Context, req ctrl.Re
 			"Job failed.",
 			mb.Generation,
 		)
-		r.Recorder.Eventf(mb, "Warning", "JobFailed",
+		r.Recorder.Eventf(mb, nil, "Warning", "JobFailed", "",
 			"Conductor executor Job %s failed: %s", jobName, result)
 		return ctrl.Result{}, nil
 	}
@@ -191,7 +191,7 @@ func (r *MaintenanceBundleReconciler) Reconcile(ctx context.Context, req ctrl.Re
 		fmt.Sprintf("Conductor executor Job %s completed successfully.", jobName),
 		mb.Generation,
 	)
-	r.Recorder.Eventf(mb, "Normal", "JobComplete",
+	r.Recorder.Eventf(mb, nil, "Normal", "JobComplete", "",
 		"Conductor executor Job %s completed successfully", jobName)
 	logger.Info("MaintenanceBundle complete",
 		"name", mb.Name, "capability", capability)

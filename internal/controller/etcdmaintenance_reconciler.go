@@ -21,7 +21,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
-	"k8s.io/client-go/tools/record"
+	clientevents "k8s.io/client-go/tools/events"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
@@ -41,7 +41,7 @@ const (
 type EtcdMaintenanceReconciler struct {
 	Client   client.Client
 	Scheme   *runtime.Scheme
-	Recorder record.EventRecorder
+	Recorder clientevents.EventRecorder
 }
 
 // +kubebuilder:rbac:groups=platform.ontai.dev,resources=etcdmaintenances,verbs=get;list;watch;create;update;patch;delete
@@ -133,7 +133,7 @@ func (r *EtcdMaintenanceReconciler) Reconcile(ctx context.Context, req ctrl.Requ
 					"No S3 backup destination configured: spec.etcdBackupS3SecretRef is absent and seam-etcd-backup-config Secret is not found in seam-system. Set either to proceed. platform-schema.md §10.",
 					em.Generation,
 				)
-				r.Recorder.Eventf(em, "Warning", "S3DestinationAbsent",
+				r.Recorder.Eventf(em, nil, "Warning", "S3DestinationAbsent",
 					"EtcdMaintenance %s/%s: no S3 backup destination configured", em.Namespace, em.Name)
 				return ctrl.Result{}, nil
 			}
@@ -177,7 +177,7 @@ func (r *EtcdMaintenanceReconciler) Reconcile(ctx context.Context, req ctrl.Requ
 			fmt.Sprintf("RunnerConfig %s submitted for %s.", rcName, capability),
 			em.Generation,
 		)
-		r.Recorder.Eventf(em, "Normal", "RunnerConfigSubmitted",
+		r.Recorder.Eventf(em, nil, "Normal", "RunnerConfigSubmitted", "",
 			"Submitted RunnerConfig %s for %s", rcName, capability)
 		logger.Info("submitted RunnerConfig",
 			"name", em.Name, "rcName", rcName, "capability", capability)
@@ -204,7 +204,7 @@ func (r *EtcdMaintenanceReconciler) Reconcile(ctx context.Context, req ctrl.Requ
 			"RunnerConfig failed.",
 			em.Generation,
 		)
-		r.Recorder.Eventf(em, "Warning", "RunnerConfigFailed",
+		r.Recorder.Eventf(em, nil, "Warning", "RunnerConfigFailed", "",
 			"RunnerConfig %s failed at step %q", rcName, failedStep)
 		return ctrl.Result{}, nil
 	}
@@ -230,7 +230,7 @@ func (r *EtcdMaintenanceReconciler) Reconcile(ctx context.Context, req ctrl.Requ
 		fmt.Sprintf("RunnerConfig %s completed successfully.", rcName),
 		em.Generation,
 	)
-	r.Recorder.Eventf(em, "Normal", "RunnerConfigComplete",
+	r.Recorder.Eventf(em, nil, "Normal", "RunnerConfigComplete", "",
 		"RunnerConfig %s completed successfully", rcName)
 	logger.Info("EtcdMaintenance complete",
 		"name", em.Name, "capability", capability)

@@ -24,7 +24,7 @@ import (
 
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
-	"k8s.io/client-go/tools/record"
+	clientevents "k8s.io/client-go/tools/events"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 
@@ -71,7 +71,7 @@ func TestTalosClusterReconcile_ScreenProviderNotImplemented(t *testing.T) {
 	r := &controller.TalosClusterReconciler{
 		Client:   c,
 		Scheme:   scheme,
-		Recorder: record.NewFakeRecorder(32),
+		Recorder: clientevents.NewFakeRecorder(32),
 	}
 
 	result, err := r.Reconcile(context.Background(), ctrl.Request{

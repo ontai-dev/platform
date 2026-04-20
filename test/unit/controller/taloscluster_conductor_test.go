@@ -18,7 +18,7 @@ import (
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
-	"k8s.io/client-go/tools/record"
+	clientevents "k8s.io/client-go/tools/events"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 
@@ -89,7 +89,7 @@ func TestEnsureConductorDeployment_KubeconfigAbsentIsGraceful(t *testing.T) {
 	r := &controller.TalosClusterReconciler{
 		Client:   c,
 		Scheme:   scheme,
-		Recorder: record.NewFakeRecorder(32),
+		Recorder: clientevents.NewFakeRecorder(32),
 	}
 
 	available, err := r.EnsureConductorDeploymentOnTargetCluster(context.Background(), tc)
@@ -125,7 +125,7 @@ func TestTalosClusterReconcile_CAPIPathDoesNotBreakOnAbsentKubeconfig(t *testing
 	r := &controller.TalosClusterReconciler{
 		Client:   c,
 		Scheme:   scheme,
-		Recorder: record.NewFakeRecorder(32),
+		Recorder: clientevents.NewFakeRecorder(32),
 	}
 
 	// First reconcile: creates CAPI objects, polls CAPI status.
@@ -197,7 +197,7 @@ func TestTalosClusterReconcile_ControlPlaneUnreachableHalts(t *testing.T) {
 	r := &controller.TalosClusterReconciler{
 		Client:   c,
 		Scheme:   scheme,
-		Recorder: record.NewFakeRecorder(32),
+		Recorder: clientevents.NewFakeRecorder(32),
 	}
 
 	result, err := r.Reconcile(context.Background(), ctrl.Request{
@@ -245,7 +245,7 @@ func TestTalosClusterReconcile_WorkerUnreachablePartialAvailability(t *testing.T
 	r := &controller.TalosClusterReconciler{
 		Client:   c,
 		Scheme:   scheme,
-		Recorder: record.NewFakeRecorder(32),
+		Recorder: clientevents.NewFakeRecorder(32),
 	}
 
 	result, err := r.Reconcile(context.Background(), ctrl.Request{
@@ -330,7 +330,7 @@ func TestConductorReady_Available_TransitionsClusterToReady(t *testing.T) {
 	r := &controller.TalosClusterReconciler{
 		Client:   c,
 		Scheme:   scheme,
-		Recorder: record.NewFakeRecorder(32),
+		Recorder: clientevents.NewFakeRecorder(32),
 		// Inject availability=true to simulate a healthy Conductor Deployment.
 		RemoteConductorAvailableFn: func(_ context.Context, _ string) (bool, error) {
 			return true, nil
@@ -402,7 +402,7 @@ func TestConductorReady_Unavailable_Requeues(t *testing.T) {
 	r := &controller.TalosClusterReconciler{
 		Client:   c,
 		Scheme:   scheme,
-		Recorder: record.NewFakeRecorder(32),
+		Recorder: clientevents.NewFakeRecorder(32),
 		// Inject availability=false to simulate a not-yet-ready Conductor Deployment.
 		RemoteConductorAvailableFn: func(_ context.Context, _ string) (bool, error) {
 			return false, nil
@@ -474,7 +474,7 @@ func TestConductorReady_ConditionTransition(t *testing.T) {
 	r := &controller.TalosClusterReconciler{
 		Client:   c,
 		Scheme:   scheme,
-		Recorder: record.NewFakeRecorder(32),
+		Recorder: clientevents.NewFakeRecorder(32),
 		RemoteConductorAvailableFn: func(_ context.Context, _ string) (bool, error) {
 			return available, nil
 		},

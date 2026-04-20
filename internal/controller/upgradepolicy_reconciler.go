@@ -23,7 +23,7 @@ import (
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
-	"k8s.io/client-go/tools/record"
+	clientevents "k8s.io/client-go/tools/events"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
@@ -41,7 +41,7 @@ const (
 type UpgradePolicyReconciler struct {
 	Client   client.Client
 	Scheme   *runtime.Scheme
-	Recorder record.EventRecorder
+	Recorder clientevents.EventRecorder
 }
 
 // +kubebuilder:rbac:groups=platform.ontai.dev,resources=upgradepolicies,verbs=get;list;watch;create;update;patch;delete
@@ -149,7 +149,7 @@ func (r *UpgradePolicyReconciler) reconcileCAPIUpgrade(ctx context.Context, up *
 		"CAPI objects patched. Upgrade progression managed by CAPI controllers.",
 		up.Generation,
 	)
-	r.Recorder.Eventf(up, "Normal", "CAPIDelegated",
+	r.Recorder.Eventf(up, nil, "Normal", "CAPIDelegated", "",
 		"Upgrade for cluster %s delegated to CAPI", up.Spec.ClusterRef.Name)
 	logger.Info("UpgradePolicy reconciled via CAPI delegation",
 		"name", up.Name, "upgradeType", up.Spec.UpgradeType,
@@ -261,7 +261,7 @@ func (r *UpgradePolicyReconciler) reconcileDirectUpgrade(ctx context.Context, up
 			fmt.Sprintf("RunnerConfig %s submitted (%d step(s)).", rcName, len(steps)),
 			up.Generation,
 		)
-		r.Recorder.Eventf(up, "Normal", "RunnerConfigSubmitted",
+		r.Recorder.Eventf(up, nil, "Normal", "RunnerConfigSubmitted", "",
 			"Submitted RunnerConfig %s for %s (%d step(s))", rcName, up.Spec.UpgradeType, len(steps))
 		logger.Info("submitted upgrade RunnerConfig",
 			"name", up.Name, "rcName", rcName, "upgradeType", up.Spec.UpgradeType)
@@ -280,7 +280,7 @@ func (r *UpgradePolicyReconciler) reconcileDirectUpgrade(ctx context.Context, up
 			fmt.Sprintf("RunnerConfig %s failed at step %q.", rcName, failedStep),
 			up.Generation,
 		)
-		r.Recorder.Eventf(up, "Warning", "RunnerConfigFailed",
+		r.Recorder.Eventf(up, nil, "Warning", "RunnerConfigFailed", "",
 			"RunnerConfig %s failed at step %q", rcName, failedStep)
 		return ctrl.Result{}, nil
 	}
@@ -297,7 +297,7 @@ func (r *UpgradePolicyReconciler) reconcileDirectUpgrade(ctx context.Context, up
 		fmt.Sprintf("RunnerConfig %s completed successfully.", rcName),
 		up.Generation,
 	)
-	r.Recorder.Eventf(up, "Normal", "RunnerConfigComplete",
+	r.Recorder.Eventf(up, nil, "Normal", "RunnerConfigComplete", "",
 		"RunnerConfig %s completed successfully", rcName)
 	logger.Info("UpgradePolicy complete", "name", up.Name, "upgradeType", up.Spec.UpgradeType)
 	return ctrl.Result{}, nil

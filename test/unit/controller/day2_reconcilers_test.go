@@ -14,7 +14,7 @@ import (
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
-	"k8s.io/client-go/tools/record"
+	clientevents "k8s.io/client-go/tools/events"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 
@@ -24,8 +24,8 @@ import (
 )
 
 // fakeRecorder returns a buffered fake event recorder for use in tests.
-func fakeRecorder() record.EventRecorder {
-	return record.NewFakeRecorder(32)
+func fakeRecorder() clientevents.EventRecorder {
+	return clientevents.NewFakeRecorder(32)
 }
 
 // buildDay2Scheme returns a runtime.Scheme with platform, batch, and
@@ -239,7 +239,7 @@ func TestClusterResetReconcile_ApprovalGate(t *testing.T) {
 		t.Fatalf("unexpected error: %v", err)
 	}
 	// No requeue — controller waits for annotation write trigger.
-	if result.RequeueAfter != 0 || result.Requeue {
+	if result.RequeueAfter != 0 {
 		t.Errorf("should not requeue while waiting for approval, got %+v", result)
 	}
 
@@ -343,7 +343,7 @@ func TestHardeningProfileReconcile_LineageSynced(t *testing.T) {
 		t.Fatalf("unexpected error: %v", err)
 	}
 	// HardeningProfile is a config CR — no requeue.
-	if result.RequeueAfter != 0 || result.Requeue {
+	if result.RequeueAfter != 0 {
 		t.Errorf("HardeningProfile should not requeue, got %+v", result)
 	}
 

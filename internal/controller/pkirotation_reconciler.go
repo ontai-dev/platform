@@ -17,7 +17,7 @@ import (
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
-	"k8s.io/client-go/tools/record"
+	clientevents "k8s.io/client-go/tools/events"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
@@ -32,7 +32,7 @@ const capabilityPKIRotate = "pki-rotate"
 type PKIRotationReconciler struct {
 	Client   client.Client
 	Scheme   *runtime.Scheme
-	Recorder record.EventRecorder
+	Recorder clientevents.EventRecorder
 }
 
 // +kubebuilder:rbac:groups=platform.ontai.dev,resources=pkirotations,verbs=get;list;watch;create;update;patch;delete
@@ -123,7 +123,7 @@ func (r *PKIRotationReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 			fmt.Sprintf("RunnerConfig %s submitted for pki-rotate.", rcName),
 			pkir.Generation,
 		)
-		r.Recorder.Eventf(pkir, "Normal", "RunnerConfigSubmitted",
+		r.Recorder.Eventf(pkir, nil, "Normal", "RunnerConfigSubmitted", "",
 			"Submitted RunnerConfig %s for pki-rotate", rcName)
 		logger.Info("submitted PKIRotation RunnerConfig",
 			"name", pkir.Name, "rcName", rcName)
@@ -142,7 +142,7 @@ func (r *PKIRotationReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 			fmt.Sprintf("RunnerConfig %s failed at step %q.", rcName, failedStep),
 			pkir.Generation,
 		)
-		r.Recorder.Eventf(pkir, "Warning", "RunnerConfigFailed",
+		r.Recorder.Eventf(pkir, nil, "Warning", "RunnerConfigFailed", "",
 			"RunnerConfig %s failed at step %q", rcName, failedStep)
 		return ctrl.Result{}, nil
 	}
@@ -159,7 +159,7 @@ func (r *PKIRotationReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 		fmt.Sprintf("RunnerConfig %s completed successfully.", rcName),
 		pkir.Generation,
 	)
-	r.Recorder.Eventf(pkir, "Normal", "RunnerConfigComplete",
+	r.Recorder.Eventf(pkir, nil, "Normal", "RunnerConfigComplete", "",
 		"RunnerConfig %s completed successfully", rcName)
 	logger.Info("PKIRotation complete", "name", pkir.Name)
 	return ctrl.Result{}, nil
