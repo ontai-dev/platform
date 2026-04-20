@@ -155,11 +155,10 @@ func (r *TalosClusterReconciler) ensureBootstrapRunnerConfig(ctx context.Context
 		},
 	}
 	// Wire descendant lineage so the DescendantReconciler can append this RunnerConfig
-	// to the TalosCluster's InfrastructureLineageIndex. seam-core-schema.md §3.
-	// Note: the ILI resides in the TalosCluster namespace (seam-system); the RunnerConfig
-	// is in ont-system. The DescendantReconciler will skip gracefully until a cross-namespace
-	// ILI lookup is implemented (tracked in BACKLOG: PLATFORM-BL-ILI-CROSS-NS).
-	lineage.SetDescendantLabels(rc, lineage.IndexName("TalosCluster", tc.Name), "platform", lineage.ConductorAssignment)
+	// to the TalosCluster's InfrastructureLineageIndex. The ILI is in tc.Namespace
+	// (seam-system) while the RunnerConfig is in ont-system; the explicit ILI namespace
+	// label enables the cross-namespace lookup. seam-core-schema.md §3.
+	lineage.SetDescendantLabels(rc, lineage.IndexName("TalosCluster", tc.Name), tc.Namespace, "platform", lineage.ConductorAssignment)
 	if err := r.Client.Create(ctx, rc); err != nil && !apierrors.IsAlreadyExists(err) {
 		return fmt.Errorf("ensureBootstrapRunnerConfig: create RunnerConfig %s/%s: %w",
 			bootstrapRunnerConfigNamespace, name, err)
