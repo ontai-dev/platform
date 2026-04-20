@@ -329,10 +329,11 @@ type TalosClusterSpec struct {
 	NodeAddresses []string `json:"nodeAddresses,omitempty"`
 
 	// CAPI holds the CAPI-specific configuration for target cluster lifecycle.
-	// When CAPI.Enabled=false (management cluster), this field is ignored except
-	// for the Enabled flag itself.
+	// Nil when capi.enabled=false (management cluster) -- pointer ensures the
+	// capi block is suppressed entirely from serialization rather than emitting
+	// capi: {enabled: false} noise.
 	// +optional
-	CAPI CAPIConfig `json:"capi,omitempty"`
+	CAPI *CAPIConfig `json:"capi,omitempty"`
 
 	// InfrastructureProvider declares the infrastructure provider backing this cluster.
 	// Defaults to native when absent. The only reserved future value is screen (INV-021):
@@ -410,6 +411,12 @@ type TalosCluster struct {
 
 	Spec   TalosClusterSpec   `json:"spec,omitempty"`
 	Status TalosClusterStatus `json:"status,omitempty"`
+}
+
+// CAPIEnabled returns true when this cluster uses the CAPI path. Safe to call
+// when spec.capi is nil (management cluster path, C-34).
+func (s *TalosClusterSpec) CAPIEnabled() bool {
+	return s.CAPI != nil && s.CAPI.Enabled
 }
 
 // TalosClusterList is the list type for TalosCluster.

@@ -167,7 +167,7 @@ func (r *TalosClusterReconciler) Reconcile(ctx context.Context, req ctrl.Request
 	}
 
 	// Step E — Route to the appropriate reconciliation path.
-	if !tc.Spec.CAPI.Enabled {
+	if !tc.Spec.CAPIEnabled() {
 		return r.reconcileDirectBootstrap(ctx, tc)
 	}
 	return r.reconcileCAPIPath(ctx, tc)

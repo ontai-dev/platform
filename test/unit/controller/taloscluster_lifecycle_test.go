@@ -44,7 +44,7 @@ func buildManagementTalosCluster(name, namespace string) *platformv1alpha1.Talos
 		Spec: platformv1alpha1.TalosClusterSpec{
 			Mode:         platformv1alpha1.TalosClusterModeBootstrap,
 			TalosVersion: "v1.9.3",
-			CAPI:         platformv1alpha1.CAPIConfig{Enabled: false},
+			// CAPI nil -- disabled path (C-34: nil suppresses capi block in YAML)
 		},
 	}
 }
@@ -58,7 +58,7 @@ func buildImportTalosCluster(name, namespace string) *platformv1alpha1.TalosClus
 		Spec: platformv1alpha1.TalosClusterSpec{
 			Mode:         platformv1alpha1.TalosClusterModeImport,
 			TalosVersion: "v1.9.3",
-			CAPI:         platformv1alpha1.CAPIConfig{Enabled: false},
+			// CAPI nil -- disabled path (C-34: nil suppresses capi block in YAML)
 		},
 	}
 }
@@ -769,7 +769,7 @@ func TestTalosClusterReconcile_TenantImport_CreatesLocalQueue(t *testing.T) {
 			Mode:         platformv1alpha1.TalosClusterModeImport,
 			TalosVersion: "v1.9.3",
 			Role:         platformv1alpha1.TalosClusterRoleTenant,
-			CAPI:         platformv1alpha1.CAPIConfig{Enabled: false},
+			// CAPI nil -- disabled path (C-34: nil suppresses capi block in YAML)
 		},
 	}
 	talosconfigSecret := buildFakeTalosconfigSecret("ccs-dev")
