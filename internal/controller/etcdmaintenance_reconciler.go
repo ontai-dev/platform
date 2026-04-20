@@ -1,16 +1,16 @@
 package controller
 
-// EtcdMaintenanceReconciler reconciles EtcdMaintenance CRs. It emits a
-// RunnerConfig CR with a single-step execution intent for the requested etcd
-// lifecycle operation regardless of the owning TalosCluster's capi.enabled
-// value — CAPI has no etcd concept. Conductor's execute mode runs the step.
+// EtcdMaintenanceReconciler reconciles EtcdMaintenance CRs.
+//
+// Pattern: read the cluster RunnerConfig from ont-system, gate on capability
+// availability, then submit a single batch/v1 Conductor executor Job. Watches
+// the OperationResult ConfigMap for completion. conductor-schema.md §5 §17.
 //
 // Named Conductor capabilities: etcd-backup, etcd-restore, etcd-defrag.
 // platform-schema.md §5 EtcdMaintenance. platform-design.md §6.
-// conductor-schema.md §17 RunnerConfig Execution Model.
 //
-// CP-INV-010: No Kueue. RunnerConfig submitted directly.
-// INV-018: gate failures are permanent — HaltOnFailure=true on every step.
+// CP-INV-003: RunnerConfig is generated at runtime, never hand-coded.
+// INV-018: gate failures are permanent — backoffLimit=0, no retries.
 
 import (
 	"context"
@@ -48,7 +48,9 @@ type EtcdMaintenanceReconciler struct {
 // +kubebuilder:rbac:groups=platform.ontai.dev,resources=etcdmaintenances/status,verbs=get;update;patch
 // +kubebuilder:rbac:groups=platform.ontai.dev,resources=etcdmaintenances/finalizers,verbs=update
 // +kubebuilder:rbac:groups="",resources=events,verbs=create;patch
-// +kubebuilder:rbac:groups=runner.ontai.dev,resources=runnerconfigs,verbs=get;list;watch;create;update;patch;delete
+// +kubebuilder:rbac:groups=runner.ontai.dev,resources=runnerconfigs,verbs=get;list;watch
+// +kubebuilder:rbac:groups=batch,resources=jobs,verbs=get;list;watch;create;update;patch;delete
+// +kubebuilder:rbac:groups="",resources=configmaps,verbs=get;list;watch
 
 func (r *EtcdMaintenanceReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
 	logger := log.FromContext(ctx)
@@ -106,28 +108,63 @@ func (r *EtcdMaintenanceReconciler) Reconcile(ctx context.Context, req ctrl.Requ
 		return ctrl.Result{}, nil
 	}
 
-	rcName := operationalRunnerConfigName(em.Name)
-
-	// Check for an existing RunnerConfig.
-	existingRC, err := getOperationalRunnerConfig(ctx, r.Client, em.Namespace, rcName)
+	// Gate: read the cluster RunnerConfig from ont-system and verify capability.
+	// conductor-schema.md §5, CR-INV-005.
+	clusterRC, err := getClusterRunnerConfig(ctx, r.Client, em.Spec.ClusterRef.Name)
 	if err != nil {
-		return ctrl.Result{}, fmt.Errorf("EtcdMaintenanceReconciler: check RunnerConfig: %w", err)
+		return ctrl.Result{}, fmt.Errorf("EtcdMaintenanceReconciler: get cluster RunnerConfig: %w", err)
+	}
+	if clusterRC == nil {
+		platformv1alpha1.SetCondition(
+			&em.Status.Conditions,
+			platformv1alpha1.ConditionTypeCapabilityUnavailable,
+			metav1.ConditionTrue,
+			platformv1alpha1.ReasonRunnerConfigNotFound,
+			"Cluster RunnerConfig not yet present in ont-system. Waiting for Conductor agent.",
+			em.Generation,
+		)
+		return ctrl.Result{RequeueAfter: capabilityUnavailableRetryInterval}, nil
+	}
+	if !hasCapability(clusterRC, capability) {
+		platformv1alpha1.SetCondition(
+			&em.Status.Conditions,
+			platformv1alpha1.ConditionTypeCapabilityUnavailable,
+			metav1.ConditionTrue,
+			platformv1alpha1.ReasonCapabilityNotPublished,
+			fmt.Sprintf("Capability %q not yet published by Conductor agent.", capability),
+			em.Generation,
+		)
+		return ctrl.Result{RequeueAfter: capabilityUnavailableRetryInterval}, nil
+	}
+	platformv1alpha1.SetCondition(
+		&em.Status.Conditions,
+		platformv1alpha1.ConditionTypeCapabilityUnavailable,
+		metav1.ConditionFalse,
+		platformv1alpha1.ReasonCapabilityNotPublished,
+		"",
+		em.Generation,
+	)
+
+	jobName := operationalJobName(em.Name, capability)
+
+	// Check for an existing Job.
+	existingJob, err := getOperationalJob(ctx, r.Client, em.Namespace, jobName)
+	if err != nil {
+		return ctrl.Result{}, fmt.Errorf("EtcdMaintenanceReconciler: check job: %w", err)
 	}
 
-	if existingRC == nil {
+	if existingJob == nil {
 		// For backup operations: resolve S3 destination before submitting.
-		// Store resolved secret ref in step Parameters.
-		// platform-schema.md §10 S3 resolution hierarchy.
-		var stepParams map[string]string
+		// platform-schema.md §10 S3 resolution hierarchy. The resolved secret
+		// reference is validated here so the platform sets the correct condition;
+		// the Conductor capability implementation reads the Secret at execution time.
 		if em.Spec.Operation == platformv1alpha1.EtcdMaintenanceOperationBackup {
-			secretName, secretNS, found, sErr := resolveEtcdBackupS3Secret(ctx, r.Client, em)
+			_, _, found, sErr := resolveEtcdBackupS3Secret(ctx, r.Client, em)
 			if sErr != nil {
 				return ctrl.Result{}, fmt.Errorf("EtcdMaintenanceReconciler: resolve S3 secret: %w", sErr)
 			}
 			if !found {
 				if em.Spec.PVCFallbackEnabled {
-					// PVC fallback: set EtcdBackupLocalFallback and proceed without S3 params.
-					// platform-schema.md §10.
 					platformv1alpha1.SetCondition(
 						&em.Status.Conditions,
 						platformv1alpha1.EtcdBackupLocalFallback,
@@ -149,11 +186,6 @@ func (r *EtcdMaintenanceReconciler) Reconcile(ctx context.Context, req ctrl.Requ
 						"EtcdMaintenance %s/%s: no S3 backup destination configured", em.Namespace, em.Name)
 					return ctrl.Result{}, nil
 				}
-			} else {
-				stepParams = map[string]string{
-					"s3SecretName":      secretName,
-					"s3SecretNamespace": secretNS,
-				}
 			}
 		}
 
@@ -163,51 +195,41 @@ func (r *EtcdMaintenanceReconciler) Reconcile(ctx context.Context, req ctrl.Requ
 		if lErr != nil {
 			return ctrl.Result{}, fmt.Errorf("EtcdMaintenanceReconciler: resolve leader node: %w", lErr)
 		}
-		exclusionNodes := buildNodeExclusions(em.Spec.TargetNodes, leaderNode)
+		nodeExclusions := buildNodeExclusions(em.Spec.TargetNodes, leaderNode)
 
-		steps := []OperationalStep{
-			{
-				Name:          capability,
-				Capability:    capability,
-				Parameters:    stepParams,
-				HaltOnFailure: true,
-			},
-		}
-
-		rc := buildOperationalRunnerConfig(rcName, em.Namespace, em.Spec.ClusterRef.Name,
-			exclusionNodes, leaderNode, steps)
-		if err := controllerutil.SetControllerReference(em, rc, r.Scheme); err != nil {
+		job := jobSpecWithExclusions(jobName, em.Namespace, em.Spec.ClusterRef.Name, capability, nodeExclusions)
+		if err := controllerutil.SetControllerReference(em, job, r.Scheme); err != nil {
 			return ctrl.Result{}, fmt.Errorf("EtcdMaintenanceReconciler: set owner reference: %w", err)
 		}
-		if err := r.Client.Create(ctx, rc); err != nil {
-			return ctrl.Result{}, fmt.Errorf("EtcdMaintenanceReconciler: create RunnerConfig: %w", err)
+		if err := r.Client.Create(ctx, job); err != nil {
+			return ctrl.Result{}, fmt.Errorf("EtcdMaintenanceReconciler: create job: %w", err)
 		}
-		em.Status.JobName = rcName
+		em.Status.JobName = jobName
 		platformv1alpha1.SetCondition(
 			&em.Status.Conditions,
 			platformv1alpha1.ConditionTypeEtcdMaintenanceRunning,
 			metav1.ConditionTrue,
 			platformv1alpha1.ReasonEtcdJobSubmitted,
-			fmt.Sprintf("RunnerConfig %s submitted for %s.", rcName, capability),
+			fmt.Sprintf("Conductor executor Job %s submitted for %s.", jobName, capability),
 			em.Generation,
 		)
-		r.Recorder.Eventf(em, nil, "Normal", "RunnerConfigSubmitted", "RunnerConfigSubmitted",
-			"Submitted RunnerConfig %s for %s", rcName, capability)
-		logger.Info("submitted RunnerConfig",
-			"name", em.Name, "rcName", rcName, "capability", capability)
+		r.Recorder.Eventf(em, nil, "Normal", "JobSubmitted", "JobSubmitted",
+			"Submitted Conductor executor Job %s for %s", jobName, capability)
+		logger.Info("submitted Conductor executor Job",
+			"name", em.Name, "jobName", jobName, "capability", capability)
 		return ctrl.Result{RequeueAfter: operationalJobPollInterval}, nil
 	}
 
-	// RunnerConfig exists — check terminal condition.
-	complete, failed, failedStep := readRunnerConfigTerminalCondition(existingRC)
+	// Job exists — check OperationResult ConfigMap.
+	complete, failed, result := readOperationalResult(ctx, r.Client, em.Namespace, jobName)
 	if failed {
-		em.Status.OperationResult = fmt.Sprintf("RunnerConfig failed at step %q.", failedStep)
+		em.Status.OperationResult = result
 		platformv1alpha1.SetCondition(
 			&em.Status.Conditions,
 			platformv1alpha1.ConditionTypeEtcdMaintenanceDegraded,
 			metav1.ConditionTrue,
 			platformv1alpha1.ReasonEtcdJobFailed,
-			fmt.Sprintf("RunnerConfig %s failed at step %q.", rcName, failedStep),
+			fmt.Sprintf("Conductor executor Job %s failed: %s", jobName, result),
 			em.Generation,
 		)
 		platformv1alpha1.SetCondition(
@@ -215,25 +237,25 @@ func (r *EtcdMaintenanceReconciler) Reconcile(ctx context.Context, req ctrl.Requ
 			platformv1alpha1.ConditionTypeEtcdMaintenanceRunning,
 			metav1.ConditionFalse,
 			platformv1alpha1.ReasonEtcdJobFailed,
-			"RunnerConfig failed.",
+			"Job failed.",
 			em.Generation,
 		)
-		r.Recorder.Eventf(em, nil, "Warning", "RunnerConfigFailed", "RunnerConfigFailed",
-			"RunnerConfig %s failed at step %q", rcName, failedStep)
+		r.Recorder.Eventf(em, nil, "Warning", "JobFailed", "JobFailed",
+			"Conductor executor Job %s failed: %s", jobName, result)
 		return ctrl.Result{}, nil
 	}
 	if !complete {
 		return ctrl.Result{RequeueAfter: operationalJobPollInterval}, nil
 	}
 
-	// RunnerConfig complete.
-	em.Status.OperationResult = "RunnerConfig completed successfully."
+	// Job complete.
+	em.Status.OperationResult = result
 	platformv1alpha1.SetCondition(
 		&em.Status.Conditions,
 		platformv1alpha1.ConditionTypeEtcdMaintenanceRunning,
 		metav1.ConditionFalse,
 		platformv1alpha1.ReasonEtcdJobComplete,
-		"RunnerConfig completed.",
+		"Job completed.",
 		em.Generation,
 	)
 	platformv1alpha1.SetCondition(
@@ -241,11 +263,11 @@ func (r *EtcdMaintenanceReconciler) Reconcile(ctx context.Context, req ctrl.Requ
 		platformv1alpha1.ConditionTypeEtcdMaintenanceReady,
 		metav1.ConditionTrue,
 		platformv1alpha1.ReasonEtcdJobComplete,
-		fmt.Sprintf("RunnerConfig %s completed successfully.", rcName),
+		fmt.Sprintf("Conductor executor Job %s completed successfully.", jobName),
 		em.Generation,
 	)
-	r.Recorder.Eventf(em, nil, "Normal", "RunnerConfigComplete", "RunnerConfigComplete",
-		"RunnerConfig %s completed successfully", rcName)
+	r.Recorder.Eventf(em, nil, "Normal", "JobComplete", "JobComplete",
+		"Conductor executor Job %s completed successfully", jobName)
 	logger.Info("EtcdMaintenance complete",
 		"name", em.Name, "capability", capability)
 	return ctrl.Result{}, nil
@@ -272,7 +294,7 @@ func etcdCapability(op platformv1alpha1.EtcdMaintenanceOperation) (string, error
 //
 // Returns (secretName, secretNamespace, found, error).
 // found=false with error=nil means neither source is configured — the caller
-// should set EtcdBackupDestinationAbsent and skip RunnerConfig submission.
+// should set EtcdBackupDestinationAbsent and skip Job submission.
 func resolveEtcdBackupS3Secret(ctx context.Context, c client.Client, em *platformv1alpha1.EtcdMaintenance) (string, string, bool, error) {
 	if em.Spec.EtcdBackupS3SecretRef != nil {
 		ns := em.Spec.EtcdBackupS3SecretRef.Namespace

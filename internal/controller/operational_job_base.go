@@ -30,6 +30,11 @@ const (
 	// an operational Conductor Job to complete.
 	operationalJobPollInterval = 15 * time.Second
 
+	// capabilityUnavailableRetryInterval is the requeue interval when the cluster
+	// RunnerConfig is absent or the required capability has not yet been published
+	// by the Conductor agent. conductor-schema.md §5, CR-INV-005.
+	capabilityUnavailableRetryInterval = 30 * time.Second
+
 	// operationalJobTTL is the Job TTL in seconds after completion.
 	// The reconciler reads the OperationResult before this expires.
 	operationalJobTTL = int32(600)
@@ -221,40 +226,25 @@ func operationalJobName(crName, capability string) string {
 	return fmt.Sprintf("%s-%s", crName, capability)
 }
 
-// operationalRunnerConfigName returns the name for the OperationalRunnerConfig
-// created by an operational day-2 reconciler. Each CR produces exactly one
-// RunnerConfig. Format: {crName} — deterministic, stable, namespace-scoped.
-// conductor-schema.md §17.
-func operationalRunnerConfigName(crName string) string {
-	return crName
+// getClusterRunnerConfig returns the cluster-level RunnerConfig from ont-system
+// for the given cluster name. Returns nil when the RunnerConfig does not yet
+// exist — normal during Conductor agent startup. Day-2 reconcilers call this
+// to read status.capabilities before submitting any Job.
+// conductor-schema.md §5, CR-INV-005.
+func getClusterRunnerConfig(ctx context.Context, c client.Client, clusterName string) (*OperationalRunnerConfig, error) {
+	return getOperationalRunnerConfig(ctx, c, bootstrapRunnerConfigNamespace, bootstrapRunnerConfigName(clusterName))
 }
 
-// buildOperationalRunnerConfig constructs an OperationalRunnerConfig CR for
-// the given day-2 operation. maintenanceTargetNodes and leaderNode are stored
-// on spec so the Conductor executor can exclude them from step Job scheduling.
-// conductor-schema.md §13, §17.
-func buildOperationalRunnerConfig(
-	name, namespace, clusterRef string,
-	maintenanceTargetNodes []string,
-	leaderNode string,
-	steps []OperationalStep,
-) *OperationalRunnerConfig {
-	return &OperationalRunnerConfig{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      name,
-			Namespace: namespace,
-			Labels: map[string]string{
-				"platform.ontai.dev/cluster": clusterRef,
-			},
-		},
-		Spec: OperationalRunnerConfigSpec{
-			ClusterRef:             clusterRef,
-			RunnerImage:            conductorImage,
-			MaintenanceTargetNodes: maintenanceTargetNodes,
-			OperatorLeaderNode:     leaderNode,
-			Steps:                  steps,
-		},
+// hasCapability reports whether the RunnerConfig status.capabilities list
+// contains an entry with the given name. Used by day-2 reconcilers to gate
+// Job submission. conductor-schema.md §5, CR-INV-005.
+func hasCapability(rc *OperationalRunnerConfig, name string) bool {
+	for _, cap := range rc.Status.Capabilities {
+		if cap.Name == name {
+			return true
+		}
 	}
+	return false
 }
 
 // getOperationalRunnerConfig returns the OperationalRunnerConfig by name and
@@ -268,23 +258,4 @@ func getOperationalRunnerConfig(ctx context.Context, c client.Client, namespace,
 		return nil, fmt.Errorf("get RunnerConfig %s/%s: %w", namespace, name, err)
 	}
 	return rc, nil
-}
-
-// readRunnerConfigTerminalCondition returns the terminal execution state of an
-// OperationalRunnerConfig written by the Conductor executor.
-// Returns (complete, failed, failedStep):
-//   - complete=true, failed=false: Conductor reached Completed (all steps succeeded).
-//   - complete=false, failed=true: Conductor reached Failed (failedStep has the step name).
-//   - complete=false, failed=false: execution is still in progress.
-//
-// conductor-schema.md §17.
-func readRunnerConfigTerminalCondition(rc *OperationalRunnerConfig) (complete, failed bool, failedStep string) {
-	switch rc.Status.Phase {
-	case "Completed":
-		return true, false, ""
-	case "Failed":
-		return false, true, rc.Status.FailedStep
-	default:
-		return false, false, ""
-	}
 }

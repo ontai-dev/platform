@@ -6,6 +6,7 @@ import (
 	"testing"
 	"time"
 
+	batchv1 "k8s.io/api/batch/v1"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
@@ -17,13 +18,52 @@ import (
 	"github.com/ontai-dev/platform/internal/controller"
 )
 
+// buildClusterRC creates an OperationalRunnerConfig in ont-system with the given
+// capabilities set on its status. The status subresource is written separately via
+// Status().Update so the envtest API server accepts it.
+func buildClusterRC(ctx context.Context, t *testing.T, clusterName string, capabilities ...string) *controller.OperationalRunnerConfig {
+	t.Helper()
+	rc := &controller.OperationalRunnerConfig{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      clusterName,
+			Namespace: "ont-system",
+		},
+		Spec: controller.OperationalRunnerConfigSpec{
+			ClusterRef: clusterName,
+		},
+	}
+	if err := testClient.Create(ctx, rc); err != nil {
+		t.Fatalf("create cluster RunnerConfig: %v", err)
+	}
+	caps := make([]controller.CapabilityEntry, len(capabilities))
+	for i, c := range capabilities {
+		caps[i] = controller.CapabilityEntry{Name: c, Version: "1.0.0"}
+	}
+	rc.Status.Capabilities = caps
+	if err := testClient.Status().Update(ctx, rc); err != nil {
+		t.Fatalf("update cluster RunnerConfig status: %v", err)
+	}
+	return rc
+}
+
 // TestEtcdMaintenance_Integration_BackupWithS3 verifies that the reconciler
-// submits a RunnerConfig with S3 params when the default S3 Secret exists.
+// submits a Conductor executor Job when capability and S3 config are present.
 // Uses a real API server — validates SSA status patch semantics.
 func TestEtcdMaintenance_Integration_BackupWithS3(t *testing.T) {
 	ns := "seam-tenant-test"
 	crName := fmt.Sprintf("em-backup-%d", time.Now().UnixNano())
-	rcName := crName // operationalRunnerConfigName returns CR name
+	ctx := context.Background()
+
+	// Cluster RunnerConfig with etcd-backup capability. CR-INV-005.
+	rc := buildClusterRC(ctx, t, "test-cluster", "etcd-backup")
+	t.Cleanup(func() { _ = testClient.Delete(ctx, rc) })
+
+	defaultS3Secret := &corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{Name: "seam-etcd-backup-config", Namespace: "seam-system"},
+	}
+	if err := testClient.Create(ctx, defaultS3Secret); err != nil {
+		_ = err // may already exist from prior run
+	}
 
 	em := &platformv1alpha1.EtcdMaintenance{
 		ObjectMeta: metav1.ObjectMeta{Name: crName, Namespace: ns, Generation: 1},
@@ -32,22 +72,12 @@ func TestEtcdMaintenance_Integration_BackupWithS3(t *testing.T) {
 			Operation:  platformv1alpha1.EtcdMaintenanceOperationBackup,
 		},
 	}
-	defaultS3Secret := &corev1.Secret{
-		ObjectMeta: metav1.ObjectMeta{Name: "seam-etcd-backup-config", Namespace: "seam-system"},
-	}
-	ctx := context.Background()
-	if err := testClient.Create(ctx, defaultS3Secret); err != nil {
-		_ = err // may already exist from prior run
-	}
 	if err := testClient.Create(ctx, em); err != nil {
 		t.Fatalf("create EtcdMaintenance: %v", err)
 	}
 	t.Cleanup(func() {
 		_ = testClient.Delete(ctx, em)
 		_ = testClient.Delete(ctx, defaultS3Secret)
-		_ = testClient.Delete(ctx, &controller.OperationalRunnerConfig{
-			ObjectMeta: metav1.ObjectMeta{Name: rcName, Namespace: ns},
-		})
 	})
 
 	r := &controller.EtcdMaintenanceReconciler{
@@ -63,24 +93,18 @@ func TestEtcdMaintenance_Integration_BackupWithS3(t *testing.T) {
 		t.Fatalf("Reconcile: %v", err)
 	}
 	if result.RequeueAfter == 0 {
-		t.Error("expected requeue after RunnerConfig submission")
+		t.Error("expected requeue after Job submission")
 	}
 
-	// Verify RunnerConfig created with correct capability and S3 params.
-	rc := &controller.OperationalRunnerConfig{}
-	if err := testClient.Get(ctx, types.NamespacedName{Name: rcName, Namespace: ns}, rc); err != nil {
-		t.Fatalf("get RunnerConfig: %v", err)
+	// Verify Job created with correct capability label.
+	jobName := crName + "-etcd-backup"
+	job := &batchv1.Job{}
+	if err := testClient.Get(ctx, types.NamespacedName{Name: jobName, Namespace: ns}, job); err != nil {
+		t.Fatalf("get Job %s: %v", jobName, err)
 	}
-	if len(rc.Spec.Steps) != 1 {
-		t.Errorf("expected 1 step, got %d", len(rc.Spec.Steps))
-	}
-	if len(rc.Spec.Steps) > 0 {
-		if rc.Spec.Steps[0].Capability != "etcd-backup" {
-			t.Errorf("step[0].Capability = %q, want etcd-backup", rc.Spec.Steps[0].Capability)
-		}
-		if rc.Spec.Steps[0].Parameters["s3SecretName"] == "" {
-			t.Error("step[0].Parameters[s3SecretName] should be set")
-		}
+	if job.Labels["platform.ontai.dev/capability"] != "etcd-backup" {
+		t.Errorf("Job capability label = %q, want etcd-backup",
+			job.Labels["platform.ontai.dev/capability"])
 	}
 
 	// Verify status was patched via SSA: LineageSynced and Running conditions set.
@@ -94,25 +118,29 @@ func TestEtcdMaintenance_Integration_BackupWithS3(t *testing.T) {
 	}
 	running := platformv1alpha1.FindCondition(got.Status.Conditions, platformv1alpha1.ConditionTypeEtcdMaintenanceRunning)
 	if running == nil || running.Status != metav1.ConditionTrue {
-		t.Error("Running=True condition absent after RunnerConfig submission")
+		t.Error("Running=True condition absent after Job submission")
 	}
 }
 
 // TestEtcdMaintenance_Integration_S3AbsentSetsCondition verifies that when no S3
-// Secret is present, EtcdBackupDestinationAbsent condition is set via real SSA
-// status patch and no RunnerConfig is created.
+// Secret is present (and capability gate passes), EtcdBackupDestinationAbsent
+// condition is set via real SSA status patch and no Job is created.
 func TestEtcdMaintenance_Integration_S3AbsentSetsCondition(t *testing.T) {
 	ns := "seam-tenant-test"
 	crName := fmt.Sprintf("em-s3absent-%d", time.Now().UnixNano())
+	ctx := context.Background()
+
+	// Cluster RunnerConfig with etcd-backup capability so the S3 check is reached.
+	rc := buildClusterRC(ctx, t, "test-cluster-s3absent", "etcd-backup")
+	t.Cleanup(func() { _ = testClient.Delete(ctx, rc) })
 
 	em := &platformv1alpha1.EtcdMaintenance{
 		ObjectMeta: metav1.ObjectMeta{Name: crName, Namespace: ns, Generation: 1},
 		Spec: platformv1alpha1.EtcdMaintenanceSpec{
-			ClusterRef: platformv1alpha1.LocalObjectRef{Name: "test-cluster"},
+			ClusterRef: platformv1alpha1.LocalObjectRef{Name: "test-cluster-s3absent"},
 			Operation:  platformv1alpha1.EtcdMaintenanceOperationBackup,
 		},
 	}
-	ctx := context.Background()
 	if err := testClient.Create(ctx, em); err != nil {
 		t.Fatalf("create EtcdMaintenance: %v", err)
 	}
@@ -141,11 +169,14 @@ func TestEtcdMaintenance_Integration_S3AbsentSetsCondition(t *testing.T) {
 		t.Error("EtcdBackupDestinationAbsent condition not set when S3 absent")
 	}
 
-	rcList := &controller.OperationalRunnerConfigList{}
-	if err := testClient.List(ctx, rcList, client.InNamespace(ns)); err != nil {
-		t.Fatalf("list RunnerConfigs: %v", err)
+	// No Job should be created when S3 is absent.
+	jobList := &batchv1.JobList{}
+	if err := testClient.List(ctx, jobList, client.InNamespace(ns)); err != nil {
+		t.Fatalf("list Jobs: %v", err)
 	}
-	if len(rcList.Items) != 0 {
-		t.Errorf("expected 0 RunnerConfigs when S3 absent, got %d", len(rcList.Items))
+	for _, j := range jobList.Items {
+		if j.Labels["platform.ontai.dev/cluster"] == "test-cluster-s3absent" {
+			t.Errorf("unexpected Job %q created when S3 absent", j.Name)
+		}
 	}
 }

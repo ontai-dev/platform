@@ -35,6 +35,7 @@ import (
 const (
 	capabilityTalosUpgrade = "talos-upgrade"
 	capabilityKubeUpgrade  = "kube-upgrade"
+	capabilityStackUpgrade = "stack-upgrade"
 )
 
 // UpgradePolicyReconciler reconciles UpgradePolicy objects.
@@ -208,14 +209,12 @@ func (r *UpgradePolicyReconciler) patchMachineDeploymentVersion(ctx context.Cont
 	return nil
 }
 
-// reconcileDirectUpgrade emits a RunnerConfig CR for the non-CAPI path.
-// stack-upgrade decomposes into two sequential steps: talos-upgrade then
-// kube-upgrade, demonstrating the multi-step RunnerConfig pattern.
-// conductor-schema.md §17.
+// reconcileDirectUpgrade gates on capability then submits a single batch/v1
+// Conductor executor Job for the non-CAPI path. conductor-schema.md §5 §17.
 func (r *UpgradePolicyReconciler) reconcileDirectUpgrade(ctx context.Context, up *platformv1alpha1.UpgradePolicy) (ctrl.Result, error) {
 	logger := log.FromContext(ctx)
 
-	steps, err := buildUpgradeSteps(up.Spec.UpgradeType)
+	capability, err := upgradeCapability(up.Spec.UpgradeType)
 	if err != nil {
 		platformv1alpha1.SetCondition(
 			&up.Status.Conditions,
@@ -228,102 +227,127 @@ func (r *UpgradePolicyReconciler) reconcileDirectUpgrade(ctx context.Context, up
 		return ctrl.Result{}, nil
 	}
 
-	rcName := operationalRunnerConfigName(up.Name)
-
-	existingRC, err := getOperationalRunnerConfig(ctx, r.Client, up.Namespace, rcName)
+	// Gate: read the cluster RunnerConfig from ont-system and verify capability.
+	clusterRC, err := getClusterRunnerConfig(ctx, r.Client, up.Spec.ClusterRef.Name)
 	if err != nil {
-		return ctrl.Result{}, fmt.Errorf("UpgradePolicyReconciler: check RunnerConfig: %w", err)
+		return ctrl.Result{}, fmt.Errorf("UpgradePolicyReconciler: get cluster RunnerConfig: %w", err)
+	}
+	if clusterRC == nil {
+		platformv1alpha1.SetCondition(
+			&up.Status.Conditions,
+			platformv1alpha1.ConditionTypeCapabilityUnavailable,
+			metav1.ConditionTrue,
+			platformv1alpha1.ReasonRunnerConfigNotFound,
+			"Cluster RunnerConfig not yet present in ont-system. Waiting for Conductor agent.",
+			up.Generation,
+		)
+		return ctrl.Result{RequeueAfter: capabilityUnavailableRetryInterval}, nil
+	}
+	if !hasCapability(clusterRC, capability) {
+		platformv1alpha1.SetCondition(
+			&up.Status.Conditions,
+			platformv1alpha1.ConditionTypeCapabilityUnavailable,
+			metav1.ConditionTrue,
+			platformv1alpha1.ReasonCapabilityNotPublished,
+			fmt.Sprintf("Capability %q not yet published by Conductor agent.", capability),
+			up.Generation,
+		)
+		return ctrl.Result{RequeueAfter: capabilityUnavailableRetryInterval}, nil
+	}
+	platformv1alpha1.SetCondition(
+		&up.Status.Conditions,
+		platformv1alpha1.ConditionTypeCapabilityUnavailable,
+		metav1.ConditionFalse,
+		platformv1alpha1.ReasonCapabilityNotPublished,
+		"",
+		up.Generation,
+	)
+
+	jobName := operationalJobName(up.Name, capability)
+
+	existingJob, err := getOperationalJob(ctx, r.Client, up.Namespace, jobName)
+	if err != nil {
+		return ctrl.Result{}, fmt.Errorf("UpgradePolicyReconciler: check job: %w", err)
 	}
 
-	if existingRC == nil {
-		// Resolve operator leader node. The upgrade executor Job must not run
-		// on the leader. conductor-schema.md §13.
+	if existingJob == nil {
 		leaderNode, lErr := resolveOperatorLeaderNode(ctx, r.Client)
 		if lErr != nil {
 			return ctrl.Result{}, fmt.Errorf("UpgradePolicyReconciler: resolve leader node: %w", lErr)
 		}
-		exclusionNodes := buildNodeExclusions(nil, leaderNode)
+		nodeExclusions := buildNodeExclusions(nil, leaderNode)
 
-		rc := buildOperationalRunnerConfig(rcName, up.Namespace, up.Spec.ClusterRef.Name,
-			exclusionNodes, leaderNode, steps)
-		if err := controllerutil.SetControllerReference(up, rc, r.Scheme); err != nil {
+		job := jobSpecWithExclusions(jobName, up.Namespace, up.Spec.ClusterRef.Name, capability, nodeExclusions)
+		if err := controllerutil.SetControllerReference(up, job, r.Scheme); err != nil {
 			return ctrl.Result{}, fmt.Errorf("UpgradePolicyReconciler: set owner reference: %w", err)
 		}
-		if err := r.Client.Create(ctx, rc); err != nil {
-			return ctrl.Result{}, fmt.Errorf("UpgradePolicyReconciler: create RunnerConfig: %w", err)
+		if err := r.Client.Create(ctx, job); err != nil {
+			return ctrl.Result{}, fmt.Errorf("UpgradePolicyReconciler: create job: %w", err)
 		}
-		up.Status.JobName = rcName
+		up.Status.JobName = jobName
 		platformv1alpha1.SetCondition(
 			&up.Status.Conditions,
 			platformv1alpha1.ConditionTypeUpgradePolicyReady,
 			metav1.ConditionFalse,
 			platformv1alpha1.ReasonUpgradeJobSubmitted,
-			fmt.Sprintf("RunnerConfig %s submitted (%d step(s)).", rcName, len(steps)),
+			fmt.Sprintf("Conductor executor Job %s submitted for %s.", jobName, capability),
 			up.Generation,
 		)
-		r.Recorder.Eventf(up, nil, "Normal", "RunnerConfigSubmitted", "RunnerConfigSubmitted",
-			"Submitted RunnerConfig %s for %s (%d step(s))", rcName, up.Spec.UpgradeType, len(steps))
-		logger.Info("submitted upgrade RunnerConfig",
-			"name", up.Name, "rcName", rcName, "upgradeType", up.Spec.UpgradeType)
+		r.Recorder.Eventf(up, nil, "Normal", "JobSubmitted", "JobSubmitted",
+			"Submitted Conductor executor Job %s for %s", jobName, capability)
+		logger.Info("submitted upgrade Conductor executor Job",
+			"name", up.Name, "jobName", jobName, "upgradeType", up.Spec.UpgradeType)
 		return ctrl.Result{RequeueAfter: operationalJobPollInterval}, nil
 	}
 
-	// RunnerConfig exists — check terminal condition.
-	complete, failed, failedStep := readRunnerConfigTerminalCondition(existingRC)
+	// Job exists — check OperationResult ConfigMap.
+	complete, failed, result := readOperationalResult(ctx, r.Client, up.Namespace, jobName)
 	if failed {
-		up.Status.OperationResult = fmt.Sprintf("RunnerConfig failed at step %q.", failedStep)
+		up.Status.OperationResult = result
 		platformv1alpha1.SetCondition(
 			&up.Status.Conditions,
 			platformv1alpha1.ConditionTypeUpgradePolicyDegraded,
 			metav1.ConditionTrue,
 			platformv1alpha1.ReasonUpgradeJobFailed,
-			fmt.Sprintf("RunnerConfig %s failed at step %q.", rcName, failedStep),
+			fmt.Sprintf("Conductor executor Job %s failed: %s", jobName, result),
 			up.Generation,
 		)
-		r.Recorder.Eventf(up, nil, "Warning", "RunnerConfigFailed", "RunnerConfigFailed",
-			"RunnerConfig %s failed at step %q", rcName, failedStep)
+		r.Recorder.Eventf(up, nil, "Warning", "JobFailed", "JobFailed",
+			"Conductor executor Job %s failed: %s", jobName, result)
 		return ctrl.Result{}, nil
 	}
 	if !complete {
 		return ctrl.Result{RequeueAfter: operationalJobPollInterval}, nil
 	}
 
-	up.Status.OperationResult = "RunnerConfig completed successfully."
+	up.Status.OperationResult = result
 	platformv1alpha1.SetCondition(
 		&up.Status.Conditions,
 		platformv1alpha1.ConditionTypeUpgradePolicyReady,
 		metav1.ConditionTrue,
 		platformv1alpha1.ReasonUpgradeJobComplete,
-		fmt.Sprintf("RunnerConfig %s completed successfully.", rcName),
+		fmt.Sprintf("Conductor executor Job %s completed successfully.", jobName),
 		up.Generation,
 	)
-	r.Recorder.Eventf(up, nil, "Normal", "RunnerConfigComplete", "RunnerConfigComplete",
-		"RunnerConfig %s completed successfully", rcName)
+	r.Recorder.Eventf(up, nil, "Normal", "JobComplete", "JobComplete",
+		"Conductor executor Job %s completed successfully", jobName)
 	logger.Info("UpgradePolicy complete", "name", up.Name, "upgradeType", up.Spec.UpgradeType)
 	return ctrl.Result{}, nil
 }
 
-// buildUpgradeSteps returns the OperationalSteps for a direct-path upgrade.
-// stack-upgrade decomposes into two sequential steps so that the RunnerConfig
-// step sequencer can halt at talos-upgrade failure before attempting kube-upgrade.
-// conductor-schema.md §17.
-func buildUpgradeSteps(ut platformv1alpha1.UpgradeType) ([]OperationalStep, error) {
+// upgradeCapability maps an UpgradeType to a single Conductor capability name.
+// stack-upgrade is a named compound capability in conductor — the executor handles
+// talos→kube sequencing internally. conductor-schema.md §6.
+func upgradeCapability(ut platformv1alpha1.UpgradeType) (string, error) {
 	switch ut {
 	case platformv1alpha1.UpgradeTypeTalos:
-		return []OperationalStep{
-			{Name: "talos-upgrade", Capability: capabilityTalosUpgrade, HaltOnFailure: true},
-		}, nil
+		return capabilityTalosUpgrade, nil
 	case platformv1alpha1.UpgradeTypeKubernetes:
-		return []OperationalStep{
-			{Name: "kube-upgrade", Capability: capabilityKubeUpgrade, HaltOnFailure: true},
-		}, nil
+		return capabilityKubeUpgrade, nil
 	case platformv1alpha1.UpgradeTypeStack:
-		return []OperationalStep{
-			{Name: "talos-upgrade", Capability: capabilityTalosUpgrade, HaltOnFailure: true},
-			{Name: "kube-upgrade", Capability: capabilityKubeUpgrade, DependsOn: "talos-upgrade", HaltOnFailure: true},
-		}, nil
+		return capabilityStackUpgrade, nil
 	default:
-		return nil, fmt.Errorf("unknown UpgradeType %q", ut)
+		return "", fmt.Errorf("unknown UpgradeType %q", ut)
 	}
 }
 

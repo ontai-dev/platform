@@ -1,14 +1,13 @@
 package controller
 
-// PKIRotationReconciler reconciles PKIRotation CRs. It emits a RunnerConfig CR
-// with a single pki-rotate step regardless of the owning TalosCluster's
-// capi.enabled value — CAPI has no PKI rotation equivalent.
+// PKIRotationReconciler reconciles PKIRotation CRs.
+//
+// Pattern: read the cluster RunnerConfig from ont-system, gate on capability
+// availability, then submit a single batch/v1 Conductor executor Job.
+// conductor-schema.md §5 §17.
 //
 // Named Conductor capability: pki-rotate. platform-schema.md §5.
-// conductor-schema.md §17 RunnerConfig Execution Model.
-//
-// CP-INV-010: No Kueue. RunnerConfig submitted directly.
-// INV-018: gate failures are permanent — HaltOnFailure=true.
+// INV-018: gate failures are permanent — backoffLimit=0, no retries.
 
 import (
 	"context"
@@ -39,7 +38,9 @@ type PKIRotationReconciler struct {
 // +kubebuilder:rbac:groups=platform.ontai.dev,resources=pkirotations/status,verbs=get;update;patch
 // +kubebuilder:rbac:groups=platform.ontai.dev,resources=pkirotations/finalizers,verbs=update
 // +kubebuilder:rbac:groups="",resources=events,verbs=create;patch
-// +kubebuilder:rbac:groups=runner.ontai.dev,resources=runnerconfigs,verbs=get;list;watch;create;update;patch;delete
+// +kubebuilder:rbac:groups=runner.ontai.dev,resources=runnerconfigs,verbs=get;list;watch
+// +kubebuilder:rbac:groups=batch,resources=jobs,verbs=get;list;watch;create;update;patch;delete
+// +kubebuilder:rbac:groups="",resources=configmaps,verbs=get;list;watch
 
 func (r *PKIRotationReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
 	logger := log.FromContext(ctx)
@@ -82,85 +83,110 @@ func (r *PKIRotationReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 		return ctrl.Result{}, nil
 	}
 
-	rcName := operationalRunnerConfigName(pkir.Name)
-
-	existingRC, err := getOperationalRunnerConfig(ctx, r.Client, pkir.Namespace, rcName)
+	// Gate: read the cluster RunnerConfig from ont-system and verify capability.
+	clusterRC, err := getClusterRunnerConfig(ctx, r.Client, pkir.Spec.ClusterRef.Name)
 	if err != nil {
-		return ctrl.Result{}, fmt.Errorf("PKIRotationReconciler: check RunnerConfig: %w", err)
+		return ctrl.Result{}, fmt.Errorf("PKIRotationReconciler: get cluster RunnerConfig: %w", err)
+	}
+	if clusterRC == nil {
+		platformv1alpha1.SetCondition(
+			&pkir.Status.Conditions,
+			platformv1alpha1.ConditionTypeCapabilityUnavailable,
+			metav1.ConditionTrue,
+			platformv1alpha1.ReasonRunnerConfigNotFound,
+			"Cluster RunnerConfig not yet present in ont-system. Waiting for Conductor agent.",
+			pkir.Generation,
+		)
+		return ctrl.Result{RequeueAfter: capabilityUnavailableRetryInterval}, nil
+	}
+	if !hasCapability(clusterRC, capabilityPKIRotate) {
+		platformv1alpha1.SetCondition(
+			&pkir.Status.Conditions,
+			platformv1alpha1.ConditionTypeCapabilityUnavailable,
+			metav1.ConditionTrue,
+			platformv1alpha1.ReasonCapabilityNotPublished,
+			fmt.Sprintf("Capability %q not yet published by Conductor agent.", capabilityPKIRotate),
+			pkir.Generation,
+		)
+		return ctrl.Result{RequeueAfter: capabilityUnavailableRetryInterval}, nil
+	}
+	platformv1alpha1.SetCondition(
+		&pkir.Status.Conditions,
+		platformv1alpha1.ConditionTypeCapabilityUnavailable,
+		metav1.ConditionFalse,
+		platformv1alpha1.ReasonCapabilityNotPublished,
+		"",
+		pkir.Generation,
+	)
+
+	jobName := operationalJobName(pkir.Name, capabilityPKIRotate)
+
+	existingJob, err := getOperationalJob(ctx, r.Client, pkir.Namespace, jobName)
+	if err != nil {
+		return ctrl.Result{}, fmt.Errorf("PKIRotationReconciler: check job: %w", err)
 	}
 
-	if existingRC == nil {
-		// Resolve operator leader node. PKI rotation targets all nodes but the
-		// executor Job must not run on the leader node. conductor-schema.md §13.
+	if existingJob == nil {
 		leaderNode, lErr := resolveOperatorLeaderNode(ctx, r.Client)
 		if lErr != nil {
 			return ctrl.Result{}, fmt.Errorf("PKIRotationReconciler: resolve leader node: %w", lErr)
 		}
-		exclusionNodes := buildNodeExclusions(nil, leaderNode)
+		nodeExclusions := buildNodeExclusions(nil, leaderNode)
 
-		steps := []OperationalStep{
-			{
-				Name:          "rotate",
-				Capability:    capabilityPKIRotate,
-				HaltOnFailure: true,
-			},
-		}
-
-		rc := buildOperationalRunnerConfig(rcName, pkir.Namespace, pkir.Spec.ClusterRef.Name,
-			exclusionNodes, leaderNode, steps)
-		if err := controllerutil.SetControllerReference(pkir, rc, r.Scheme); err != nil {
+		job := jobSpecWithExclusions(jobName, pkir.Namespace, pkir.Spec.ClusterRef.Name, capabilityPKIRotate, nodeExclusions)
+		if err := controllerutil.SetControllerReference(pkir, job, r.Scheme); err != nil {
 			return ctrl.Result{}, fmt.Errorf("PKIRotationReconciler: set owner reference: %w", err)
 		}
-		if err := r.Client.Create(ctx, rc); err != nil {
-			return ctrl.Result{}, fmt.Errorf("PKIRotationReconciler: create RunnerConfig: %w", err)
+		if err := r.Client.Create(ctx, job); err != nil {
+			return ctrl.Result{}, fmt.Errorf("PKIRotationReconciler: create job: %w", err)
 		}
-		pkir.Status.JobName = rcName
+		pkir.Status.JobName = jobName
 		platformv1alpha1.SetCondition(
 			&pkir.Status.Conditions,
 			platformv1alpha1.ConditionTypePKIRotationReady,
 			metav1.ConditionFalse,
 			platformv1alpha1.ReasonPKIJobSubmitted,
-			fmt.Sprintf("RunnerConfig %s submitted for pki-rotate.", rcName),
+			fmt.Sprintf("Conductor executor Job %s submitted for pki-rotate.", jobName),
 			pkir.Generation,
 		)
-		r.Recorder.Eventf(pkir, nil, "Normal", "RunnerConfigSubmitted", "RunnerConfigSubmitted",
-			"Submitted RunnerConfig %s for pki-rotate", rcName)
-		logger.Info("submitted PKIRotation RunnerConfig",
-			"name", pkir.Name, "rcName", rcName)
+		r.Recorder.Eventf(pkir, nil, "Normal", "JobSubmitted", "JobSubmitted",
+			"Submitted Conductor executor Job %s for pki-rotate", jobName)
+		logger.Info("submitted PKIRotation Conductor executor Job",
+			"name", pkir.Name, "jobName", jobName)
 		return ctrl.Result{RequeueAfter: operationalJobPollInterval}, nil
 	}
 
-	// RunnerConfig exists — check terminal condition.
-	complete, failed, failedStep := readRunnerConfigTerminalCondition(existingRC)
+	// Job exists — check OperationResult ConfigMap.
+	complete, failed, result := readOperationalResult(ctx, r.Client, pkir.Namespace, jobName)
 	if failed {
-		pkir.Status.OperationResult = fmt.Sprintf("RunnerConfig failed at step %q.", failedStep)
+		pkir.Status.OperationResult = result
 		platformv1alpha1.SetCondition(
 			&pkir.Status.Conditions,
 			platformv1alpha1.ConditionTypePKIRotationDegraded,
 			metav1.ConditionTrue,
 			platformv1alpha1.ReasonPKIJobFailed,
-			fmt.Sprintf("RunnerConfig %s failed at step %q.", rcName, failedStep),
+			fmt.Sprintf("Conductor executor Job %s failed: %s", jobName, result),
 			pkir.Generation,
 		)
-		r.Recorder.Eventf(pkir, nil, "Warning", "RunnerConfigFailed", "RunnerConfigFailed",
-			"RunnerConfig %s failed at step %q", rcName, failedStep)
+		r.Recorder.Eventf(pkir, nil, "Warning", "JobFailed", "JobFailed",
+			"Conductor executor Job %s failed: %s", jobName, result)
 		return ctrl.Result{}, nil
 	}
 	if !complete {
 		return ctrl.Result{RequeueAfter: operationalJobPollInterval}, nil
 	}
 
-	pkir.Status.OperationResult = "RunnerConfig completed successfully."
+	pkir.Status.OperationResult = result
 	platformv1alpha1.SetCondition(
 		&pkir.Status.Conditions,
 		platformv1alpha1.ConditionTypePKIRotationReady,
 		metav1.ConditionTrue,
 		platformv1alpha1.ReasonPKIJobComplete,
-		fmt.Sprintf("RunnerConfig %s completed successfully.", rcName),
+		fmt.Sprintf("Conductor executor Job %s completed successfully.", jobName),
 		pkir.Generation,
 	)
-	r.Recorder.Eventf(pkir, nil, "Normal", "RunnerConfigComplete", "RunnerConfigComplete",
-		"RunnerConfig %s completed successfully", rcName)
+	r.Recorder.Eventf(pkir, nil, "Normal", "JobComplete", "JobComplete",
+		"Conductor executor Job %s completed successfully", jobName)
 	logger.Info("PKIRotation complete", "name", pkir.Name)
 	return ctrl.Result{}, nil
 }

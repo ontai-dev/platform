@@ -129,10 +129,25 @@ type OperationalStep struct {
 	HaltOnFailure bool `json:"haltOnFailure,omitempty"`
 }
 
+// CapabilityEntry is a single entry in the Conductor capability manifest.
+// Platform reads status.capabilities to gate Job submission. Only the Name
+// field is consumed by platform; other fields are present for round-trip fidelity
+// with the conductor-schema.md §5 CRD definition.
+type CapabilityEntry struct {
+	Name    string `json:"name"`
+	Version string `json:"version"`
+}
+
 // OperationalRunnerConfigStatus is written by the Conductor executor.
-// The platform operator watches Phase for terminal conditions.
-// conductor-schema.md §17.
+// The platform operator watches Phase for terminal conditions and reads
+// Capabilities to gate day-2 Job submission. conductor-schema.md §17.
 type OperationalRunnerConfigStatus struct {
+	// Capabilities is the self-declared capability list published by the Conductor
+	// agent on startup. Operators read this before submitting any day-2 Job.
+	// conductor-schema.md §5, CR-INV-005.
+	// +optional
+	Capabilities []CapabilityEntry `json:"capabilities,omitempty"`
+
 	// Phase is the terminal execution phase. Empty means in-progress.
 	// "Completed" — all steps succeeded.
 	// "Failed"    — at least one step failed (see FailedStep).
@@ -157,6 +172,11 @@ func (rc *OperationalRunnerConfig) DeepCopyObject() runtime.Object {
 		return nil
 	}
 	out := *rc
+	out.Status.Capabilities = nil
+	if len(rc.Status.Capabilities) > 0 {
+		out.Status.Capabilities = make([]CapabilityEntry, len(rc.Status.Capabilities))
+		copy(out.Status.Capabilities, rc.Status.Capabilities)
+	}
 	out.Spec.MaintenanceTargetNodes = nil
 	if len(rc.Spec.MaintenanceTargetNodes) > 0 {
 		out.Spec.MaintenanceTargetNodes = make([]string, len(rc.Spec.MaintenanceTargetNodes))
