@@ -86,6 +86,12 @@ const bootstrapRunnerConfigNamespace = "ont-system"
 // is deleted before the TalosCluster is garbage-collected. Bug 3.
 const finalizerRunnerConfigCleanup = "platform.ontai.dev/runnerconfig-cleanup"
 
+// finalizerTenantNamespaceCleanup is placed on CAPI-enabled TalosCluster objects
+// so the seam-tenant-{name} namespace is deleted before the TalosCluster is
+// garbage-collected. Cross-namespace ownerReferences are not supported by the
+// Kubernetes GC controller; a finalizer is required. PLATFORM-BL-TENANT-GC.
+const finalizerTenantNamespaceCleanup = "platform.ontai.dev/tenant-namespace-cleanup"
+
 // bootstrapRunnerConfigName returns the name of the RunnerConfig for a management
 // cluster bootstrap. The name is the cluster name exactly — Conductor resolves the
 // RunnerConfig by the value of its --cluster flag, which equals TalosCluster.Name.
@@ -344,6 +350,7 @@ func (r *TalosClusterReconciler) ensureSeamInfrastructureCluster(ctx context.Con
 			return fmt.Errorf("ensureSeamInfrastructureCluster: set controlPlaneEndpoint: %w", err)
 		}
 
+		lineage.SetDescendantLabels(sic, lineage.IndexName("TalosCluster", tc.Name), tc.Namespace, "platform", lineage.ClusterProvision)
 		if err := r.Client.Create(ctx, sic); err != nil && !apierrors.IsAlreadyExists(err) {
 			return fmt.Errorf("ensureSeamInfrastructureCluster: create: %w", err)
 		}
@@ -404,6 +411,7 @@ func (r *TalosClusterReconciler) ensureCAPICluster(ctx context.Context, tc *plat
 			return fmt.Errorf("ensureCAPICluster: set controlPlaneRef: %w", err)
 		}
 
+		lineage.SetDescendantLabels(cluster, lineage.IndexName("TalosCluster", tc.Name), tc.Namespace, "platform", lineage.ClusterProvision)
 		if err := r.Client.Create(ctx, cluster); err != nil && !apierrors.IsAlreadyExists(err) {
 			return fmt.Errorf("ensureCAPICluster: create: %w", err)
 		}
@@ -534,6 +542,7 @@ func (r *TalosClusterReconciler) ensureTalosControlPlane(ctx context.Context, tc
 			return fmt.Errorf("ensureTalosControlPlane: set spec: %w", err)
 		}
 
+		lineage.SetDescendantLabels(tcp, lineage.IndexName("TalosCluster", tc.Name), tc.Namespace, "platform", lineage.ClusterProvision)
 		if err := r.Client.Create(ctx, tcp); err != nil && !apierrors.IsAlreadyExists(err) {
 			return fmt.Errorf("ensureTalosControlPlane: create: %w", err)
 		}
@@ -647,6 +656,7 @@ func (r *TalosClusterReconciler) ensureWorkerPool(ctx context.Context, tc *platf
 			return fmt.Errorf("ensureWorkerPool %s: set MachineDeployment spec: %w", pool.Name, err)
 		}
 
+		lineage.SetDescendantLabels(md, lineage.IndexName("TalosCluster", tc.Name), tc.Namespace, "platform", lineage.ClusterProvision)
 		if err := r.Client.Create(ctx, md); err != nil && !apierrors.IsAlreadyExists(err) {
 			return fmt.Errorf("ensureWorkerPool %s: create MachineDeployment: %w", pool.Name, err)
 		}
@@ -894,61 +904,103 @@ func (r *TalosClusterReconciler) ensureRunnerConfigCleanupFinalizer(
 	return nil
 }
 
-// handleTalosClusterDeletion is called when tc.DeletionTimestamp is set. If the
-// RunnerConfig cleanup finalizer is present, deletes the RunnerConfig named after
-// the cluster from ont-system, then removes the finalizer. Idempotent on NotFound.
-// Bug 3.
+// ensureTenantNamespaceCleanupFinalizer adds finalizerTenantNamespaceCleanup to tc
+// when spec.capi.enabled=true and the finalizer is not yet present. The Update is
+// issued immediately so the finalizer is persisted before any reconcile logic proceeds.
+// PLATFORM-BL-TENANT-GC.
+func (r *TalosClusterReconciler) ensureTenantNamespaceCleanupFinalizer(
+	ctx context.Context,
+	tc *platformv1alpha1.TalosCluster,
+) error {
+	if !tc.Spec.CAPIEnabled() {
+		return nil
+	}
+	if controllerutil.ContainsFinalizer(tc, finalizerTenantNamespaceCleanup) {
+		return nil
+	}
+	controllerutil.AddFinalizer(tc, finalizerTenantNamespaceCleanup)
+	if err := r.Client.Update(ctx, tc); err != nil {
+		return fmt.Errorf("ensureTenantNamespaceCleanupFinalizer: add finalizer: %w", err)
+	}
+	return nil
+}
+
+// handleTalosClusterDeletion is called when tc.DeletionTimestamp is set. Handles
+// two finalizers:
+//  1. finalizerRunnerConfigCleanup (annotation-gated): deletes the RunnerConfig in
+//     ont-system and cluster Secrets from seam-system. Bug 3.
+//  2. finalizerTenantNamespaceCleanup (CAPI-enabled only): deletes the
+//     seam-tenant-{name} namespace. PLATFORM-BL-TENANT-GC.
+//
+// Both steps are idempotent on NotFound. Finalizers are removed once their cleanup
+// is complete and both must be absent before the TalosCluster is released.
 func (r *TalosClusterReconciler) handleTalosClusterDeletion(
 	ctx context.Context,
 	tc *platformv1alpha1.TalosCluster,
 ) (ctrl.Result, error) {
-	if !controllerutil.ContainsFinalizer(tc, finalizerRunnerConfigCleanup) {
-		return ctrl.Result{}, nil
-	}
-
-	rc := &OperationalRunnerConfig{}
-	err := r.Client.Get(ctx, types.NamespacedName{
-		Name:      tc.Name,
-		Namespace: bootstrapRunnerConfigNamespace,
-	}, rc)
-	if err != nil && !apierrors.IsNotFound(err) {
-		return ctrl.Result{}, fmt.Errorf("handleTalosClusterDeletion: get RunnerConfig %s/%s: %w",
-			bootstrapRunnerConfigNamespace, tc.Name, err)
-	}
-	if err == nil {
-		if delErr := r.Client.Delete(ctx, rc); delErr != nil && !apierrors.IsNotFound(delErr) {
-			return ctrl.Result{}, fmt.Errorf("handleTalosClusterDeletion: delete RunnerConfig %s/%s: %w",
-				bootstrapRunnerConfigNamespace, tc.Name, delErr)
-		}
-	}
-
-	// Delete cluster Secrets from seam-system: kubeconfig and talosconfig.
-	// These are generated by the compiler bootstrap path and are no longer needed
-	// once the TalosCluster is deleted. Idempotent on NotFound.
-	// PLATFORM-BL-SECRET-CLEANUP.
-	for _, secretName := range []string{
-		"seam-mc-" + tc.Name + "-kubeconfig",
-		"seam-mc-" + tc.Name + "-talosconfig",
-	} {
-		secret := &corev1.Secret{}
+	// Step 1 — RunnerConfig and Secret cleanup (annotation-gated).
+	if controllerutil.ContainsFinalizer(tc, finalizerRunnerConfigCleanup) {
+		rc := &OperationalRunnerConfig{}
 		err := r.Client.Get(ctx, types.NamespacedName{
-			Name:      secretName,
-			Namespace: "seam-system",
-		}, secret)
+			Name:      tc.Name,
+			Namespace: bootstrapRunnerConfigNamespace,
+		}, rc)
 		if err != nil && !apierrors.IsNotFound(err) {
-			return ctrl.Result{}, fmt.Errorf("handleTalosClusterDeletion: get Secret %s: %w", secretName, err)
+			return ctrl.Result{}, fmt.Errorf("handleTalosClusterDeletion: get RunnerConfig %s/%s: %w",
+				bootstrapRunnerConfigNamespace, tc.Name, err)
 		}
 		if err == nil {
-			if delErr := r.Client.Delete(ctx, secret); delErr != nil && !apierrors.IsNotFound(delErr) {
-				return ctrl.Result{}, fmt.Errorf("handleTalosClusterDeletion: delete Secret %s: %w", secretName, delErr)
+			if delErr := r.Client.Delete(ctx, rc); delErr != nil && !apierrors.IsNotFound(delErr) {
+				return ctrl.Result{}, fmt.Errorf("handleTalosClusterDeletion: delete RunnerConfig %s/%s: %w",
+					bootstrapRunnerConfigNamespace, tc.Name, delErr)
 			}
+		}
+
+		for _, secretName := range []string{
+			"seam-mc-" + tc.Name + "-kubeconfig",
+			"seam-mc-" + tc.Name + "-talosconfig",
+		} {
+			secret := &corev1.Secret{}
+			err := r.Client.Get(ctx, types.NamespacedName{
+				Name:      secretName,
+				Namespace: "seam-system",
+			}, secret)
+			if err != nil && !apierrors.IsNotFound(err) {
+				return ctrl.Result{}, fmt.Errorf("handleTalosClusterDeletion: get Secret %s: %w", secretName, err)
+			}
+			if err == nil {
+				if delErr := r.Client.Delete(ctx, secret); delErr != nil && !apierrors.IsNotFound(delErr) {
+					return ctrl.Result{}, fmt.Errorf("handleTalosClusterDeletion: delete Secret %s: %w", secretName, delErr)
+				}
+			}
+		}
+
+		controllerutil.RemoveFinalizer(tc, finalizerRunnerConfigCleanup)
+		if err := r.Client.Update(ctx, tc); err != nil {
+			return ctrl.Result{}, fmt.Errorf("handleTalosClusterDeletion: remove runnerconfig finalizer: %w", err)
 		}
 	}
 
-	controllerutil.RemoveFinalizer(tc, finalizerRunnerConfigCleanup)
-	if err := r.Client.Update(ctx, tc); err != nil {
-		return ctrl.Result{}, fmt.Errorf("handleTalosClusterDeletion: remove finalizer: %w", err)
+	// Step 2 — Tenant namespace cleanup (CAPI-enabled only). PLATFORM-BL-TENANT-GC.
+	if controllerutil.ContainsFinalizer(tc, finalizerTenantNamespaceCleanup) {
+		nsName := "seam-tenant-" + tc.Name
+		ns := &corev1.Namespace{}
+		err := r.Client.Get(ctx, types.NamespacedName{Name: nsName}, ns)
+		if err != nil && !apierrors.IsNotFound(err) {
+			return ctrl.Result{}, fmt.Errorf("handleTalosClusterDeletion: get tenant namespace %s: %w", nsName, err)
+		}
+		if err == nil {
+			if delErr := r.Client.Delete(ctx, ns); delErr != nil && !apierrors.IsNotFound(delErr) {
+				return ctrl.Result{}, fmt.Errorf("handleTalosClusterDeletion: delete tenant namespace %s: %w", nsName, delErr)
+			}
+		}
+
+		controllerutil.RemoveFinalizer(tc, finalizerTenantNamespaceCleanup)
+		if err := r.Client.Update(ctx, tc); err != nil {
+			return ctrl.Result{}, fmt.Errorf("handleTalosClusterDeletion: remove tenant-namespace finalizer: %w", err)
+		}
 	}
+
 	return ctrl.Result{}, nil
 }
 
