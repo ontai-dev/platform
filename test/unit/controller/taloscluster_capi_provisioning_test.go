@@ -7,6 +7,9 @@
 //  3. TalosControlPlane created with correct replica count and Kubernetes version.
 //  4. CiliumPending condition set when CAPI Cluster reaches Running and CiliumPackRef is set.
 //  5. MachineDeployment created for each worker pool in spec.capi.workers.
+//  6. TalosConfigTemplate includes cluster.network.cni.name=none (CP-INV-009).
+//  7. TalosConfigTemplate includes Cilium BPF sysctl params (CP-INV-009).
+//  8. CiliumPending cleared when Cilium PackInstance reaches Ready.
 //
 // All tests use the fake controller-runtime client. No live cluster required.
 // platform-schema.md §2, §4. taloscluster_helpers.go ensureXxx functions.
@@ -264,6 +267,221 @@ func TestTalosClusterReconcile_CAPI_CiliumPendingWhenClusterRunning(t *testing.T
 	}
 	if cond.Reason != platformv1alpha1.ReasonCiliumPackPending {
 		t.Errorf("CiliumPending reason = %q, want %s", cond.Reason, platformv1alpha1.ReasonCiliumPackPending)
+	}
+}
+
+// TestTalosClusterReconcile_CAPI_TalosConfigTemplateHasCNINone verifies that
+// ensureTalosConfigTemplate creates a TalosConfigTemplate whose configPatches
+// include a replace patch for /cluster/network/cni/name with value "none".
+// CP-INV-009: CNI=none is mandatory; Cilium replaces it at runtime.
+func TestTalosClusterReconcile_CAPI_TalosConfigTemplateHasCNINone(t *testing.T) {
+	scheme := buildDay2Scheme(t)
+	tc := &platformv1alpha1.TalosCluster{
+		ObjectMeta: metav1.ObjectMeta{Name: "ccs-dev", Namespace: "seam-system", Generation: 1},
+		Spec: platformv1alpha1.TalosClusterSpec{
+			CAPI: &platformv1alpha1.CAPIConfig{
+				Enabled:           true,
+				TalosVersion:      "v1.7.0",
+				KubernetesVersion: "v1.31.0",
+				ControlPlane:      &platformv1alpha1.CAPIControlPlaneConfig{Replicas: 1},
+			},
+		},
+	}
+
+	c := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithObjects(tc).
+		WithStatusSubresource(tc).
+		Build()
+	r := &controller.TalosClusterReconciler{
+		Client:   c,
+		Scheme:   scheme,
+		Recorder: clientevents.NewFakeRecorder(32),
+	}
+
+	_, err := r.Reconcile(context.Background(), ctrl.Request{
+		NamespacedName: types.NamespacedName{Name: "ccs-dev", Namespace: "seam-system"},
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	tct := &unstructured.Unstructured{}
+	tct.SetGroupVersionKind(schema.GroupVersionKind{
+		Group:   "bootstrap.cluster.x-k8s.io",
+		Version: "v1alpha3",
+		Kind:    "TalosConfigTemplate",
+	})
+	if err := c.Get(context.Background(), types.NamespacedName{
+		Name:      "ccs-dev-config-template",
+		Namespace: "seam-tenant-ccs-dev",
+	}, tct); err != nil {
+		t.Fatalf("TalosConfigTemplate not created: %v", err)
+	}
+
+	patches, _, _ := unstructured.NestedSlice(tct.Object, "spec", "template", "spec", "configPatches")
+	foundCNI := false
+	for _, p := range patches {
+		patch, ok := p.(map[string]interface{})
+		if !ok {
+			continue
+		}
+		if patch["path"] == "/cluster/network/cni/name" && patch["value"] == "none" {
+			foundCNI = true
+		}
+	}
+	if !foundCNI {
+		t.Error("TalosConfigTemplate configPatches missing /cluster/network/cni/name=none (CP-INV-009)")
+	}
+}
+
+// TestTalosClusterReconcile_CAPI_TalosConfigTemplateHasBPFSysctls verifies that
+// ensureTalosConfigTemplate sets the two Cilium-required BPF kernel parameters
+// in the machine sysctl patch. CP-INV-009.
+func TestTalosClusterReconcile_CAPI_TalosConfigTemplateHasBPFSysctls(t *testing.T) {
+	scheme := buildDay2Scheme(t)
+	tc := &platformv1alpha1.TalosCluster{
+		ObjectMeta: metav1.ObjectMeta{Name: "ccs-dev", Namespace: "seam-system", Generation: 1},
+		Spec: platformv1alpha1.TalosClusterSpec{
+			CAPI: &platformv1alpha1.CAPIConfig{
+				Enabled:           true,
+				TalosVersion:      "v1.7.0",
+				KubernetesVersion: "v1.31.0",
+				ControlPlane:      &platformv1alpha1.CAPIControlPlaneConfig{Replicas: 1},
+			},
+		},
+	}
+
+	c := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithObjects(tc).
+		WithStatusSubresource(tc).
+		Build()
+	r := &controller.TalosClusterReconciler{
+		Client:   c,
+		Scheme:   scheme,
+		Recorder: clientevents.NewFakeRecorder(32),
+	}
+
+	_, err := r.Reconcile(context.Background(), ctrl.Request{
+		NamespacedName: types.NamespacedName{Name: "ccs-dev", Namespace: "seam-system"},
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	tct := &unstructured.Unstructured{}
+	tct.SetGroupVersionKind(schema.GroupVersionKind{
+		Group:   "bootstrap.cluster.x-k8s.io",
+		Version: "v1alpha3",
+		Kind:    "TalosConfigTemplate",
+	})
+	if err := c.Get(context.Background(), types.NamespacedName{
+		Name:      "ccs-dev-config-template",
+		Namespace: "seam-tenant-ccs-dev",
+	}, tct); err != nil {
+		t.Fatalf("TalosConfigTemplate not created: %v", err)
+	}
+
+	patches, _, _ := unstructured.NestedSlice(tct.Object, "spec", "template", "spec", "configPatches")
+	var sysctls map[string]interface{}
+	for _, p := range patches {
+		patch, ok := p.(map[string]interface{})
+		if !ok {
+			continue
+		}
+		if patch["path"] == "/machine/sysctls" {
+			sysctls, _ = patch["value"].(map[string]interface{})
+			break
+		}
+	}
+	if sysctls == nil {
+		t.Fatal("TalosConfigTemplate configPatches missing /machine/sysctls patch (CP-INV-009)")
+	}
+	if sysctls["net.core.bpf_jit_harden"] != "0" {
+		t.Errorf("net.core.bpf_jit_harden = %v, want \"0\"", sysctls["net.core.bpf_jit_harden"])
+	}
+	if sysctls["kernel.unprivileged_bpf_disabled"] != "0" {
+		t.Errorf("kernel.unprivileged_bpf_disabled = %v, want \"0\"", sysctls["kernel.unprivileged_bpf_disabled"])
+	}
+}
+
+// TestTalosClusterReconcile_CAPI_CiliumPendingClearedWhenPackInstanceReady verifies
+// that when the CAPI Cluster is Running and the Cilium PackInstance reaches Ready,
+// the reconciler clears CiliumPending and sets Ready=True. CP-INV-013.
+func TestTalosClusterReconcile_CAPI_CiliumPendingClearedWhenPackInstanceReady(t *testing.T) {
+	scheme := buildDay2Scheme(t)
+	tc := &platformv1alpha1.TalosCluster{
+		ObjectMeta: metav1.ObjectMeta{Name: "ccs-dev", Namespace: "seam-system", Generation: 1},
+		Spec: platformv1alpha1.TalosClusterSpec{
+			CAPI: &platformv1alpha1.CAPIConfig{
+				Enabled:           true,
+				TalosVersion:      "v1.7.0",
+				KubernetesVersion: "v1.31.0",
+				ControlPlane:      &platformv1alpha1.CAPIControlPlaneConfig{Replicas: 1},
+				CiliumPackRef:     &platformv1alpha1.CAPICiliumPackRef{Name: "cilium-pack", Version: "1.15.0"},
+			},
+		},
+	}
+
+	capiCluster := buildFakeCAPIClusterRunning("ccs-dev", "seam-tenant-ccs-dev")
+
+	// Build a PackInstance in Ready state with the Cilium pack label.
+	packInstance := &unstructured.Unstructured{}
+	packInstance.SetGroupVersionKind(schema.GroupVersionKind{
+		Group:   "infra.ontai.dev",
+		Version: "v1alpha1",
+		Kind:    "PackInstance",
+	})
+	packInstance.SetName("cilium-pack-instance")
+	packInstance.SetNamespace("seam-tenant-ccs-dev")
+	packInstance.SetLabels(map[string]string{
+		"infra.ontai.dev/pack-name": "cilium-pack",
+	})
+	_ = unstructured.SetNestedField(packInstance.Object, true, "status", "ready")
+
+	c := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithObjects(tc, capiCluster, packInstance).
+		WithStatusSubresource(tc).
+		Build()
+	r := &controller.TalosClusterReconciler{
+		Client:   c,
+		Scheme:   scheme,
+		Recorder: clientevents.NewFakeRecorder(32),
+		RemoteConductorAvailableFn: func(_ context.Context, _ string) (bool, error) {
+			return true, nil
+		},
+	}
+
+	_, err := r.Reconcile(context.Background(), ctrl.Request{
+		NamespacedName: types.NamespacedName{Name: "ccs-dev", Namespace: "seam-system"},
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	got := &platformv1alpha1.TalosCluster{}
+	if err := c.Get(context.Background(), types.NamespacedName{
+		Name: "ccs-dev", Namespace: "seam-system",
+	}, got); err != nil {
+		t.Fatalf("get TalosCluster: %v", err)
+	}
+
+	cond := platformv1alpha1.FindCondition(got.Status.Conditions, platformv1alpha1.ConditionTypeCiliumPending)
+	if cond == nil {
+		t.Fatal("CiliumPending condition absent after transition; expected CiliumPending=False")
+	}
+	if cond.Status != metav1.ConditionFalse {
+		t.Errorf("CiliumPending = %s, want False", cond.Status)
+	}
+	if cond.Reason != platformv1alpha1.ReasonCiliumPackReady {
+		t.Errorf("CiliumPending reason = %q, want %s", cond.Reason, platformv1alpha1.ReasonCiliumPackReady)
+	}
+
+	ready := platformv1alpha1.FindCondition(got.Status.Conditions, platformv1alpha1.ConditionTypeReady)
+	if ready == nil || ready.Status != metav1.ConditionTrue {
+		t.Error("TalosCluster Ready condition should be True after Cilium and Conductor both ready")
 	}
 }
 
