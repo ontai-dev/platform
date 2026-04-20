@@ -247,8 +247,8 @@ func (r *NodeOperationReconciler) capiReboot(ctx context.Context, ns string, nop
 	return nil
 }
 
-// reconcileDirectNodeOp emits a RunnerConfig CR for the non-CAPI path.
-// Each node operation maps to a single-step RunnerConfig. conductor-schema.md §17.
+// reconcileDirectNodeOp gates on capability then submits a single batch/v1
+// Conductor executor Job for the non-CAPI path. conductor-schema.md §5 §17.
 func (r *NodeOperationReconciler) reconcileDirectNodeOp(ctx context.Context, nop *platformv1alpha1.NodeOperation) (ctrl.Result, error) {
 	logger := log.FromContext(ctx)
 
@@ -265,84 +265,110 @@ func (r *NodeOperationReconciler) reconcileDirectNodeOp(ctx context.Context, nop
 		return ctrl.Result{}, nil
 	}
 
-	rcName := operationalRunnerConfigName(nop.Name)
-
-	existingRC, err := getOperationalRunnerConfig(ctx, r.Client, nop.Namespace, rcName)
+	// Gate: read the cluster RunnerConfig from ont-system and verify capability.
+	clusterRC, err := getClusterRunnerConfig(ctx, r.Client, nop.Spec.ClusterRef.Name)
 	if err != nil {
-		return ctrl.Result{}, fmt.Errorf("NodeOperationReconciler: check RunnerConfig: %w", err)
+		return ctrl.Result{}, fmt.Errorf("NodeOperationReconciler: get cluster RunnerConfig: %w", err)
+	}
+	if clusterRC == nil {
+		platformv1alpha1.SetCondition(
+			&nop.Status.Conditions,
+			platformv1alpha1.ConditionTypeCapabilityUnavailable,
+			metav1.ConditionTrue,
+			platformv1alpha1.ReasonRunnerConfigNotFound,
+			"Cluster RunnerConfig not yet present in ont-system. Waiting for Conductor agent.",
+			nop.Generation,
+		)
+		return ctrl.Result{RequeueAfter: capabilityUnavailableRetryInterval}, nil
+	}
+	if !hasCapability(clusterRC, capability) {
+		platformv1alpha1.SetCondition(
+			&nop.Status.Conditions,
+			platformv1alpha1.ConditionTypeCapabilityUnavailable,
+			metav1.ConditionTrue,
+			platformv1alpha1.ReasonCapabilityNotPublished,
+			fmt.Sprintf("Capability %q not yet published by Conductor agent.", capability),
+			nop.Generation,
+		)
+		return ctrl.Result{RequeueAfter: capabilityUnavailableRetryInterval}, nil
+	}
+	platformv1alpha1.SetCondition(
+		&nop.Status.Conditions,
+		platformv1alpha1.ConditionTypeCapabilityUnavailable,
+		metav1.ConditionFalse,
+		platformv1alpha1.ReasonCapabilityNotPublished,
+		"",
+		nop.Generation,
+	)
+
+	jobName := operationalJobName(nop.Name, capability)
+
+	existingJob, err := getOperationalJob(ctx, r.Client, nop.Namespace, jobName)
+	if err != nil {
+		return ctrl.Result{}, fmt.Errorf("NodeOperationReconciler: check job: %w", err)
 	}
 
-	if existingRC == nil {
-		// Resolve operator leader node and build node exclusions. conductor-schema.md §13.
+	if existingJob == nil {
 		leaderNode, lErr := resolveOperatorLeaderNode(ctx, r.Client)
 		if lErr != nil {
 			return ctrl.Result{}, fmt.Errorf("NodeOperationReconciler: resolve leader node: %w", lErr)
 		}
-		exclusionNodes := buildNodeExclusions(nop.Spec.TargetNodes, leaderNode)
+		nodeExclusions := buildNodeExclusions(nop.Spec.TargetNodes, leaderNode)
 
-		steps := []OperationalStep{
-			{
-				Name:          string(nop.Spec.Operation),
-				Capability:    capability,
-				HaltOnFailure: true,
-			},
-		}
-
-		rc := buildOperationalRunnerConfig(rcName, nop.Namespace, nop.Spec.ClusterRef.Name,
-			exclusionNodes, leaderNode, steps)
-		if err := controllerutil.SetControllerReference(nop, rc, r.Scheme); err != nil {
+		job := jobSpecWithExclusions(jobName, nop.Namespace, nop.Spec.ClusterRef.Name, capability, nodeExclusions)
+		if err := controllerutil.SetControllerReference(nop, job, r.Scheme); err != nil {
 			return ctrl.Result{}, fmt.Errorf("NodeOperationReconciler: set owner reference: %w", err)
 		}
-		if err := r.Client.Create(ctx, rc); err != nil {
-			return ctrl.Result{}, fmt.Errorf("NodeOperationReconciler: create RunnerConfig: %w", err)
+		if err := r.Client.Create(ctx, job); err != nil {
+			return ctrl.Result{}, fmt.Errorf("NodeOperationReconciler: create job: %w", err)
 		}
-		nop.Status.JobName = rcName
+		nop.Status.JobName = jobName
 		platformv1alpha1.SetCondition(
 			&nop.Status.Conditions,
 			platformv1alpha1.ConditionTypeNodeOperationReady,
 			metav1.ConditionFalse,
 			platformv1alpha1.ReasonNodeOpJobSubmitted,
-			fmt.Sprintf("RunnerConfig %s submitted for %s.", rcName, capability),
+			fmt.Sprintf("Conductor executor Job %s submitted for %s.", jobName, capability),
 			nop.Generation,
 		)
-		r.Recorder.Eventf(nop, nil, "Normal", "RunnerConfigSubmitted", "RunnerConfigSubmitted",
-			"Submitted RunnerConfig %s for %s", rcName, capability)
-		logger.Info("submitted NodeOperation RunnerConfig",
-			"name", nop.Name, "rcName", rcName, "capability", capability)
+		r.Recorder.Eventf(nop, nil, "Normal", "JobSubmitted", "JobSubmitted",
+			"Submitted Conductor executor Job %s for %s", jobName, capability)
+		logger.Info("submitted NodeOperation Conductor executor Job",
+			"name", nop.Name, "jobName", jobName, "capability", capability)
 		return ctrl.Result{RequeueAfter: operationalJobPollInterval}, nil
 	}
 
-	// RunnerConfig exists — check terminal condition.
-	complete, failed, failedStep := readRunnerConfigTerminalCondition(existingRC)
+	// Job exists — check OperationResult ConfigMap.
+	complete, failed, result := readOperationalResult(ctx, r.Client, nop.Namespace, jobName)
 	if failed {
-		nop.Status.OperationResult = fmt.Sprintf("RunnerConfig failed at step %q.", failedStep)
+		nop.Status.OperationResult = result
 		platformv1alpha1.SetCondition(
 			&nop.Status.Conditions,
 			platformv1alpha1.ConditionTypeNodeOperationDegraded,
 			metav1.ConditionTrue,
 			platformv1alpha1.ReasonNodeOpJobFailed,
-			fmt.Sprintf("RunnerConfig %s failed at step %q.", rcName, failedStep),
+			fmt.Sprintf("Conductor executor Job %s failed: %s", jobName, result),
 			nop.Generation,
 		)
-		r.Recorder.Eventf(nop, nil, "Warning", "RunnerConfigFailed", "RunnerConfigFailed",
-			"RunnerConfig %s failed at step %q", rcName, failedStep)
+		r.Recorder.Eventf(nop, nil, "Warning", "JobFailed", "JobFailed",
+			"Conductor executor Job %s failed: %s", jobName, result)
 		return ctrl.Result{}, nil
 	}
 	if !complete {
 		return ctrl.Result{RequeueAfter: operationalJobPollInterval}, nil
 	}
 
-	nop.Status.OperationResult = "RunnerConfig completed successfully."
+	nop.Status.OperationResult = result
 	platformv1alpha1.SetCondition(
 		&nop.Status.Conditions,
 		platformv1alpha1.ConditionTypeNodeOperationReady,
 		metav1.ConditionTrue,
 		platformv1alpha1.ReasonNodeOpJobComplete,
-		fmt.Sprintf("RunnerConfig %s completed successfully.", rcName),
+		fmt.Sprintf("Conductor executor Job %s completed successfully.", jobName),
 		nop.Generation,
 	)
-	r.Recorder.Eventf(nop, nil, "Normal", "RunnerConfigComplete", "RunnerConfigComplete",
-		"RunnerConfig %s completed successfully", rcName)
+	r.Recorder.Eventf(nop, nil, "Normal", "JobComplete", "JobComplete",
+		"Conductor executor Job %s completed successfully", jobName)
 	logger.Info("NodeOperation complete", "name", nop.Name, "capability", capability)
 	return ctrl.Result{}, nil
 }

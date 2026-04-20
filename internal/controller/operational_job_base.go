@@ -30,6 +30,11 @@ const (
 	// an operational Conductor Job to complete.
 	operationalJobPollInterval = 15 * time.Second
 
+	// capabilityUnavailableRetryInterval is the requeue interval when the cluster
+	// RunnerConfig is absent or the required capability has not yet been published
+	// by the Conductor agent. conductor-schema.md §5, CR-INV-005.
+	capabilityUnavailableRetryInterval = 30 * time.Second
+
 	// operationalJobTTL is the Job TTL in seconds after completion.
 	// The reconciler reads the OperationResult before this expires.
 	operationalJobTTL = int32(600)
@@ -255,6 +260,27 @@ func buildOperationalRunnerConfig(
 			Steps:                  steps,
 		},
 	}
+}
+
+// getClusterRunnerConfig returns the cluster-level RunnerConfig from ont-system
+// for the given cluster name. Returns nil when the RunnerConfig does not yet
+// exist — normal during Conductor agent startup. Day-2 reconcilers call this
+// to read status.capabilities before submitting any Job.
+// conductor-schema.md §5, CR-INV-005.
+func getClusterRunnerConfig(ctx context.Context, c client.Client, clusterName string) (*OperationalRunnerConfig, error) {
+	return getOperationalRunnerConfig(ctx, c, bootstrapRunnerConfigNamespace, bootstrapRunnerConfigName(clusterName))
+}
+
+// hasCapability reports whether the RunnerConfig status.capabilities list
+// contains an entry with the given name. Used by day-2 reconcilers to gate
+// Job submission. conductor-schema.md §5, CR-INV-005.
+func hasCapability(rc *OperationalRunnerConfig, name string) bool {
+	for _, cap := range rc.Status.Capabilities {
+		if cap.Name == name {
+			return true
+		}
+	}
+	return false
 }
 
 // getOperationalRunnerConfig returns the OperationalRunnerConfig by name and
