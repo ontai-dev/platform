@@ -45,6 +45,9 @@ func TestEtcdMaintenance_Integration_BackupWithS3(t *testing.T) {
 	t.Cleanup(func() {
 		_ = testClient.Delete(ctx, em)
 		_ = testClient.Delete(ctx, defaultS3Secret)
+		_ = testClient.Delete(ctx, &controller.OperationalRunnerConfig{
+			ObjectMeta: metav1.ObjectMeta{Name: rcName, Namespace: ns},
+		})
 	})
 
 	r := &controller.EtcdMaintenanceReconciler{
