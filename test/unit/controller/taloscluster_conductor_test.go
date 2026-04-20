@@ -81,7 +81,7 @@ func TestEnsureConductorDeployment_KubeconfigAbsentIsGraceful(t *testing.T) {
 	tc := &platformv1alpha1.TalosCluster{
 		ObjectMeta: metav1.ObjectMeta{Name: "test-cluster", Namespace: "seam-system", Generation: 1},
 		Spec: platformv1alpha1.TalosClusterSpec{
-			CAPI: platformv1alpha1.CAPIConfig{Enabled: true},
+			CAPI: &platformv1alpha1.CAPIConfig{Enabled: true},
 		},
 	}
 	// No kubeconfig Secret pre-populated — simulates CAPI not yet ready.
@@ -110,7 +110,7 @@ func TestTalosClusterReconcile_CAPIPathDoesNotBreakOnAbsentKubeconfig(t *testing
 	tc := &platformv1alpha1.TalosCluster{
 		ObjectMeta: metav1.ObjectMeta{Name: "test-cluster", Namespace: "seam-system", Generation: 1},
 		Spec: platformv1alpha1.TalosClusterSpec{
-			CAPI: platformv1alpha1.CAPIConfig{
+			CAPI: &platformv1alpha1.CAPIConfig{
 				Enabled:           true,
 				TalosVersion:      "v1.7.0",
 				KubernetesVersion: "v1.31.0",
@@ -149,7 +149,7 @@ func buildCAPITalosCluster(name, namespace string) *platformv1alpha1.TalosCluste
 	return &platformv1alpha1.TalosCluster{
 		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: namespace, Generation: 1},
 		Spec: platformv1alpha1.TalosClusterSpec{
-			CAPI: platformv1alpha1.CAPIConfig{
+			CAPI: &platformv1alpha1.CAPIConfig{
 				Enabled:           true,
 				TalosVersion:      "v1.7.0",
 				KubernetesVersion: "v1.31.0",
@@ -310,7 +310,7 @@ func TestConductorReady_Available_TransitionsClusterToReady(t *testing.T) {
 	tc := &platformv1alpha1.TalosCluster{
 		ObjectMeta: metav1.ObjectMeta{Name: "ccs-dev", Namespace: "seam-system", Generation: 1},
 		Spec: platformv1alpha1.TalosClusterSpec{
-			CAPI: platformv1alpha1.CAPIConfig{
+			CAPI: &platformv1alpha1.CAPIConfig{
 				Enabled:           true,
 				TalosVersion:      "v1.7.0",
 				KubernetesVersion: "v1.31.0",
@@ -384,7 +384,7 @@ func TestConductorReady_Unavailable_Requeues(t *testing.T) {
 	tc := &platformv1alpha1.TalosCluster{
 		ObjectMeta: metav1.ObjectMeta{Name: "ccs-dev", Namespace: "seam-system", Generation: 1},
 		Spec: platformv1alpha1.TalosClusterSpec{
-			CAPI: platformv1alpha1.CAPIConfig{
+			CAPI: &platformv1alpha1.CAPIConfig{
 				Enabled:           true,
 				TalosVersion:      "v1.7.0",
 				KubernetesVersion: "v1.31.0",
@@ -453,7 +453,7 @@ func TestConductorReady_ConditionTransition(t *testing.T) {
 	tc := &platformv1alpha1.TalosCluster{
 		ObjectMeta: metav1.ObjectMeta{Name: "ccs-dev", Namespace: "seam-system", Generation: 1},
 		Spec: platformv1alpha1.TalosClusterSpec{
-			CAPI: platformv1alpha1.CAPIConfig{
+			CAPI: &platformv1alpha1.CAPIConfig{
 				Enabled:           true,
 				TalosVersion:      "v1.7.0",
 				KubernetesVersion: "v1.31.0",

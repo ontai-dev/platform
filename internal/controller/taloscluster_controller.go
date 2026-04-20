@@ -9,6 +9,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/client-go/tools/record"
+	"k8s.io/client-go/util/retry"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/log"
@@ -100,11 +101,26 @@ func (r *TalosClusterReconciler) Reconcile(ctx context.Context, req ctrl.Request
 	}
 
 	// Step B — Set up deferred status patch.
-	patchBase := client.MergeFrom(tc.DeepCopy())
+	// RetryOnConflict handles the 409 Conflict that arises under a 2-replica
+	// deployment when both replicas reconcile the same TalosCluster concurrently.
+	// On each attempt, the latest object is fetched to get a fresh resourceVersion,
+	// the computed status is applied, and the patch is sent. PLATFORM-BL-STATUS-PATCH-CONFLICT.
 	defer func() {
-		if err := r.Client.Status().Patch(ctx, tc, patchBase); err != nil {
-			if !apierrors.IsNotFound(err) {
-				logger.Error(err, "failed to patch TalosCluster status",
+		retryErr := retry.RetryOnConflict(retry.DefaultRetry, func() error {
+			latest := &platformv1alpha1.TalosCluster{}
+			if err := r.Client.Get(ctx, client.ObjectKeyFromObject(tc), latest); err != nil {
+				if apierrors.IsNotFound(err) {
+					return nil
+				}
+				return err
+			}
+			freshBase := client.MergeFrom(latest.DeepCopy())
+			latest.Status = tc.Status
+			return r.Client.Status().Patch(ctx, latest, freshBase)
+		})
+		if retryErr != nil {
+			if !apierrors.IsNotFound(retryErr) {
+				logger.Error(retryErr, "failed to patch TalosCluster status",
 					"name", tc.Name, "namespace", tc.Namespace)
 			}
 		}
@@ -151,7 +167,7 @@ func (r *TalosClusterReconciler) Reconcile(ctx context.Context, req ctrl.Request
 	}
 
 	// Step E — Route to the appropriate reconciliation path.
-	if !tc.Spec.CAPI.Enabled {
+	if !tc.Spec.CAPIEnabled() {
 		return r.reconcileDirectBootstrap(ctx, tc)
 	}
 	return r.reconcileCAPIPath(ctx, tc)

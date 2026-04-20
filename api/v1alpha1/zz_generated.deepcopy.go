@@ -1103,7 +1103,11 @@ func (in *TalosClusterSpec) DeepCopyInto(out *TalosClusterSpec) {
 		*out = make([]string, len(*in))
 		copy(*out, *in)
 	}
-	in.CAPI.DeepCopyInto(&out.CAPI)
+	if in.CAPI != nil {
+		in, out := &in.CAPI, &out.CAPI
+		*out = new(CAPIConfig)
+		(*in).DeepCopyInto(*out)
+	}
 	if in.Lineage != nil {
 		in, out := &in.Lineage, &out.Lineage
 		*out = new(lineage.SealedCausalChain)

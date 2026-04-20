@@ -363,7 +363,7 @@ func (r *NodeOperationReconciler) nodeOpCAPIEnabled(ctx context.Context, nop *pl
 		}
 		return false, fmt.Errorf("get TalosCluster %s/%s: %w", ns, nop.Spec.ClusterRef.Name, err)
 	}
-	return tc.Spec.CAPI.Enabled, nil
+	return tc.Spec.CAPIEnabled(), nil
 }
 
 // nodeOpCapability maps a NodeOperationType to the Conductor capability name.

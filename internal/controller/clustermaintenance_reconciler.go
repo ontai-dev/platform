@@ -273,7 +273,7 @@ func (r *ClusterMaintenanceReconciler) maintenanceCAPIEnabled(ctx context.Contex
 		}
 		return false, fmt.Errorf("get TalosCluster %s/%s: %w", ns, cm.Spec.ClusterRef.Name, err)
 	}
-	return tc.Spec.CAPI.Enabled, nil
+	return tc.Spec.CAPIEnabled(), nil
 }
 
 // now returns the current time using the configured clock function.

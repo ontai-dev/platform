@@ -335,7 +335,7 @@ func (r *ClusterResetReconciler) isCAPIEnabled(ctx context.Context, crst *platfo
 		}
 		return false, fmt.Errorf("get TalosCluster %s/%s: %w", ns, crst.Spec.ClusterRef.Name, err)
 	}
-	return tc.Spec.CAPI.Enabled, nil
+	return tc.Spec.CAPIEnabled(), nil
 }
 
 // SetupWithManager registers ClusterResetReconciler with the manager.
