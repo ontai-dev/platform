@@ -19,7 +19,6 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
-	"time"
 
 	coordinationv1 "k8s.io/api/coordination/v1"
 	corev1 "k8s.io/api/core/v1"
@@ -33,9 +32,6 @@ import (
 	platformv1alpha1 "github.com/ontai-dev/platform/api/v1alpha1"
 	"github.com/ontai-dev/platform/internal/controller"
 )
-
-const envtestPollInterval = 50 * time.Millisecond
-const envtestTimeout = 10 * time.Second
 
 var (
 	testEnv   *envtest.Environment
