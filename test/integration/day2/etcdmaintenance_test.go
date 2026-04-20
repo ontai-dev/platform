@@ -37,7 +37,7 @@ func buildClusterRC(ctx context.Context, t *testing.T, clusterName string, capab
 	}
 	caps := make([]controller.CapabilityEntry, len(capabilities))
 	for i, c := range capabilities {
-		caps[i] = controller.CapabilityEntry{Name: c}
+		caps[i] = controller.CapabilityEntry{Name: c, Version: "1.0.0"}
 	}
 	rc.Status.Capabilities = caps
 	if err := testClient.Status().Update(ctx, rc); err != nil {

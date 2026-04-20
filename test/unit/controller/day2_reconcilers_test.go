@@ -53,7 +53,7 @@ func buildDay2Scheme(t *testing.T) *runtime.Scheme {
 func clusterRC(clusterName string, capabilities ...string) *controller.OperationalRunnerConfig {
 	caps := make([]controller.CapabilityEntry, len(capabilities))
 	for i, c := range capabilities {
-		caps[i] = controller.CapabilityEntry{Name: c}
+		caps[i] = controller.CapabilityEntry{Name: c, Version: "1.0.0"}
 	}
 	rc := &controller.OperationalRunnerConfig{
 		ObjectMeta: metav1.ObjectMeta{Name: clusterName, Namespace: "ont-system"},

@@ -134,7 +134,8 @@ type OperationalStep struct {
 // field is consumed by platform; other fields are present for round-trip fidelity
 // with the conductor-schema.md §5 CRD definition.
 type CapabilityEntry struct {
-	Name string `json:"name"`
+	Name    string `json:"name"`
+	Version string `json:"version"`
 }
 
 // OperationalRunnerConfigStatus is written by the Conductor executor.
