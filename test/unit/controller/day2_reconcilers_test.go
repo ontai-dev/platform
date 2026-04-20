@@ -1146,6 +1146,155 @@ func TestMaintenanceBundleReconcile_JobFails(t *testing.T) {
 	}
 }
 
+// TestEtcdMaintenanceReconcile_RestoreRunnerConfig verifies that operation=restore
+// submits a RunnerConfig with the etcd-restore capability without requiring an S3
+// Secret lookup (restore path reads s3SnapshotPath directly from spec).
+func TestEtcdMaintenanceReconcile_RestoreRunnerConfig(t *testing.T) {
+	scheme := buildDay2Scheme(t)
+	em := &platformv1alpha1.EtcdMaintenance{
+		ObjectMeta: metav1.ObjectMeta{Name: "restore-1", Namespace: "seam-tenant-test", Generation: 1},
+		Spec: platformv1alpha1.EtcdMaintenanceSpec{
+			ClusterRef: platformv1alpha1.LocalObjectRef{Name: "test-cluster"},
+			Operation:  platformv1alpha1.EtcdMaintenanceOperationRestore,
+		},
+	}
+	c := fake.NewClientBuilder().WithScheme(scheme).WithObjects(em).WithStatusSubresource(em).Build()
+	r := &controller.EtcdMaintenanceReconciler{Client: c, Scheme: scheme, Recorder: fakeRecorder()}
+
+	result, err := r.Reconcile(context.Background(), ctrl.Request{
+		NamespacedName: types.NamespacedName{Name: "restore-1", Namespace: "seam-tenant-test"},
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if result.RequeueAfter == 0 {
+		t.Error("expected requeue after RunnerConfig submission for restore")
+	}
+
+	rcList := &controller.OperationalRunnerConfigList{}
+	if err := c.List(context.Background(), rcList); err != nil {
+		t.Fatalf("list RunnerConfigs: %v", err)
+	}
+	if len(rcList.Items) != 1 {
+		t.Errorf("expected 1 etcd-restore RunnerConfig, got %d", len(rcList.Items))
+	}
+	if len(rcList.Items) > 0 {
+		rc := rcList.Items[0]
+		if len(rc.Spec.Steps) != 1 {
+			t.Errorf("expected 1 step, got %d", len(rc.Spec.Steps))
+		}
+		if len(rc.Spec.Steps) > 0 && rc.Spec.Steps[0].Capability != "etcd-restore" {
+			t.Errorf("step[0].Capability = %q, want etcd-restore", rc.Spec.Steps[0].Capability)
+		}
+	}
+}
+
+// TestEtcdMaintenanceReconcile_PVCFallbackEnabled verifies that when
+// spec.pvcFallbackEnabled=true and no S3 destination is configured, the reconciler
+// sets EtcdBackupLocalFallback and proceeds to create a RunnerConfig without S3 params.
+// platform-schema.md §10.
+func TestEtcdMaintenanceReconcile_PVCFallbackEnabled(t *testing.T) {
+	scheme := buildDay2Scheme(t)
+	em := &platformv1alpha1.EtcdMaintenance{
+		ObjectMeta: metav1.ObjectMeta{Name: "backup-pvc", Namespace: "seam-tenant-test", Generation: 1},
+		Spec: platformv1alpha1.EtcdMaintenanceSpec{
+			ClusterRef:         platformv1alpha1.LocalObjectRef{Name: "test-cluster"},
+			Operation:          platformv1alpha1.EtcdMaintenanceOperationBackup,
+			PVCFallbackEnabled: true,
+		},
+	}
+	// No S3 Secret present — PVC fallback should activate.
+	c := fake.NewClientBuilder().WithScheme(scheme).WithObjects(em).WithStatusSubresource(em).Build()
+	r := &controller.EtcdMaintenanceReconciler{Client: c, Scheme: scheme, Recorder: fakeRecorder()}
+
+	result, err := r.Reconcile(context.Background(), ctrl.Request{
+		NamespacedName: types.NamespacedName{Name: "backup-pvc", Namespace: "seam-tenant-test"},
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if result.RequeueAfter == 0 {
+		t.Error("expected requeue after RunnerConfig submission with PVC fallback")
+	}
+
+	// EtcdBackupLocalFallback condition must be set.
+	got := &platformv1alpha1.EtcdMaintenance{}
+	if err := c.Get(context.Background(), types.NamespacedName{
+		Name: "backup-pvc", Namespace: "seam-tenant-test",
+	}, got); err != nil {
+		t.Fatalf("get: %v", err)
+	}
+	cond := platformv1alpha1.FindCondition(got.Status.Conditions, platformv1alpha1.EtcdBackupLocalFallback)
+	if cond == nil {
+		t.Fatal("EtcdBackupLocalFallback condition not set")
+	}
+	if cond.Status != metav1.ConditionTrue {
+		t.Errorf("EtcdBackupLocalFallback status = %s, want True", cond.Status)
+	}
+
+	// RunnerConfig must be submitted.
+	rcList := &controller.OperationalRunnerConfigList{}
+	if err := c.List(context.Background(), rcList); err != nil {
+		t.Fatalf("list RunnerConfigs: %v", err)
+	}
+	if len(rcList.Items) != 1 {
+		t.Errorf("expected 1 RunnerConfig with PVC fallback, got %d", len(rcList.Items))
+	}
+	// S3 params must NOT be set — PVC fallback has no S3 context.
+	if len(rcList.Items) > 0 && len(rcList.Items[0].Spec.Steps) > 0 {
+		params := rcList.Items[0].Spec.Steps[0].Parameters
+		if params["s3SecretName"] != "" {
+			t.Errorf("s3SecretName should be empty in PVC fallback mode, got %q", params["s3SecretName"])
+		}
+	}
+}
+
+// TestEtcdMaintenanceReconcile_IdempotentAfterReady verifies that a second
+// reconcile on an EtcdMaintenance with Ready=True is a no-op: no RunnerConfig
+// is created and no requeue is requested.
+func TestEtcdMaintenanceReconcile_IdempotentAfterReady(t *testing.T) {
+	scheme := buildDay2Scheme(t)
+	em := &platformv1alpha1.EtcdMaintenance{
+		ObjectMeta: metav1.ObjectMeta{Name: "done-1", Namespace: "seam-tenant-test", Generation: 1},
+		Spec: platformv1alpha1.EtcdMaintenanceSpec{
+			ClusterRef: platformv1alpha1.LocalObjectRef{Name: "test-cluster"},
+			Operation:  platformv1alpha1.EtcdMaintenanceOperationDefrag,
+		},
+		Status: platformv1alpha1.EtcdMaintenanceStatus{
+			Conditions: []metav1.Condition{
+				{
+					Type:               platformv1alpha1.ConditionTypeEtcdMaintenanceReady,
+					Status:             metav1.ConditionTrue,
+					Reason:             platformv1alpha1.ReasonEtcdJobComplete,
+					Message:            "complete",
+					LastTransitionTime: metav1.Now(),
+				},
+			},
+		},
+	}
+	c := fake.NewClientBuilder().WithScheme(scheme).WithObjects(em).WithStatusSubresource(em).Build()
+	r := &controller.EtcdMaintenanceReconciler{Client: c, Scheme: scheme, Recorder: fakeRecorder()}
+
+	result, err := r.Reconcile(context.Background(), ctrl.Request{
+		NamespacedName: types.NamespacedName{Name: "done-1", Namespace: "seam-tenant-test"},
+	})
+	if err != nil {
+		t.Fatalf("unexpected error on idempotent reconcile: %v", err)
+	}
+	if result.RequeueAfter != 0 {
+		t.Errorf("expected no requeue on Ready=True EtcdMaintenance, got RequeueAfter=%v", result.RequeueAfter)
+	}
+
+	// No RunnerConfig should be created.
+	rcList := &controller.OperationalRunnerConfigList{}
+	if err := c.List(context.Background(), rcList); err != nil {
+		t.Fatalf("list RunnerConfigs: %v", err)
+	}
+	if len(rcList.Items) != 0 {
+		t.Errorf("expected no RunnerConfig on idempotent reconcile, got %d", len(rcList.Items))
+	}
+}
+
 // TestMaintenanceBundleReconcile_IdempotentAfterSuccess verifies that a second
 // reconcile on a Ready=True bundle is a no-op.
 func TestMaintenanceBundleReconcile_IdempotentAfterSuccess(t *testing.T) {

@@ -125,21 +125,35 @@ func (r *EtcdMaintenanceReconciler) Reconcile(ctx context.Context, req ctrl.Requ
 				return ctrl.Result{}, fmt.Errorf("EtcdMaintenanceReconciler: resolve S3 secret: %w", sErr)
 			}
 			if !found {
-				platformv1alpha1.SetCondition(
-					&em.Status.Conditions,
-					platformv1alpha1.EtcdBackupDestinationAbsent,
-					metav1.ConditionTrue,
-					platformv1alpha1.ReasonEtcdBackupDestinationAbsent,
-					"No S3 backup destination configured: spec.etcdBackupS3SecretRef is absent and seam-etcd-backup-config Secret is not found in seam-system. Set either to proceed. platform-schema.md §10.",
-					em.Generation,
-				)
-				r.Recorder.Eventf(em, nil, "Warning", "S3DestinationAbsent",
-					"EtcdMaintenance %s/%s: no S3 backup destination configured", em.Namespace, em.Name)
-				return ctrl.Result{}, nil
-			}
-			stepParams = map[string]string{
-				"s3SecretName":      secretName,
-				"s3SecretNamespace": secretNS,
+				if em.Spec.PVCFallbackEnabled {
+					// PVC fallback: set EtcdBackupLocalFallback and proceed without S3 params.
+					// platform-schema.md §10.
+					platformv1alpha1.SetCondition(
+						&em.Status.Conditions,
+						platformv1alpha1.EtcdBackupLocalFallback,
+						metav1.ConditionTrue,
+						platformv1alpha1.ReasonEtcdBackupDestinationAbsent,
+						"No S3 backup destination configured; using PVC local fallback. platform-schema.md §10.",
+						em.Generation,
+					)
+				} else {
+					platformv1alpha1.SetCondition(
+						&em.Status.Conditions,
+						platformv1alpha1.EtcdBackupDestinationAbsent,
+						metav1.ConditionTrue,
+						platformv1alpha1.ReasonEtcdBackupDestinationAbsent,
+						"No S3 backup destination configured: spec.etcdBackupS3SecretRef is absent and seam-etcd-backup-config Secret is not found in seam-system. Set either to proceed. platform-schema.md §10.",
+						em.Generation,
+					)
+					r.Recorder.Eventf(em, nil, "Warning", "S3DestinationAbsent",
+						"EtcdMaintenance %s/%s: no S3 backup destination configured", em.Namespace, em.Name)
+					return ctrl.Result{}, nil
+				}
+			} else {
+				stepParams = map[string]string{
+					"s3SecretName":      secretName,
+					"s3SecretNamespace": secretNS,
+				}
 			}
 		}
 
