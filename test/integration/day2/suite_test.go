@@ -55,9 +55,8 @@ func TestMain(m *testing.M) {
 	_ = controller.AddOperationalRunnerConfigToScheme(testScheme)
 
 	testEnv = &envtest.Environment{
-		CRDDirectoryPaths: []string{
-			filepath.Join("..", "..", "..", "config", "crd", "bases"),
-		},
+		CRDDirectoryPaths:     []string{filepath.Join("..", "..", "..", "config", "crd")},
+		ErrorIfCRDPathMissing: true,
 		BinaryAssetsDirectory: assets,
 		Scheme:                testScheme,
 	}
