@@ -253,8 +253,8 @@ func (r *TalosClusterReconciler) readOperationResult(ctx context.Context, namesp
 		// ConfigMap not yet written — job still running.
 		return false, false, ""
 	}
-	status, _ := cm.Data["status"]
-	msg, _ := cm.Data["message"]
+	status := cm.Data["status"]
+	msg := cm.Data["message"]
 	switch status {
 	case "success":
 		return true, false, msg

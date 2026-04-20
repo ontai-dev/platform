@@ -8,7 +8,7 @@ import (
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
-	"k8s.io/client-go/tools/record"
+	clientevents "k8s.io/client-go/tools/events"
 	"k8s.io/client-go/util/retry"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -51,7 +51,7 @@ type TalosClusterReconciler struct {
 	Scheme *runtime.Scheme
 
 	// Recorder is the Kubernetes event recorder for emitting Warning and Normal events.
-	Recorder record.EventRecorder
+	Recorder clientevents.EventRecorder
 
 	// RemoteConductorAvailableFn, if non-nil, replaces the real remote Conductor
 	// Deployment availability check in EnsureConductorDeploymentOnTargetCluster.
@@ -643,7 +643,7 @@ func (r *TalosClusterReconciler) checkMachineReachability(ctx context.Context, t
 			fmt.Sprintf("Control plane node(s) unreachable on port 50000 after %d attempts. Halting reconciliation.", machineApplyAttemptsHaltThreshold),
 			tc.Generation,
 		)
-		r.Recorder.Eventf(tc, "Warning", "ControlPlaneUnreachable",
+		r.Recorder.Eventf(tc, nil, "Warning", "ControlPlaneUnreachable", "ControlPlaneUnreachable",
 			"Control plane node(s) unreachable on port 50000 after %d attempts", machineApplyAttemptsHaltThreshold)
 		logger.Info("halting TalosCluster reconcile — control plane port-50000 unreachable",
 			"name", tc.Name, "threshold", machineApplyAttemptsHaltThreshold)
@@ -669,7 +669,7 @@ func (r *TalosClusterReconciler) checkMachineReachability(ctx context.Context, t
 			fmt.Sprintf("Worker node(s) unreachable on port 50000 after %d attempts. Proceeding with available workers.", machineApplyAttemptsHaltThreshold),
 			tc.Generation,
 		)
-		r.Recorder.Eventf(tc, "Warning", "PartialWorkerAvailability",
+		r.Recorder.Eventf(tc, nil, "Warning", "PartialWorkerAvailability", "PartialWorkerAvailability",
 			"Worker node(s) unreachable on port 50000 after %d attempts — proceeding with available workers",
 			machineApplyAttemptsHaltThreshold)
 	} else {

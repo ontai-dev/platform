@@ -23,7 +23,7 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
-	"k8s.io/client-go/tools/record"
+	clientevents "k8s.io/client-go/tools/events"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 
@@ -62,7 +62,7 @@ func TestEtcdMaintenanceReconcile_S3PlatformDefaultFallback(t *testing.T) {
 		WithObjects(em, platformDefault).
 		WithStatusSubresource(em).
 		Build()
-	r := &controller.EtcdMaintenanceReconciler{Client: c, Scheme: scheme, Recorder: record.NewFakeRecorder(16)}
+	r := &controller.EtcdMaintenanceReconciler{Client: c, Scheme: scheme, Recorder: clientevents.NewFakeRecorder(16)}
 
 	result, err := r.Reconcile(context.Background(), ctrl.Request{
 		NamespacedName: types.NamespacedName{Name: "backup-tier2", Namespace: "seam-tenant-test"},
@@ -135,7 +135,7 @@ func TestEtcdMaintenanceReconcile_Idempotent(t *testing.T) {
 		WithObjects(em).
 		WithStatusSubresource(em).
 		Build()
-	r := &controller.EtcdMaintenanceReconciler{Client: c, Scheme: scheme, Recorder: record.NewFakeRecorder(16)}
+	r := &controller.EtcdMaintenanceReconciler{Client: c, Scheme: scheme, Recorder: clientevents.NewFakeRecorder(16)}
 	req := ctrl.Request{
 		NamespacedName: types.NamespacedName{Name: "defrag-idem", Namespace: "seam-tenant-test"},
 	}
@@ -193,7 +193,7 @@ func TestEtcdMaintenanceReconcile_RunnerConfigClusterRefPropagated(t *testing.T)
 		WithObjects(em).
 		WithStatusSubresource(em).
 		Build()
-	r := &controller.EtcdMaintenanceReconciler{Client: c, Scheme: scheme, Recorder: record.NewFakeRecorder(16)}
+	r := &controller.EtcdMaintenanceReconciler{Client: c, Scheme: scheme, Recorder: clientevents.NewFakeRecorder(16)}
 
 	if _, err := r.Reconcile(context.Background(), ctrl.Request{
 		NamespacedName: types.NamespacedName{Name: "defrag-clusterref", Namespace: "seam-tenant-test"},

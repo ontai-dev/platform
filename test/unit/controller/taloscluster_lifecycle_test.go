@@ -26,7 +26,7 @@ import (
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
-	"k8s.io/client-go/tools/record"
+	clientevents "k8s.io/client-go/tools/events"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 
@@ -102,7 +102,7 @@ func TestTalosClusterReconcile_ImportModeCreatesRunnerConfigAndTransitionsToRead
 	r := &controller.TalosClusterReconciler{
 		Client:                c,
 		Scheme:                scheme,
-		Recorder:              record.NewFakeRecorder(32),
+		Recorder:              clientevents.NewFakeRecorder(32),
 		KubeconfigGeneratorFn: fakeKubeconfigGenerator,
 	}
 
@@ -211,7 +211,7 @@ func TestTalosClusterReconcile_ImportMode_TalosConfigAbsent(t *testing.T) {
 	r := &controller.TalosClusterReconciler{
 		Client:   c,
 		Scheme:   scheme,
-		Recorder: record.NewFakeRecorder(32),
+		Recorder: clientevents.NewFakeRecorder(32),
 		// No KubeconfigGeneratorFn — should not reach the generator because talosconfig is absent.
 	}
 
@@ -260,7 +260,7 @@ func TestTalosClusterReconcile_ManagementBootstrapJobSubmitted(t *testing.T) {
 	r := &controller.TalosClusterReconciler{
 		Client:   c,
 		Scheme:   scheme,
-		Recorder: record.NewFakeRecorder(32),
+		Recorder: clientevents.NewFakeRecorder(32),
 	}
 
 	result, err := r.Reconcile(context.Background(), ctrl.Request{
@@ -351,7 +351,7 @@ func TestTalosClusterReconcile_ManagementBootstrapComplete(t *testing.T) {
 	r := &controller.TalosClusterReconciler{
 		Client:   c,
 		Scheme:   scheme,
-		Recorder: record.NewFakeRecorder(32),
+		Recorder: clientevents.NewFakeRecorder(32),
 	}
 
 	result, err := r.Reconcile(context.Background(), ctrl.Request{
@@ -406,7 +406,7 @@ func TestTalosClusterReconcile_RunnerConfigCreatedOnFirstObservation(t *testing.
 	r := &controller.TalosClusterReconciler{
 		Client:   c,
 		Scheme:   scheme,
-		Recorder: record.NewFakeRecorder(32),
+		Recorder: clientevents.NewFakeRecorder(32),
 	}
 
 	_, err := r.Reconcile(context.Background(), ctrl.Request{
@@ -472,7 +472,7 @@ func TestTalosClusterReconcile_RunnerConfigAlreadyExistsSkipsJob(t *testing.T) {
 	r := &controller.TalosClusterReconciler{
 		Client:   c,
 		Scheme:   scheme,
-		Recorder: record.NewFakeRecorder(32),
+		Recorder: clientevents.NewFakeRecorder(32),
 	}
 
 	result, err := r.Reconcile(context.Background(), ctrl.Request{
@@ -535,7 +535,7 @@ func TestTalosClusterReconcile_ManagementClusterReadyAfterRunnerConfigPresent(t 
 	r := &controller.TalosClusterReconciler{
 		Client:   c,
 		Scheme:   scheme,
-		Recorder: record.NewFakeRecorder(32),
+		Recorder: clientevents.NewFakeRecorder(32),
 	}
 	req := ctrl.Request{
 		NamespacedName: types.NamespacedName{Name: "ccs-mgmt", Namespace: "seam-system"},
@@ -598,7 +598,7 @@ func TestTalosClusterReconcile_LineageSyncedInitialized(t *testing.T) {
 	r := &controller.TalosClusterReconciler{
 		Client:   c,
 		Scheme:   scheme,
-		Recorder: record.NewFakeRecorder(32),
+		Recorder: clientevents.NewFakeRecorder(32),
 	}
 
 	_, err := r.Reconcile(context.Background(), ctrl.Request{
@@ -653,7 +653,7 @@ func TestTalosClusterReconcile_LineageSyncedNotUpdatedOnSecondReconcile(t *testi
 	r := &controller.TalosClusterReconciler{
 		Client:   c,
 		Scheme:   scheme,
-		Recorder: record.NewFakeRecorder(32),
+		Recorder: clientevents.NewFakeRecorder(32),
 	}
 	req := ctrl.Request{
 		NamespacedName: types.NamespacedName{Name: "ccs-mgmt-lineage2", Namespace: "seam-system"},
@@ -729,7 +729,7 @@ func TestTalosClusterReconcile_StatusPatchRetryOnConflict(t *testing.T) {
 	r := &controller.TalosClusterReconciler{
 		Client:   c,
 		Scheme:   scheme,
-		Recorder: record.NewFakeRecorder(32),
+		Recorder: clientevents.NewFakeRecorder(32),
 	}
 
 	_, err := r.Reconcile(context.Background(), ctrl.Request{
@@ -782,7 +782,7 @@ func TestTalosClusterReconcile_TenantImport_CreatesLocalQueue(t *testing.T) {
 	r := &controller.TalosClusterReconciler{
 		Client:                c,
 		Scheme:                scheme,
-		Recorder:              record.NewFakeRecorder(32),
+		Recorder:              clientevents.NewFakeRecorder(32),
 		KubeconfigGeneratorFn: fakeKubeconfigGenerator,
 	}
 

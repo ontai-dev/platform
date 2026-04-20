@@ -81,7 +81,7 @@ func main() {
 	if err := (&controller.TalosClusterReconciler{
 		Client:   mgr.GetClient(),
 		Scheme:   mgr.GetScheme(),
-		Recorder: mgr.GetEventRecorderFor("taloscluster-controller"),
+		Recorder: mgr.GetEventRecorder("taloscluster-controller"),
 	}).SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "unable to create controller", "controller", "TalosCluster")
 		os.Exit(1)
@@ -92,7 +92,7 @@ func main() {
 	if err := (&controller.SeamInfrastructureClusterReconciler{
 		Client:   mgr.GetClient(),
 		Scheme:   mgr.GetScheme(),
-		Recorder: mgr.GetEventRecorderFor("seaminfrastructurecluster-controller"),
+		Recorder: mgr.GetEventRecorder("seaminfrastructurecluster-controller"),
 	}).SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "unable to create controller", "controller", "SeamInfrastructureCluster")
 		os.Exit(1)
@@ -104,7 +104,7 @@ func main() {
 	if err := (&controller.SeamInfrastructureMachineReconciler{
 		Client:   mgr.GetClient(),
 		Scheme:   mgr.GetScheme(),
-		Recorder: mgr.GetEventRecorderFor("seaminfrastructuremachine-controller"),
+		Recorder: mgr.GetEventRecorder("seaminfrastructuremachine-controller"),
 		Applier:  &controller.TalosMachineConfigApplier{},
 	}).SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "unable to create controller", "controller", "SeamInfrastructureMachine")
@@ -116,7 +116,7 @@ func main() {
 	if err := (&controller.EtcdMaintenanceReconciler{
 		Client:   mgr.GetClient(),
 		Scheme:   mgr.GetScheme(),
-		Recorder: mgr.GetEventRecorderFor("etcdmaintenance-controller"),
+		Recorder: mgr.GetEventRecorder("etcdmaintenance-controller"),
 	}).SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "unable to create controller", "controller", "EtcdMaintenance")
 		os.Exit(1)
@@ -125,7 +125,7 @@ func main() {
 	if err := (&controller.NodeMaintenanceReconciler{
 		Client:   mgr.GetClient(),
 		Scheme:   mgr.GetScheme(),
-		Recorder: mgr.GetEventRecorderFor("nodemaintenance-controller"),
+		Recorder: mgr.GetEventRecorder("nodemaintenance-controller"),
 	}).SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "unable to create controller", "controller", "NodeMaintenance")
 		os.Exit(1)
@@ -134,7 +134,7 @@ func main() {
 	if err := (&controller.PKIRotationReconciler{
 		Client:   mgr.GetClient(),
 		Scheme:   mgr.GetScheme(),
-		Recorder: mgr.GetEventRecorderFor("pkirotation-controller"),
+		Recorder: mgr.GetEventRecorder("pkirotation-controller"),
 	}).SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "unable to create controller", "controller", "PKIRotation")
 		os.Exit(1)
@@ -145,7 +145,7 @@ func main() {
 	if err := (&controller.ClusterResetReconciler{
 		Client:   mgr.GetClient(),
 		Scheme:   mgr.GetScheme(),
-		Recorder: mgr.GetEventRecorderFor("clusterreset-controller"),
+		Recorder: mgr.GetEventRecorder("clusterreset-controller"),
 	}).SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "unable to create controller", "controller", "ClusterReset")
 		os.Exit(1)
@@ -162,7 +162,7 @@ func main() {
 	if err := (&controller.UpgradePolicyReconciler{
 		Client:   mgr.GetClient(),
 		Scheme:   mgr.GetScheme(),
-		Recorder: mgr.GetEventRecorderFor("upgradepolicy-controller"),
+		Recorder: mgr.GetEventRecorder("upgradepolicy-controller"),
 	}).SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "unable to create controller", "controller", "UpgradePolicy")
 		os.Exit(1)
@@ -171,7 +171,7 @@ func main() {
 	if err := (&controller.NodeOperationReconciler{
 		Client:   mgr.GetClient(),
 		Scheme:   mgr.GetScheme(),
-		Recorder: mgr.GetEventRecorderFor("nodeoperation-controller"),
+		Recorder: mgr.GetEventRecorder("nodeoperation-controller"),
 	}).SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "unable to create controller", "controller", "NodeOperation")
 		os.Exit(1)
@@ -180,7 +180,7 @@ func main() {
 	if err := (&controller.ClusterMaintenanceReconciler{
 		Client:   mgr.GetClient(),
 		Scheme:   mgr.GetScheme(),
-		Recorder: mgr.GetEventRecorderFor("clustermaintenance-controller"),
+		Recorder: mgr.GetEventRecorder("clustermaintenance-controller"),
 	}).SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "unable to create controller", "controller", "ClusterMaintenance")
 		os.Exit(1)
@@ -189,7 +189,7 @@ func main() {
 	if err := (&controller.MaintenanceBundleReconciler{
 		Client:   mgr.GetClient(),
 		Scheme:   mgr.GetScheme(),
-		Recorder: mgr.GetEventRecorderFor("maintenancebundle-controller"),
+		Recorder: mgr.GetEventRecorder("maintenancebundle-controller"),
 	}).SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "unable to create controller", "controller", "MaintenanceBundle")
 		os.Exit(1)

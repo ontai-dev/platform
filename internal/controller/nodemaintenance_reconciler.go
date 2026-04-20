@@ -21,7 +21,7 @@ import (
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
-	"k8s.io/client-go/tools/record"
+	clientevents "k8s.io/client-go/tools/events"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
@@ -44,7 +44,7 @@ const (
 type NodeMaintenanceReconciler struct {
 	Client   client.Client
 	Scheme   *runtime.Scheme
-	Recorder record.EventRecorder
+	Recorder clientevents.EventRecorder
 }
 
 // +kubebuilder:rbac:groups=platform.ontai.dev,resources=nodemaintenances,verbs=get;list;watch;create;update;patch;delete
@@ -168,7 +168,7 @@ func (r *NodeMaintenanceReconciler) Reconcile(ctx context.Context, req ctrl.Requ
 			fmt.Sprintf("RunnerConfig %s submitted (cordon→drain→%s→uncordon).", rcName, operationCapability),
 			nm.Generation,
 		)
-		r.Recorder.Eventf(nm, "Normal", "RunnerConfigSubmitted",
+		r.Recorder.Eventf(nm, nil, "Normal", "RunnerConfigSubmitted", "RunnerConfigSubmitted",
 			"Submitted RunnerConfig %s for %s (4-step sequence)", rcName, operationCapability)
 		logger.Info("submitted NodeMaintenance RunnerConfig",
 			"name", nm.Name, "rcName", rcName, "capability", operationCapability)
@@ -187,7 +187,7 @@ func (r *NodeMaintenanceReconciler) Reconcile(ctx context.Context, req ctrl.Requ
 			fmt.Sprintf("RunnerConfig %s failed at step %q.", rcName, failedStep),
 			nm.Generation,
 		)
-		r.Recorder.Eventf(nm, "Warning", "RunnerConfigFailed",
+		r.Recorder.Eventf(nm, nil, "Warning", "RunnerConfigFailed", "RunnerConfigFailed",
 			"RunnerConfig %s failed at step %q", rcName, failedStep)
 		return ctrl.Result{}, nil
 	}
@@ -204,7 +204,7 @@ func (r *NodeMaintenanceReconciler) Reconcile(ctx context.Context, req ctrl.Requ
 		fmt.Sprintf("RunnerConfig %s completed successfully.", rcName),
 		nm.Generation,
 	)
-	r.Recorder.Eventf(nm, "Normal", "RunnerConfigComplete",
+	r.Recorder.Eventf(nm, nil, "Normal", "RunnerConfigComplete", "RunnerConfigComplete",
 		"RunnerConfig %s completed successfully", rcName)
 	logger.Info("NodeMaintenance complete", "name", nm.Name, "capability", operationCapability)
 	return ctrl.Result{}, nil

@@ -230,7 +230,7 @@ func TestSIMReconcile_AlreadyReadyIsIdempotent(t *testing.T) {
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if result.RequeueAfter != 0 || result.Requeue {
+	if result.RequeueAfter != 0 {
 		t.Errorf("ready SIM should not requeue, got %+v", result)
 	}
 	if applier.applyCalled {

@@ -23,7 +23,7 @@ import (
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
-	"k8s.io/client-go/tools/record"
+	clientevents "k8s.io/client-go/tools/events"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/log"
@@ -43,7 +43,7 @@ const (
 type ClusterMaintenanceReconciler struct {
 	Client   client.Client
 	Scheme   *runtime.Scheme
-	Recorder record.EventRecorder
+	Recorder clientevents.EventRecorder
 
 	// Now is the clock function for determining current time.
 	// Defaults to time.Now() in production. Replaceable in tests.
@@ -214,7 +214,7 @@ func (r *ClusterMaintenanceReconciler) reconcileCAPIPause(ctx context.Context, c
 			"Maintenance window opened: CAPI pause annotation removed.",
 			cm.Generation,
 		)
-		r.Recorder.Eventf(cm, "Normal", "CAPIResumed",
+		r.Recorder.Eventf(cm, nil, "Normal", "CAPIResumed", "CAPIResumed",
 			"Maintenance window opened for cluster %s — CAPI reconciliation resumed", cm.Spec.ClusterRef.Name)
 	} else if !windowActive && !isPaused {
 		// Outside window — set the pause.
@@ -231,7 +231,7 @@ func (r *ClusterMaintenanceReconciler) reconcileCAPIPause(ctx context.Context, c
 			"Outside maintenance window: cluster.x-k8s.io/paused=true set on CAPI Cluster.",
 			cm.Generation,
 		)
-		r.Recorder.Eventf(cm, "Normal", "CAPIPaused",
+		r.Recorder.Eventf(cm, nil, "Normal", "CAPIPaused", "CAPIPaused",
 			"Outside maintenance window for cluster %s — CAPI Cluster paused", cm.Spec.ClusterRef.Name)
 	} else if windowActive {
 		// Window is open and cluster is not paused — steady state.

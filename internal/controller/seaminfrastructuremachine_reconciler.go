@@ -25,7 +25,7 @@ import (
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
 	corev1 "k8s.io/api/core/v1"
-	"k8s.io/client-go/tools/record"
+	clientevents "k8s.io/client-go/tools/events"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/log"
@@ -124,7 +124,7 @@ type SeamInfrastructureMachineReconciler struct {
 	Scheme *runtime.Scheme
 
 	// Recorder is the event recorder.
-	Recorder record.EventRecorder
+	Recorder clientevents.EventRecorder
 
 	// Applier is the MachineConfigApplier used to deliver machineconfigs to nodes.
 	// Defaults to TalosMachineConfigApplier in production. Set to a mock in tests.
@@ -277,7 +277,7 @@ func (r *SeamInfrastructureMachineReconciler) Reconcile(ctx context.Context, req
 				fmt.Sprintf("Port %d unreachable after %d attempt(s).", port, sim.Status.ApplyAttempts),
 				sim.Generation,
 			)
-			r.Recorder.Eventf(sim, "Warning", "ApplyConfigurationFailed",
+			r.Recorder.Eventf(sim, nil, "Warning", "ApplyConfigurationFailed", "ApplyConfigurationFailed",
 				"ApplyConfiguration attempt %d failed for %s at %s:%d: %v",
 				sim.Status.ApplyAttempts, sim.Name, sim.Spec.Address, port, err)
 			logger.Error(err, "ApplyConfiguration failed — exponential backoff",
