@@ -109,6 +109,13 @@ type EtcdMaintenanceSpec struct {
 	// +optional
 	TargetNodes []string `json:"targetNodes,omitempty"`
 
+	// PVCFallbackEnabled instructs the reconciler to set EtcdBackupLocalFallback
+	// and proceed with RunnerConfig submission (no S3 params) when operation=backup
+	// and no S3 destination is configured. The executor writes the snapshot to a
+	// PVC mounted in the Job pod. platform-schema.md §10.
+	// +optional
+	PVCFallbackEnabled bool `json:"pvcFallbackEnabled,omitempty"`
+
 	// Schedule is a cron expression for recurring backup operations.
 	// When set with operation=backup, a recurring Job is submitted on schedule.
 	// +optional

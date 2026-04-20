@@ -66,13 +66,50 @@ func (r *HardeningProfileReconciler) Reconcile(ctx context.Context, req ctrl.Req
 		)
 	}
 
-	// HardeningProfile is a pure configuration CR — no Job submission, no
-	// further reconciliation required. Validation and lineage initialization
-	// above are the complete reconciliation path.
+	// Validate spec fields and set Valid condition.
+	// machineConfigPatches must be non-empty JSON strings.
+	// sysctlParams keys must be non-empty.
+	invalidReason := validateHardeningProfileSpec(hp.Spec)
+	if invalidReason != "" {
+		platformv1alpha1.SetCondition(
+			&hp.Status.Conditions,
+			platformv1alpha1.ConditionTypeHardeningProfileValid,
+			metav1.ConditionFalse,
+			platformv1alpha1.ReasonHardeningProfileInvalid,
+			invalidReason,
+			hp.Generation,
+		)
+	} else {
+		platformv1alpha1.SetCondition(
+			&hp.Status.Conditions,
+			platformv1alpha1.ConditionTypeHardeningProfileValid,
+			metav1.ConditionTrue,
+			platformv1alpha1.ReasonHardeningProfileValid,
+			"HardeningProfile spec is valid.",
+			hp.Generation,
+		)
+	}
+
 	logger.V(1).Info("HardeningProfile reconciled",
 		"name", hp.Name, "namespace", hp.Namespace,
 		"patchCount", len(hp.Spec.MachineConfigPatches))
 	return ctrl.Result{}, nil
+}
+
+// validateHardeningProfileSpec returns a non-empty reason string if the spec is
+// invalid, or an empty string if it passes all checks.
+func validateHardeningProfileSpec(spec platformv1alpha1.HardeningProfileSpec) string {
+	for i, patch := range spec.MachineConfigPatches {
+		if len(patch) == 0 {
+			return fmt.Sprintf("machineConfigPatches[%d] is empty", i)
+		}
+	}
+	for k := range spec.SysctlParams {
+		if len(k) == 0 {
+			return "sysctlParams contains an empty key"
+		}
+	}
+	return ""
 }
 
 // SetupWithManager registers HardeningProfileReconciler with the manager.

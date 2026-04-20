@@ -15,7 +15,11 @@ test-unit:
 	go test ./test/unit/...
 
 test-integration:
-	@echo "no integration tests"
+	@if [ -z "$$KUBEBUILDER_ASSETS" ]; then \
+		echo "KUBEBUILDER_ASSETS not set; skipping integration tests"; \
+	else \
+		KUBEBUILDER_ASSETS=$$KUBEBUILDER_ASSETS go test ./test/integration/... -v -timeout 5m; \
+	fi
 
 test-all: test-unit test-integration
 
