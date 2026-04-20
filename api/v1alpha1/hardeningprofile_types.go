@@ -6,6 +6,19 @@ import (
 	"github.com/ontai-dev/seam-core/pkg/lineage"
 )
 
+// Condition type and reason constants for HardeningProfile.
+const (
+	// ConditionTypeHardeningProfileValid indicates the HardeningProfile spec is
+	// structurally valid and ready to be referenced by NodeMaintenance.
+	ConditionTypeHardeningProfileValid = "Valid"
+
+	// ReasonHardeningProfileValid is set when all spec fields pass validation.
+	ReasonHardeningProfileValid = "ProfileValid"
+
+	// ReasonHardeningProfileInvalid is set when a spec field fails validation.
+	ReasonHardeningProfileInvalid = "ProfileInvalid"
+)
+
 // HardeningProfileSpec defines the desired state of HardeningProfile.
 type HardeningProfileSpec struct {
 	// MachineConfigPatches is the list of Talos machine config patches to apply
@@ -39,7 +52,7 @@ type HardeningProfileStatus struct {
 	ObservedGeneration int64 `json:"observedGeneration,omitempty"`
 
 	// Conditions is the list of status conditions for this HardeningProfile.
-	// Condition types: LineageSynced.
+	// Condition types: Valid, LineageSynced.
 	// +optional
 	// +listType=map
 	// +listMapKey=type

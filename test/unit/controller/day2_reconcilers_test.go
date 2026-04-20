@@ -321,6 +321,92 @@ func TestClusterResetReconcile_ApprovedDirectPath(t *testing.T) {
 	}
 }
 
+// TestClusterResetReconcile_RunnerConfigComplete verifies that when the
+// cluster-reset RunnerConfig reaches the Completed phase, ClusterReset
+// transitions to Ready=True/ResetComplete.
+func TestClusterResetReconcile_RunnerConfigComplete(t *testing.T) {
+	scheme := buildDay2Scheme(t)
+	crst := &platformv1alpha1.ClusterReset{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: "reset-done", Namespace: "ont-system", Generation: 1,
+			Annotations: map[string]string{platformv1alpha1.ResetApprovalAnnotation: "true"},
+		},
+		Spec: platformv1alpha1.ClusterResetSpec{
+			ClusterRef: platformv1alpha1.LocalObjectRef{Name: "ccs-mgmt"},
+		},
+		Status: platformv1alpha1.ClusterResetStatus{
+			JobName: "reset-done",
+		},
+	}
+	rc := &controller.OperationalRunnerConfig{
+		ObjectMeta: metav1.ObjectMeta{Name: "reset-done", Namespace: "ont-system"},
+		Status:     controller.OperationalRunnerConfigStatus{Phase: "Completed"},
+	}
+	c := fake.NewClientBuilder().WithScheme(scheme).WithObjects(crst, rc).WithStatusSubresource(crst).Build()
+	r := &controller.ClusterResetReconciler{Client: c, Scheme: scheme, Recorder: fakeRecorder()}
+
+	if _, err := r.Reconcile(context.Background(), ctrl.Request{
+		NamespacedName: types.NamespacedName{Name: "reset-done", Namespace: "ont-system"},
+	}); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	got := &platformv1alpha1.ClusterReset{}
+	if err := c.Get(context.Background(), types.NamespacedName{
+		Name: "reset-done", Namespace: "ont-system",
+	}, got); err != nil {
+		t.Fatalf("get: %v", err)
+	}
+	cond := platformv1alpha1.FindCondition(got.Status.Conditions, platformv1alpha1.ConditionTypeResetReady)
+	if cond == nil || cond.Status != metav1.ConditionTrue {
+		t.Error("expected Ready=True after RunnerConfig completion")
+	}
+}
+
+// TestClusterResetReconcile_RunnerConfigFailed verifies that when the
+// cluster-reset RunnerConfig fails, ClusterReset transitions to Degraded=True.
+func TestClusterResetReconcile_RunnerConfigFailed(t *testing.T) {
+	scheme := buildDay2Scheme(t)
+	crst := &platformv1alpha1.ClusterReset{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: "reset-fail", Namespace: "ont-system", Generation: 1,
+			Annotations: map[string]string{platformv1alpha1.ResetApprovalAnnotation: "true"},
+		},
+		Spec: platformv1alpha1.ClusterResetSpec{
+			ClusterRef: platformv1alpha1.LocalObjectRef{Name: "ccs-mgmt"},
+		},
+		Status: platformv1alpha1.ClusterResetStatus{
+			JobName: "reset-fail",
+		},
+	}
+	rc := &controller.OperationalRunnerConfig{
+		ObjectMeta: metav1.ObjectMeta{Name: "reset-fail", Namespace: "ont-system"},
+		Status: controller.OperationalRunnerConfigStatus{
+			Phase:      "Failed",
+			FailedStep: "cluster-reset",
+		},
+	}
+	c := fake.NewClientBuilder().WithScheme(scheme).WithObjects(crst, rc).WithStatusSubresource(crst).Build()
+	r := &controller.ClusterResetReconciler{Client: c, Scheme: scheme, Recorder: fakeRecorder()}
+
+	if _, err := r.Reconcile(context.Background(), ctrl.Request{
+		NamespacedName: types.NamespacedName{Name: "reset-fail", Namespace: "ont-system"},
+	}); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	got := &platformv1alpha1.ClusterReset{}
+	if err := c.Get(context.Background(), types.NamespacedName{
+		Name: "reset-fail", Namespace: "ont-system",
+	}, got); err != nil {
+		t.Fatalf("get: %v", err)
+	}
+	cond := platformv1alpha1.FindCondition(got.Status.Conditions, platformv1alpha1.ConditionTypeResetDegraded)
+	if cond == nil || cond.Status != metav1.ConditionTrue {
+		t.Error("expected Degraded=True after RunnerConfig failure")
+	}
+}
+
 // --- HardeningProfile tests ---
 
 // TestHardeningProfileReconcile_LineageSynced verifies that HardeningProfile
@@ -360,6 +446,113 @@ func TestHardeningProfileReconcile_LineageSynced(t *testing.T) {
 	}
 	if cond.Status != metav1.ConditionFalse {
 		t.Errorf("LineageSynced status = %s, want False", cond.Status)
+	}
+}
+
+// TestHardeningProfileReconcile_ValidConditionSet verifies that a profile with
+// valid machineConfigPatches and sysctlParams gets Valid=True.
+func TestHardeningProfileReconcile_ValidConditionSet(t *testing.T) {
+	scheme := buildDay2Scheme(t)
+	hp := &platformv1alpha1.HardeningProfile{
+		ObjectMeta: metav1.ObjectMeta{Name: "cis-l2", Namespace: "seam-tenant-dev", Generation: 1},
+		Spec: platformv1alpha1.HardeningProfileSpec{
+			Description:          "CIS Level 2",
+			MachineConfigPatches: []string{`{"op":"replace","path":"/machine/sysctls/net.ipv4.conf.all.accept_redirects","value":"0"}`},
+			SysctlParams:         map[string]string{"net.ipv4.ip_forward": "1"},
+		},
+	}
+	c := fake.NewClientBuilder().WithScheme(scheme).WithObjects(hp).WithStatusSubresource(hp).Build()
+	r := &controller.HardeningProfileReconciler{Client: c, Scheme: scheme}
+
+	if _, err := r.Reconcile(context.Background(), ctrl.Request{
+		NamespacedName: types.NamespacedName{Name: "cis-l2", Namespace: "seam-tenant-dev"},
+	}); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	got := &platformv1alpha1.HardeningProfile{}
+	if err := c.Get(context.Background(), types.NamespacedName{
+		Name: "cis-l2", Namespace: "seam-tenant-dev",
+	}, got); err != nil {
+		t.Fatalf("get: %v", err)
+	}
+	cond := platformv1alpha1.FindCondition(got.Status.Conditions, platformv1alpha1.ConditionTypeHardeningProfileValid)
+	if cond == nil {
+		t.Fatal("Valid condition not set")
+	}
+	if cond.Status != metav1.ConditionTrue {
+		t.Errorf("Valid status = %s, want True for valid spec", cond.Status)
+	}
+	if cond.Reason != platformv1alpha1.ReasonHardeningProfileValid {
+		t.Errorf("Valid reason = %s, want %s", cond.Reason, platformv1alpha1.ReasonHardeningProfileValid)
+	}
+}
+
+// TestHardeningProfileReconcile_InvalidEmptyPatch verifies that an empty patch
+// string in machineConfigPatches causes Valid=False/ProfileInvalid.
+func TestHardeningProfileReconcile_InvalidEmptyPatch(t *testing.T) {
+	scheme := buildDay2Scheme(t)
+	hp := &platformv1alpha1.HardeningProfile{
+		ObjectMeta: metav1.ObjectMeta{Name: "invalid-1", Namespace: "seam-tenant-dev", Generation: 1},
+		Spec: platformv1alpha1.HardeningProfileSpec{
+			MachineConfigPatches: []string{""}, // empty patch — invalid
+		},
+	}
+	c := fake.NewClientBuilder().WithScheme(scheme).WithObjects(hp).WithStatusSubresource(hp).Build()
+	r := &controller.HardeningProfileReconciler{Client: c, Scheme: scheme}
+
+	if _, err := r.Reconcile(context.Background(), ctrl.Request{
+		NamespacedName: types.NamespacedName{Name: "invalid-1", Namespace: "seam-tenant-dev"},
+	}); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	got := &platformv1alpha1.HardeningProfile{}
+	if err := c.Get(context.Background(), types.NamespacedName{
+		Name: "invalid-1", Namespace: "seam-tenant-dev",
+	}, got); err != nil {
+		t.Fatalf("get: %v", err)
+	}
+	cond := platformv1alpha1.FindCondition(got.Status.Conditions, platformv1alpha1.ConditionTypeHardeningProfileValid)
+	if cond == nil {
+		t.Fatal("Valid condition not set")
+	}
+	if cond.Status != metav1.ConditionFalse {
+		t.Errorf("Valid status = %s, want False for empty patch", cond.Status)
+	}
+	if cond.Reason != platformv1alpha1.ReasonHardeningProfileInvalid {
+		t.Errorf("Valid reason = %s, want %s", cond.Reason, platformv1alpha1.ReasonHardeningProfileInvalid)
+	}
+}
+
+// TestHardeningProfileReconcile_EmptySpecIsValid verifies that a profile with
+// no patches or sysctlParams is valid (zero-field config is allowed).
+func TestHardeningProfileReconcile_EmptySpecIsValid(t *testing.T) {
+	scheme := buildDay2Scheme(t)
+	hp := &platformv1alpha1.HardeningProfile{
+		ObjectMeta: metav1.ObjectMeta{Name: "empty-profile", Namespace: "seam-tenant-dev", Generation: 1},
+		Spec: platformv1alpha1.HardeningProfileSpec{
+			Description: "empty but valid",
+		},
+	}
+	c := fake.NewClientBuilder().WithScheme(scheme).WithObjects(hp).WithStatusSubresource(hp).Build()
+	r := &controller.HardeningProfileReconciler{Client: c, Scheme: scheme}
+
+	if _, err := r.Reconcile(context.Background(), ctrl.Request{
+		NamespacedName: types.NamespacedName{Name: "empty-profile", Namespace: "seam-tenant-dev"},
+	}); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	got := &platformv1alpha1.HardeningProfile{}
+	if err := c.Get(context.Background(), types.NamespacedName{
+		Name: "empty-profile", Namespace: "seam-tenant-dev",
+	}, got); err != nil {
+		t.Fatalf("get: %v", err)
+	}
+	cond := platformv1alpha1.FindCondition(got.Status.Conditions, platformv1alpha1.ConditionTypeHardeningProfileValid)
+	if cond == nil || cond.Status != metav1.ConditionTrue {
+		t.Error("expected Valid=True for empty spec (zero-field profile is valid)")
 	}
 }
 
@@ -413,6 +606,169 @@ func TestPKIRotationReconcile_SubmitsRunnerConfig(t *testing.T) {
 				t.Error("step.HaltOnFailure should be true")
 			}
 		}
+	}
+}
+
+// TestPKIRotationReconcile_InProgress verifies that when a RunnerConfig exists
+// but has not yet reached a terminal phase, the reconciler requeues and sets
+// Ready=False/JobSubmitted (in-progress state).
+func TestPKIRotationReconcile_InProgress(t *testing.T) {
+	scheme := buildDay2Scheme(t)
+	rcName := "pkir-2"
+	pkir := &platformv1alpha1.PKIRotation{
+		ObjectMeta: metav1.ObjectMeta{Name: rcName, Namespace: "seam-tenant-test", Generation: 1},
+		Spec: platformv1alpha1.PKIRotationSpec{
+			ClusterRef: platformv1alpha1.LocalObjectRef{Name: "test-cluster"},
+		},
+		Status: platformv1alpha1.PKIRotationStatus{
+			JobName: rcName,
+			Conditions: []metav1.Condition{
+				{
+					Type:               platformv1alpha1.ConditionTypePKIRotationReady,
+					Status:             metav1.ConditionFalse,
+					Reason:             platformv1alpha1.ReasonPKIJobSubmitted,
+					Message:            "submitted",
+					LastTransitionTime: metav1.Now(),
+				},
+			},
+		},
+	}
+	// RunnerConfig exists with no terminal phase (in-progress).
+	rc := &controller.OperationalRunnerConfig{
+		ObjectMeta: metav1.ObjectMeta{Name: rcName, Namespace: "seam-tenant-test"},
+		Status:     controller.OperationalRunnerConfigStatus{Phase: "Running"},
+	}
+	c := fake.NewClientBuilder().WithScheme(scheme).WithObjects(pkir, rc).WithStatusSubresource(pkir).Build()
+	r := &controller.PKIRotationReconciler{Client: c, Scheme: scheme, Recorder: fakeRecorder()}
+
+	result, err := r.Reconcile(context.Background(), ctrl.Request{
+		NamespacedName: types.NamespacedName{Name: rcName, Namespace: "seam-tenant-test"},
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	// Still running — must requeue.
+	if result.RequeueAfter == 0 {
+		t.Error("expected requeue while PKI rotation is in progress")
+	}
+
+	got := &platformv1alpha1.PKIRotation{}
+	if err := c.Get(context.Background(), types.NamespacedName{
+		Name: rcName, Namespace: "seam-tenant-test",
+	}, got); err != nil {
+		t.Fatalf("get: %v", err)
+	}
+	cond := platformv1alpha1.FindCondition(got.Status.Conditions, platformv1alpha1.ConditionTypePKIRotationReady)
+	if cond == nil {
+		t.Fatal("Ready condition not set")
+	}
+	if cond.Status != metav1.ConditionFalse {
+		t.Errorf("Ready status = %s, want False while in progress", cond.Status)
+	}
+}
+
+// TestPKIRotationReconcile_Complete verifies that when a RunnerConfig reaches
+// the Completed terminal phase, PKIRotation transitions to Ready=True/JobComplete.
+func TestPKIRotationReconcile_Complete(t *testing.T) {
+	scheme := buildDay2Scheme(t)
+	rcName := "pkir-3"
+	pkir := &platformv1alpha1.PKIRotation{
+		ObjectMeta: metav1.ObjectMeta{Name: rcName, Namespace: "seam-tenant-test", Generation: 1},
+		Spec: platformv1alpha1.PKIRotationSpec{
+			ClusterRef: platformv1alpha1.LocalObjectRef{Name: "test-cluster"},
+		},
+		Status: platformv1alpha1.PKIRotationStatus{
+			JobName: rcName,
+			Conditions: []metav1.Condition{
+				{
+					Type:   platformv1alpha1.ConditionTypePKIRotationReady,
+					Status: metav1.ConditionFalse,
+					Reason: platformv1alpha1.ReasonPKIJobSubmitted,
+				},
+			},
+		},
+	}
+	rc := &controller.OperationalRunnerConfig{
+		ObjectMeta: metav1.ObjectMeta{Name: rcName, Namespace: "seam-tenant-test"},
+		Status:     controller.OperationalRunnerConfigStatus{Phase: "Completed"},
+	}
+	c := fake.NewClientBuilder().WithScheme(scheme).WithObjects(pkir, rc).WithStatusSubresource(pkir).Build()
+	r := &controller.PKIRotationReconciler{Client: c, Scheme: scheme, Recorder: fakeRecorder()}
+
+	result, err := r.Reconcile(context.Background(), ctrl.Request{
+		NamespacedName: types.NamespacedName{Name: rcName, Namespace: "seam-tenant-test"},
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if result.RequeueAfter != 0 {
+		t.Errorf("expected no requeue after completion, got %v", result.RequeueAfter)
+	}
+
+	got := &platformv1alpha1.PKIRotation{}
+	if err := c.Get(context.Background(), types.NamespacedName{
+		Name: rcName, Namespace: "seam-tenant-test",
+	}, got); err != nil {
+		t.Fatalf("get: %v", err)
+	}
+	cond := platformv1alpha1.FindCondition(got.Status.Conditions, platformv1alpha1.ConditionTypePKIRotationReady)
+	if cond == nil || cond.Status != metav1.ConditionTrue {
+		t.Error("expected Ready=True after RunnerConfig completion")
+	}
+	if cond.Reason != platformv1alpha1.ReasonPKIJobComplete {
+		t.Errorf("Ready reason = %s, want %s", cond.Reason, platformv1alpha1.ReasonPKIJobComplete)
+	}
+}
+
+// TestPKIRotationReconcile_Failed verifies that when a RunnerConfig fails,
+// PKIRotation transitions to Degraded=True/JobFailed.
+func TestPKIRotationReconcile_Failed(t *testing.T) {
+	scheme := buildDay2Scheme(t)
+	rcName := "pkir-4"
+	pkir := &platformv1alpha1.PKIRotation{
+		ObjectMeta: metav1.ObjectMeta{Name: rcName, Namespace: "seam-tenant-test", Generation: 1},
+		Spec: platformv1alpha1.PKIRotationSpec{
+			ClusterRef: platformv1alpha1.LocalObjectRef{Name: "test-cluster"},
+		},
+		Status: platformv1alpha1.PKIRotationStatus{
+			JobName: rcName,
+			Conditions: []metav1.Condition{
+				{
+					Type:   platformv1alpha1.ConditionTypePKIRotationReady,
+					Status: metav1.ConditionFalse,
+					Reason: platformv1alpha1.ReasonPKIJobSubmitted,
+				},
+			},
+		},
+	}
+	rc := &controller.OperationalRunnerConfig{
+		ObjectMeta: metav1.ObjectMeta{Name: rcName, Namespace: "seam-tenant-test"},
+		Status: controller.OperationalRunnerConfigStatus{
+			Phase:      "Failed",
+			FailedStep: "pki-rotate",
+		},
+	}
+	c := fake.NewClientBuilder().WithScheme(scheme).WithObjects(pkir, rc).WithStatusSubresource(pkir).Build()
+	r := &controller.PKIRotationReconciler{Client: c, Scheme: scheme, Recorder: fakeRecorder()}
+
+	if _, err := r.Reconcile(context.Background(), ctrl.Request{
+		NamespacedName: types.NamespacedName{Name: rcName, Namespace: "seam-tenant-test"},
+	}); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	got := &platformv1alpha1.PKIRotation{}
+	if err := c.Get(context.Background(), types.NamespacedName{
+		Name: rcName, Namespace: "seam-tenant-test",
+	}, got); err != nil {
+		t.Fatalf("get: %v", err)
+	}
+	cond := platformv1alpha1.FindCondition(got.Status.Conditions, platformv1alpha1.ConditionTypePKIRotationDegraded)
+	if cond == nil || cond.Status != metav1.ConditionTrue {
+		t.Error("expected Degraded=True after RunnerConfig failure")
+	}
+	if cond.Reason != platformv1alpha1.ReasonPKIJobFailed {
+		t.Errorf("Degraded reason = %s, want %s", cond.Reason, platformv1alpha1.ReasonPKIJobFailed)
 	}
 }
 
@@ -485,6 +841,125 @@ func TestNodeMaintenanceReconcile_SubmitsFourStepRunnerConfig(t *testing.T) {
 	}
 }
 
+// TestNodeMaintenanceReconcile_HardeningApplyStep verifies that operation=hardening-apply
+// produces a 4-step RunnerConfig with hardening-apply as the operate step.
+func TestNodeMaintenanceReconcile_HardeningApplyStep(t *testing.T) {
+	scheme := buildDay2Scheme(t)
+	nm := &platformv1alpha1.NodeMaintenance{
+		ObjectMeta: metav1.ObjectMeta{Name: "harden-1", Namespace: "seam-tenant-test", Generation: 1},
+		Spec: platformv1alpha1.NodeMaintenanceSpec{
+			ClusterRef:  platformv1alpha1.LocalObjectRef{Name: "test-cluster"},
+			Operation:   platformv1alpha1.NodeMaintenanceOperationHardeningApply,
+			TargetNodes: []string{"worker-1"},
+		},
+	}
+	c := fake.NewClientBuilder().WithScheme(scheme).WithObjects(nm).WithStatusSubresource(nm).Build()
+	r := &controller.NodeMaintenanceReconciler{Client: c, Scheme: scheme, Recorder: fakeRecorder()}
+
+	if _, err := r.Reconcile(context.Background(), ctrl.Request{
+		NamespacedName: types.NamespacedName{Name: "harden-1", Namespace: "seam-tenant-test"},
+	}); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	rcList := &controller.OperationalRunnerConfigList{}
+	if err := c.List(context.Background(), rcList); err != nil {
+		t.Fatalf("list RunnerConfigs: %v", err)
+	}
+	if len(rcList.Items) != 1 {
+		t.Fatalf("expected 1 RunnerConfig, got %d", len(rcList.Items))
+	}
+	rc := rcList.Items[0]
+	if len(rc.Spec.Steps) != 4 {
+		t.Fatalf("expected 4 steps, got %d", len(rc.Spec.Steps))
+	}
+	if rc.Spec.Steps[2].Capability != "hardening-apply" {
+		t.Errorf("operate step.Capability = %q, want hardening-apply", rc.Spec.Steps[2].Capability)
+	}
+}
+
+// TestNodeMaintenanceReconcile_CredentialRotateStep verifies that
+// operation=credential-rotate produces a 4-step RunnerConfig with
+// credential-rotate as the operate step.
+func TestNodeMaintenanceReconcile_CredentialRotateStep(t *testing.T) {
+	scheme := buildDay2Scheme(t)
+	nm := &platformv1alpha1.NodeMaintenance{
+		ObjectMeta: metav1.ObjectMeta{Name: "cred-rotate-1", Namespace: "seam-tenant-test", Generation: 1},
+		Spec: platformv1alpha1.NodeMaintenanceSpec{
+			ClusterRef:  platformv1alpha1.LocalObjectRef{Name: "test-cluster"},
+			Operation:   platformv1alpha1.NodeMaintenanceOperationCredentialRotate,
+			TargetNodes: []string{"control-1"},
+		},
+	}
+	c := fake.NewClientBuilder().WithScheme(scheme).WithObjects(nm).WithStatusSubresource(nm).Build()
+	r := &controller.NodeMaintenanceReconciler{Client: c, Scheme: scheme, Recorder: fakeRecorder()}
+
+	if _, err := r.Reconcile(context.Background(), ctrl.Request{
+		NamespacedName: types.NamespacedName{Name: "cred-rotate-1", Namespace: "seam-tenant-test"},
+	}); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	rcList := &controller.OperationalRunnerConfigList{}
+	if err := c.List(context.Background(), rcList); err != nil {
+		t.Fatalf("list RunnerConfigs: %v", err)
+	}
+	if len(rcList.Items) != 1 {
+		t.Fatalf("expected 1 RunnerConfig, got %d", len(rcList.Items))
+	}
+	rc := rcList.Items[0]
+	if len(rc.Spec.Steps) != 4 {
+		t.Fatalf("expected 4 steps, got %d", len(rc.Spec.Steps))
+	}
+	if rc.Spec.Steps[2].Capability != "credential-rotate" {
+		t.Errorf("operate step.Capability = %q, want credential-rotate", rc.Spec.Steps[2].Capability)
+	}
+}
+
+// TestNodeMaintenanceReconcile_IdempotentAfterReady verifies that a second
+// reconcile on a NodeMaintenance with Ready=True is a no-op.
+func TestNodeMaintenanceReconcile_IdempotentAfterReady(t *testing.T) {
+	scheme := buildDay2Scheme(t)
+	nm := &platformv1alpha1.NodeMaintenance{
+		ObjectMeta: metav1.ObjectMeta{Name: "nm-done", Namespace: "seam-tenant-test", Generation: 1},
+		Spec: platformv1alpha1.NodeMaintenanceSpec{
+			ClusterRef: platformv1alpha1.LocalObjectRef{Name: "test-cluster"},
+			Operation:  platformv1alpha1.NodeMaintenanceOperationPatch,
+		},
+		Status: platformv1alpha1.NodeMaintenanceStatus{
+			Conditions: []metav1.Condition{
+				{
+					Type:               platformv1alpha1.ConditionTypeNodeMaintenanceReady,
+					Status:             metav1.ConditionTrue,
+					Reason:             platformv1alpha1.ReasonNodeJobComplete,
+					Message:            "complete",
+					LastTransitionTime: metav1.Now(),
+				},
+			},
+		},
+	}
+	c := fake.NewClientBuilder().WithScheme(scheme).WithObjects(nm).WithStatusSubresource(nm).Build()
+	r := &controller.NodeMaintenanceReconciler{Client: c, Scheme: scheme, Recorder: fakeRecorder()}
+
+	result, err := r.Reconcile(context.Background(), ctrl.Request{
+		NamespacedName: types.NamespacedName{Name: "nm-done", Namespace: "seam-tenant-test"},
+	})
+	if err != nil {
+		t.Fatalf("unexpected error on idempotent reconcile: %v", err)
+	}
+	if result.RequeueAfter != 0 {
+		t.Errorf("expected no requeue on Ready=True NodeMaintenance, got %v", result.RequeueAfter)
+	}
+
+	rcList := &controller.OperationalRunnerConfigList{}
+	if err := c.List(context.Background(), rcList); err != nil {
+		t.Fatalf("list RunnerConfigs: %v", err)
+	}
+	if len(rcList.Items) != 0 {
+		t.Errorf("expected no RunnerConfig on idempotent reconcile, got %d", len(rcList.Items))
+	}
+}
+
 // --- ClusterMaintenance tests ---
 
 // TestClusterMaintenanceReconcile_NoBlockOutsideWindows verifies that when
@@ -530,6 +1005,51 @@ func TestClusterMaintenanceReconcile_NoBlockOutsideWindows(t *testing.T) {
 	lineageCond := platformv1alpha1.FindCondition(got.Status.Conditions, platformv1alpha1.ConditionTypeLineageSynced)
 	if lineageCond == nil {
 		t.Fatal("LineageSynced condition not set")
+	}
+}
+
+// TestClusterMaintenanceReconcile_BlockOutsideWindowsNoWindow verifies that when
+// blockOutsideWindows=true and no maintenance window is active, the reconciler
+// sets Paused=True/ConductorJobGateBlocked on the non-CAPI path.
+func TestClusterMaintenanceReconcile_BlockOutsideWindowsNoWindow(t *testing.T) {
+	scheme := buildDay2Scheme(t)
+	cm := &platformv1alpha1.ClusterMaintenance{
+		ObjectMeta: metav1.ObjectMeta{Name: "maint-gated", Namespace: "seam-tenant-dev", Generation: 1},
+		Spec: platformv1alpha1.ClusterMaintenanceSpec{
+			ClusterRef:          platformv1alpha1.LocalObjectRef{Name: "ccs-dev"},
+			BlockOutsideWindows: true,
+			// No Windows defined — findActiveWindow returns nil → no active window.
+		},
+	}
+	// No TalosCluster in fake client → maintenanceCAPIEnabled returns false.
+	c := fake.NewClientBuilder().WithScheme(scheme).WithObjects(cm).WithStatusSubresource(cm).Build()
+	r := &controller.ClusterMaintenanceReconciler{Client: c, Scheme: scheme, Recorder: fakeRecorder()}
+
+	result, err := r.Reconcile(context.Background(), ctrl.Request{
+		NamespacedName: types.NamespacedName{Name: "maint-gated", Namespace: "seam-tenant-dev"},
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if result.RequeueAfter == 0 {
+		t.Error("ClusterMaintenance should requeue for periodic window re-evaluation")
+	}
+
+	got := &platformv1alpha1.ClusterMaintenance{}
+	if err := c.Get(context.Background(), types.NamespacedName{
+		Name: "maint-gated", Namespace: "seam-tenant-dev",
+	}, got); err != nil {
+		t.Fatalf("get: %v", err)
+	}
+	cond := platformv1alpha1.FindCondition(got.Status.Conditions, platformv1alpha1.ConditionTypeClusterMaintenancePaused)
+	if cond == nil {
+		t.Fatal("Paused condition not set")
+	}
+	if cond.Status != metav1.ConditionTrue {
+		t.Errorf("Paused status = %s, want True when outside window and blockOutsideWindows=true", cond.Status)
+	}
+	if cond.Reason != platformv1alpha1.ReasonConductorJobGateBlocked {
+		t.Errorf("Paused reason = %s, want %s", cond.Reason, platformv1alpha1.ReasonConductorJobGateBlocked)
 	}
 }
 
@@ -625,6 +1145,148 @@ func TestUpgradePolicyReconcile_StackUpgradeTwoSteps(t *testing.T) {
 	}
 }
 
+// TestUpgradePolicyReconcile_KubeUpgradeRunnerConfig verifies that a
+// kube-upgrade type UpgradePolicy on a non-CAPI cluster submits a single-step
+// kube-upgrade RunnerConfig.
+func TestUpgradePolicyReconcile_KubeUpgradeRunnerConfig(t *testing.T) {
+	scheme := buildDay2Scheme(t)
+	up := &platformv1alpha1.UpgradePolicy{
+		ObjectMeta: metav1.ObjectMeta{Name: "kube-up-1", Namespace: "ont-system", Generation: 1},
+		Spec: platformv1alpha1.UpgradePolicySpec{
+			ClusterRef:              platformv1alpha1.LocalObjectRef{Name: "ccs-mgmt"},
+			UpgradeType:             platformv1alpha1.UpgradeTypeKubernetes,
+			TargetKubernetesVersion: "v1.31.0",
+			RollingStrategy:         platformv1alpha1.RollingStrategySequential,
+		},
+	}
+	c := fake.NewClientBuilder().WithScheme(scheme).WithObjects(up).WithStatusSubresource(up).Build()
+	r := &controller.UpgradePolicyReconciler{Client: c, Scheme: scheme, Recorder: fakeRecorder()}
+
+	result, err := r.Reconcile(context.Background(), ctrl.Request{
+		NamespacedName: types.NamespacedName{Name: "kube-up-1", Namespace: "ont-system"},
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if result.RequeueAfter == 0 {
+		t.Error("expected requeue after RunnerConfig submission")
+	}
+
+	rcList := &controller.OperationalRunnerConfigList{}
+	if err := c.List(context.Background(), rcList); err != nil {
+		t.Fatalf("list RunnerConfigs: %v", err)
+	}
+	if len(rcList.Items) != 1 {
+		t.Errorf("expected 1 RunnerConfig, got %d", len(rcList.Items))
+	}
+	if len(rcList.Items) > 0 && len(rcList.Items[0].Spec.Steps) > 0 {
+		if rcList.Items[0].Spec.Steps[0].Capability != "kube-upgrade" {
+			t.Errorf("step[0].Capability = %q, want kube-upgrade", rcList.Items[0].Spec.Steps[0].Capability)
+		}
+	}
+}
+
+// TestUpgradePolicyReconcile_CAPIPath verifies that when the owning TalosCluster
+// has capi.enabled=true, the reconciler sets CAPIDelegated=True instead of
+// submitting a RunnerConfig.
+func TestUpgradePolicyReconcile_CAPIPath(t *testing.T) {
+	scheme := buildDay2Scheme(t)
+	tc := &platformv1alpha1.TalosCluster{
+		ObjectMeta: metav1.ObjectMeta{Name: "ccs-target", Namespace: "ont-system"},
+		Spec: platformv1alpha1.TalosClusterSpec{
+			CAPI: &platformv1alpha1.CAPIConfig{Enabled: true},
+		},
+	}
+	up := &platformv1alpha1.UpgradePolicy{
+		ObjectMeta: metav1.ObjectMeta{Name: "capi-up-1", Namespace: "ont-system", Generation: 1},
+		Spec: platformv1alpha1.UpgradePolicySpec{
+			ClusterRef:  platformv1alpha1.LocalObjectRef{Name: "ccs-target"},
+			UpgradeType: platformv1alpha1.UpgradeTypeTalos,
+			// Empty TargetTalosVersion — no TCP patch attempted, but CAPIDelegated is still set.
+			RollingStrategy: platformv1alpha1.RollingStrategySequential,
+		},
+	}
+	c := fake.NewClientBuilder().WithScheme(scheme).WithObjects(tc, up).WithStatusSubresource(up).Build()
+	r := &controller.UpgradePolicyReconciler{Client: c, Scheme: scheme, Recorder: fakeRecorder()}
+
+	result, err := r.Reconcile(context.Background(), ctrl.Request{
+		NamespacedName: types.NamespacedName{Name: "capi-up-1", Namespace: "ont-system"},
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	// CAPI path does not requeue — delegate and done.
+	if result.RequeueAfter != 0 {
+		t.Errorf("CAPI path should not requeue, got %v", result.RequeueAfter)
+	}
+
+	// No RunnerConfig should be created on the CAPI path.
+	rcList := &controller.OperationalRunnerConfigList{}
+	if err := c.List(context.Background(), rcList); err != nil {
+		t.Fatalf("list RunnerConfigs: %v", err)
+	}
+	if len(rcList.Items) != 0 {
+		t.Errorf("expected 0 RunnerConfigs on CAPI path, got %d", len(rcList.Items))
+	}
+
+	got := &platformv1alpha1.UpgradePolicy{}
+	if err := c.Get(context.Background(), types.NamespacedName{
+		Name: "capi-up-1", Namespace: "ont-system",
+	}, got); err != nil {
+		t.Fatalf("get: %v", err)
+	}
+	cond := platformv1alpha1.FindCondition(got.Status.Conditions, platformv1alpha1.ConditionTypeUpgradePolicyCAPIDelegated)
+	if cond == nil || cond.Status != metav1.ConditionTrue {
+		t.Error("expected CAPIDelegated=True on CAPI upgrade path")
+	}
+}
+
+// TestUpgradePolicyReconcile_Failed verifies that when the RunnerConfig fails,
+// UpgradePolicy transitions to Degraded=True.
+func TestUpgradePolicyReconcile_Failed(t *testing.T) {
+	scheme := buildDay2Scheme(t)
+	rcName := "upgrade-fail-1"
+	up := &platformv1alpha1.UpgradePolicy{
+		ObjectMeta: metav1.ObjectMeta{Name: rcName, Namespace: "ont-system", Generation: 1},
+		Spec: platformv1alpha1.UpgradePolicySpec{
+			ClusterRef:         platformv1alpha1.LocalObjectRef{Name: "ccs-mgmt"},
+			UpgradeType:        platformv1alpha1.UpgradeTypeTalos,
+			TargetTalosVersion: "v1.9.0",
+			RollingStrategy:    platformv1alpha1.RollingStrategySequential,
+		},
+		Status: platformv1alpha1.UpgradePolicyStatus{
+			JobName: rcName,
+		},
+	}
+	rc := &controller.OperationalRunnerConfig{
+		ObjectMeta: metav1.ObjectMeta{Name: rcName, Namespace: "ont-system"},
+		Status: controller.OperationalRunnerConfigStatus{
+			Phase:      "Failed",
+			FailedStep: "talos-upgrade",
+		},
+	}
+	c := fake.NewClientBuilder().WithScheme(scheme).WithObjects(up, rc).WithStatusSubresource(up).Build()
+	r := &controller.UpgradePolicyReconciler{Client: c, Scheme: scheme, Recorder: fakeRecorder()}
+
+	if _, err := r.Reconcile(context.Background(), ctrl.Request{
+		NamespacedName: types.NamespacedName{Name: rcName, Namespace: "ont-system"},
+	}); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	got := &platformv1alpha1.UpgradePolicy{}
+	if err := c.Get(context.Background(), types.NamespacedName{Name: rcName, Namespace: "ont-system"}, got); err != nil {
+		t.Fatalf("get: %v", err)
+	}
+	cond := platformv1alpha1.FindCondition(got.Status.Conditions, platformv1alpha1.ConditionTypeUpgradePolicyDegraded)
+	if cond == nil || cond.Status != metav1.ConditionTrue {
+		t.Error("expected Degraded=True after RunnerConfig failure")
+	}
+	if cond.Reason != platformv1alpha1.ReasonUpgradeJobFailed {
+		t.Errorf("Degraded reason = %s, want %s", cond.Reason, platformv1alpha1.ReasonUpgradeJobFailed)
+	}
+}
+
 // --- NodeOperation tests ---
 
 // TestNodeOperationReconcile_DirectScaleUp verifies that for a non-CAPI cluster,
@@ -667,6 +1329,85 @@ func TestNodeOperationReconcile_DirectScaleUp(t *testing.T) {
 		if len(rc.Spec.Steps) > 0 && rc.Spec.Steps[0].Capability != "node-scale-up" {
 			t.Errorf("step[0].Capability = %q, want node-scale-up", rc.Spec.Steps[0].Capability)
 		}
+	}
+}
+
+// TestNodeOperationReconcile_RebootRunnerConfig verifies that operation=reboot
+// submits a single-step node-reboot RunnerConfig.
+func TestNodeOperationReconcile_RebootRunnerConfig(t *testing.T) {
+	scheme := buildDay2Scheme(t)
+	nop := &platformv1alpha1.NodeOperation{
+		ObjectMeta: metav1.ObjectMeta{Name: "reboot-1", Namespace: "ont-system", Generation: 1},
+		Spec: platformv1alpha1.NodeOperationSpec{
+			ClusterRef: platformv1alpha1.LocalObjectRef{Name: "ccs-mgmt"},
+			Operation:  platformv1alpha1.NodeOperationTypeReboot,
+		},
+	}
+	c := fake.NewClientBuilder().WithScheme(scheme).WithObjects(nop).WithStatusSubresource(nop).Build()
+	r := &controller.NodeOperationReconciler{Client: c, Scheme: scheme, Recorder: fakeRecorder()}
+
+	result, err := r.Reconcile(context.Background(), ctrl.Request{
+		NamespacedName: types.NamespacedName{Name: "reboot-1", Namespace: "ont-system"},
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if result.RequeueAfter == 0 {
+		t.Error("expected requeue after RunnerConfig submission for reboot")
+	}
+
+	rcList := &controller.OperationalRunnerConfigList{}
+	if err := c.List(context.Background(), rcList); err != nil {
+		t.Fatalf("list RunnerConfigs: %v", err)
+	}
+	if len(rcList.Items) != 1 {
+		t.Errorf("expected 1 node-reboot RunnerConfig, got %d", len(rcList.Items))
+	}
+	if len(rcList.Items) > 0 && len(rcList.Items[0].Spec.Steps) > 0 {
+		if rcList.Items[0].Spec.Steps[0].Capability != "node-reboot" {
+			t.Errorf("step[0].Capability = %q, want node-reboot", rcList.Items[0].Spec.Steps[0].Capability)
+		}
+	}
+}
+
+// TestNodeOperationReconcile_Failed verifies that when the RunnerConfig fails,
+// NodeOperation transitions to Degraded=True.
+func TestNodeOperationReconcile_Failed(t *testing.T) {
+	scheme := buildDay2Scheme(t)
+	rcName := "nop-fail-1"
+	nop := &platformv1alpha1.NodeOperation{
+		ObjectMeta: metav1.ObjectMeta{Name: rcName, Namespace: "ont-system", Generation: 1},
+		Spec: platformv1alpha1.NodeOperationSpec{
+			ClusterRef: platformv1alpha1.LocalObjectRef{Name: "ccs-mgmt"},
+			Operation:  platformv1alpha1.NodeOperationTypeScaleUp,
+		},
+		Status: platformv1alpha1.NodeOperationStatus{
+			JobName: rcName,
+		},
+	}
+	rc := &controller.OperationalRunnerConfig{
+		ObjectMeta: metav1.ObjectMeta{Name: rcName, Namespace: "ont-system"},
+		Status: controller.OperationalRunnerConfigStatus{
+			Phase:      "Failed",
+			FailedStep: "node-scale-up",
+		},
+	}
+	c := fake.NewClientBuilder().WithScheme(scheme).WithObjects(nop, rc).WithStatusSubresource(nop).Build()
+	r := &controller.NodeOperationReconciler{Client: c, Scheme: scheme, Recorder: fakeRecorder()}
+
+	if _, err := r.Reconcile(context.Background(), ctrl.Request{
+		NamespacedName: types.NamespacedName{Name: rcName, Namespace: "ont-system"},
+	}); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	got := &platformv1alpha1.NodeOperation{}
+	if err := c.Get(context.Background(), types.NamespacedName{Name: rcName, Namespace: "ont-system"}, got); err != nil {
+		t.Fatalf("get: %v", err)
+	}
+	cond := platformv1alpha1.FindCondition(got.Status.Conditions, platformv1alpha1.ConditionTypeNodeOperationDegraded)
+	if cond == nil || cond.Status != metav1.ConditionTrue {
+		t.Error("expected Degraded=True after RunnerConfig failure")
 	}
 }
 
