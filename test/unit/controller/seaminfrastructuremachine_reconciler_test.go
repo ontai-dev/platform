@@ -420,3 +420,280 @@ func TestSIMReconcile_ApplyFailureBackoff_SecondAttempt(t *testing.T) {
 		t.Errorf("ApplyAttempts = %d, want 2", got.Status.ApplyAttempts)
 	}
 }
+
+// TestSIMReconcile_BootstrapDataSecretNameAbsent verifies that when the owning
+// CAPI Machine exists but bootstrap.dataSecretName is not yet set (CABPT has not
+// rendered the machineconfig), the reconciler sets BootstrapDataNotReady condition,
+// does NOT call ApplyConfiguration, and requeues.
+func TestSIMReconcile_BootstrapDataSecretNameAbsent(t *testing.T) {
+	scheme := buildSIMScheme(t)
+	ns := "seam-tenant-ccs-dev"
+	machineName := "ccs-dev-cp1"
+
+	sim := buildSIM("cp1", ns)
+	sim.OwnerReferences = []metav1.OwnerReference{
+		{APIVersion: "cluster.x-k8s.io/v1beta1", Kind: "Machine", Name: machineName, UID: "m1"},
+	}
+
+	// CAPI Machine exists but bootstrap.dataSecretName is absent.
+	capiMachine := &unstructured.Unstructured{}
+	capiMachine.SetGroupVersionKind(schema.GroupVersionKind{
+		Group: "cluster.x-k8s.io", Version: "v1beta1", Kind: "Machine",
+	})
+	capiMachine.SetName(machineName)
+	capiMachine.SetNamespace(ns)
+
+	applier := &mockApplier{}
+	c := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithObjects(sim).
+		WithStatusSubresource(sim).
+		Build()
+	if err := c.Create(context.Background(), capiMachine); err != nil {
+		t.Fatalf("create CAPI Machine: %v", err)
+	}
+
+	r := &controller.SeamInfrastructureMachineReconciler{
+		Client:  c,
+		Scheme:  scheme,
+		Applier: applier,
+	}
+
+	result, err := r.Reconcile(context.Background(), ctrl.Request{
+		NamespacedName: types.NamespacedName{Name: "cp1", Namespace: ns},
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if result.RequeueAfter == 0 {
+		t.Error("expected requeue when bootstrap dataSecretName absent")
+	}
+	if applier.applyCalled {
+		t.Error("ApplyConfiguration must not be called before bootstrap dataSecretName is set")
+	}
+
+	got := &infrav1alpha1.SeamInfrastructureMachine{}
+	if err := c.Get(context.Background(), types.NamespacedName{Name: "cp1", Namespace: ns}, got); err != nil {
+		t.Fatalf("get SIM: %v", err)
+	}
+	cond := infrav1alpha1.FindCondition(got.Status.Conditions, infrav1alpha1.ConditionTypeMachineReady)
+	if cond == nil {
+		t.Fatal("MachineReady condition not set")
+	}
+	if cond.Reason != infrav1alpha1.ReasonBootstrapDataNotReady {
+		t.Errorf("reason = %q, want BootstrapDataNotReady", cond.Reason)
+	}
+}
+
+// TestSIMReconcile_ApplyCalledWithCorrectAddressPortConfig verifies that when
+// bootstrap data is present, ApplyConfiguration receives the address and port from
+// spec and the machineconfig bytes from the bootstrap Secret's "value" key.
+func TestSIMReconcile_ApplyCalledWithCorrectAddressPortConfig(t *testing.T) {
+	scheme := buildSIMScheme(t)
+	ns := "seam-tenant-ccs-dev"
+
+	sim, capiMachine, secret := buildSIMWithCAPIBootstrap(t, ns)
+	// outOfMaintenance=false so reconcile returns after apply, before ready.
+	applier := &mockApplier{outOfMaintenance: false}
+
+	c := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithObjects(sim, secret).
+		WithStatusSubresource(sim).
+		Build()
+	if err := c.Create(context.Background(), capiMachine); err != nil {
+		t.Fatalf("create CAPI Machine: %v", err)
+	}
+
+	var capturedAddress string
+	var capturedPort int32
+	var capturedConfig []byte
+	capturingApplier := &captureApplier{
+		inner: applier,
+		onApply: func(addr string, port int32, cfg []byte) {
+			capturedAddress = addr
+			capturedPort = port
+			capturedConfig = cfg
+		},
+	}
+
+	r := &controller.SeamInfrastructureMachineReconciler{
+		Client:   c,
+		Scheme:   scheme,
+		Applier:  capturingApplier,
+		Recorder: fakeRecorder(),
+	}
+
+	if _, err := r.Reconcile(context.Background(), ctrl.Request{
+		NamespacedName: types.NamespacedName{Name: sim.Name, Namespace: ns},
+	}); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	if capturedAddress != "10.20.0.11" {
+		t.Errorf("ApplyConfiguration address = %q, want 10.20.0.11", capturedAddress)
+	}
+	if capturedPort != 50000 {
+		t.Errorf("ApplyConfiguration port = %d, want 50000", capturedPort)
+	}
+	if string(capturedConfig) != "machineconfig-yaml-data" {
+		t.Errorf("ApplyConfiguration config = %q, want machineconfig-yaml-data", capturedConfig)
+	}
+}
+
+// TestSIMReconcile_MachineConfigApplied_SkipsApply verifies that when
+// status.machineConfigApplied=true (config already delivered), a second reconcile
+// does NOT call ApplyConfiguration and proceeds directly to the maintenance poll step.
+func TestSIMReconcile_MachineConfigApplied_SkipsApply(t *testing.T) {
+	scheme := buildSIMScheme(t)
+	ns := "seam-tenant-ccs-dev"
+
+	sim, capiMachine, secret := buildSIMWithCAPIBootstrap(t, ns)
+	// Pre-mark config as applied — skip steps 2-4 per platform-design.md §3.1.
+	sim.Status.MachineConfigApplied = true
+
+	applier := &mockApplier{outOfMaintenance: false}
+	c := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithObjects(sim, secret).
+		WithStatusSubresource(sim).
+		Build()
+	if err := c.Create(context.Background(), capiMachine); err != nil {
+		t.Fatalf("create CAPI Machine: %v", err)
+	}
+
+	r := &controller.SeamInfrastructureMachineReconciler{
+		Client:  c,
+		Scheme:  scheme,
+		Applier: applier,
+	}
+
+	result, err := r.Reconcile(context.Background(), ctrl.Request{
+		NamespacedName: types.NamespacedName{Name: sim.Name, Namespace: ns},
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if applier.applyCalled {
+		t.Error("ApplyConfiguration must not be called when machineConfigApplied=true")
+	}
+	// Still in maintenance → requeue expected.
+	if result.RequeueAfter == 0 {
+		t.Error("expected requeue while node is still in maintenance mode")
+	}
+}
+
+// TestSIMReconcile_ReadyAfterOutOfMaintenance verifies that when the node exits
+// maintenance mode, the reconciler sets status.ready=true, writes the providerID,
+// and sets MachineReady=True. platform-design.md §3.1 Steps 5 and 6.
+func TestSIMReconcile_ReadyAfterOutOfMaintenance(t *testing.T) {
+	scheme := buildSIMScheme(t)
+	ns := "seam-tenant-ccs-dev"
+
+	sim, capiMachine, secret := buildSIMWithCAPIBootstrap(t, ns)
+	sim.Status.MachineConfigApplied = true
+	// Node has exited maintenance mode.
+	applier := &mockApplier{outOfMaintenance: true}
+
+	c := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithObjects(sim, secret).
+		WithStatusSubresource(sim).
+		Build()
+	if err := c.Create(context.Background(), capiMachine); err != nil {
+		t.Fatalf("create CAPI Machine: %v", err)
+	}
+
+	r := &controller.SeamInfrastructureMachineReconciler{
+		Client:  c,
+		Scheme:  scheme,
+		Applier: applier,
+	}
+
+	result, err := r.Reconcile(context.Background(), ctrl.Request{
+		NamespacedName: types.NamespacedName{Name: sim.Name, Namespace: ns},
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	// No requeue after ready.
+	if result.RequeueAfter != 0 {
+		t.Errorf("expected no requeue after ready, got %v", result.RequeueAfter)
+	}
+
+	got := &infrav1alpha1.SeamInfrastructureMachine{}
+	if err := c.Get(context.Background(), types.NamespacedName{Name: sim.Name, Namespace: ns}, got); err != nil {
+		t.Fatalf("get SIM: %v", err)
+	}
+	if !got.Status.Ready {
+		t.Error("status.ready must be true after node exits maintenance mode")
+	}
+	wantProviderID := "talos://ccs-dev/10.20.0.11"
+	if got.Status.ProviderID != wantProviderID {
+		t.Errorf("providerID = %q, want %q", got.Status.ProviderID, wantProviderID)
+	}
+	cond := infrav1alpha1.FindCondition(got.Status.Conditions, infrav1alpha1.ConditionTypeMachineReady)
+	if cond == nil {
+		t.Fatal("MachineReady condition not set")
+	}
+	if cond.Status != metav1.ConditionTrue {
+		t.Errorf("MachineReady = %s, want True", cond.Status)
+	}
+	if cond.Reason != infrav1alpha1.ReasonMachineReady {
+		t.Errorf("reason = %q, want MachineReady", cond.Reason)
+	}
+}
+
+// TestSIMReconcile_IsOutOfMaintenanceError verifies that an error from
+// IsOutOfMaintenance propagates as a reconcile error (returned to controller-runtime
+// for retrying with backoff), not as a status condition.
+func TestSIMReconcile_IsOutOfMaintenanceError(t *testing.T) {
+	scheme := buildSIMScheme(t)
+	ns := "seam-tenant-ccs-dev"
+
+	sim, capiMachine, secret := buildSIMWithCAPIBootstrap(t, ns)
+	sim.Status.MachineConfigApplied = true
+	applier := &mockApplier{outOfMaintenanceErr: errors.New("talos api unavailable")}
+
+	c := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithObjects(sim, secret).
+		WithStatusSubresource(sim).
+		Build()
+	if err := c.Create(context.Background(), capiMachine); err != nil {
+		t.Fatalf("create CAPI Machine: %v", err)
+	}
+
+	r := &controller.SeamInfrastructureMachineReconciler{
+		Client:  c,
+		Scheme:  scheme,
+		Applier: applier,
+	}
+
+	_, err := r.Reconcile(context.Background(), ctrl.Request{
+		NamespacedName: types.NamespacedName{Name: sim.Name, Namespace: ns},
+	})
+	if err == nil {
+		t.Error("expected non-nil error when IsOutOfMaintenance returns error")
+	}
+}
+
+// captureApplier wraps a MachineConfigApplier and captures the arguments passed to
+// ApplyConfiguration for assertion in tests.
+type captureApplier struct {
+	inner   controller.MachineConfigApplier
+	onApply func(address string, port int32, configData []byte)
+}
+
+var _ controller.MachineConfigApplier = (*captureApplier)(nil)
+
+func (c *captureApplier) ApplyConfiguration(ctx context.Context, address string, port int32, configData []byte) error {
+	if c.onApply != nil {
+		c.onApply(address, port, configData)
+	}
+	return c.inner.ApplyConfiguration(ctx, address, port, configData)
+}
+
+func (c *captureApplier) IsOutOfMaintenance(ctx context.Context, address string) (bool, error) {
+	return c.inner.IsOutOfMaintenance(ctx, address)
+}
