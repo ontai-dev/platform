@@ -115,8 +115,8 @@ func readOperationalResult(ctx context.Context, c client.Client, namespace, jobN
 	if err := c.Get(ctx, types.NamespacedName{Name: cmName, Namespace: namespace}, cm); err != nil {
 		return false, false, ""
 	}
-	status, _ := cm.Data["status"]
-	msg, _ := cm.Data["message"]
+	status := cm.Data["status"]
+	msg := cm.Data["message"]
 	switch status {
 	case "success":
 		return true, false, msg

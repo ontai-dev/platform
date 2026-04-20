@@ -48,13 +48,6 @@ func buildDay2Scheme(t *testing.T) *runtime.Scheme {
 	return s
 }
 
-// listRunnerConfigs returns all OperationalRunnerConfig objects in the fake client.
-func listRunnerConfigs(t *testing.T, c interface {
-	List(context.Context, *controller.OperationalRunnerConfigList, ...interface{}) error
-}, scheme *runtime.Scheme) []controller.OperationalRunnerConfig {
-	t.Helper()
-	return nil // unused helper — inline List calls used instead for clarity
-}
 
 // --- EtcdMaintenance tests ---
 
