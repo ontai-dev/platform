@@ -41,14 +41,17 @@ func TestConductorAgentDeployment_RoleStamp(t *testing.T) {
 		t.Errorf("Deployment namespace = %q, want %q", dep.Namespace, "ont-system")
 	}
 
-	// Annotations must carry cluster-ref and role for downward API injection.
-	if dep.Annotations["platform.ontai.dev/cluster-ref"] != "test-cluster" {
-		t.Errorf("annotation cluster-ref = %q, want %q",
-			dep.Annotations["platform.ontai.dev/cluster-ref"], "test-cluster")
+	// Pod template annotations must carry cluster-ref and role for downward API injection.
+	// fieldRef metadata.annotations resolves from the pod's own annotations, not the
+	// Deployment's ObjectMeta annotations.
+	podAnnotations := dep.Spec.Template.ObjectMeta.Annotations
+	if podAnnotations["platform.ontai.dev/cluster-ref"] != "test-cluster" {
+		t.Errorf("pod annotation cluster-ref = %q, want %q",
+			podAnnotations["platform.ontai.dev/cluster-ref"], "test-cluster")
 	}
-	if dep.Annotations["platform.ontai.dev/role"] != "tenant" {
-		t.Errorf("annotation role = %q, want %q",
-			dep.Annotations["platform.ontai.dev/role"], "tenant")
+	if podAnnotations["platform.ontai.dev/role"] != "tenant" {
+		t.Errorf("pod annotation role = %q, want %q",
+			podAnnotations["platform.ontai.dev/role"], "tenant")
 	}
 
 	containers := dep.Spec.Template.Spec.Containers

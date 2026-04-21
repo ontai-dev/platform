@@ -821,8 +821,10 @@ func (r *TalosClusterReconciler) EnsureConductorDeploymentOnTargetCluster(
 
 // BuildConductorAgentDeployment builds the Conductor agent Deployment spec for a
 // tenant cluster. CLUSTER_REF and CONDUCTOR_ROLE are injected via downward API
-// fieldRef from Deployment annotations so the pod reads its own identity without
-// hard-coding values. conductor-schema.md §15. platform-schema.md §12.
+// fieldRef from pod template annotations so the pod reads its own identity without
+// hard-coding values. Annotations must be on the pod template, not the Deployment
+// metadata: fieldRef metadata.annotations resolves from the pod's own annotations.
+// conductor-schema.md §15. platform-schema.md §12.
 func BuildConductorAgentDeployment(clusterName string) *appsv1.Deployment {
 	replicas := int32(1)
 	return &appsv1.Deployment{
@@ -832,10 +834,6 @@ func BuildConductorAgentDeployment(clusterName string) *appsv1.Deployment {
 			Labels: map[string]string{
 				"runner.ontai.dev/component": "conductor",
 				"runner.ontai.dev/cluster":   clusterName,
-			},
-			Annotations: map[string]string{
-				"platform.ontai.dev/cluster-ref": clusterName,
-				"platform.ontai.dev/role":        "tenant",
 			},
 		},
 		Spec: appsv1.DeploymentSpec{
@@ -850,6 +848,10 @@ func BuildConductorAgentDeployment(clusterName string) *appsv1.Deployment {
 					Labels: map[string]string{
 						"runner.ontai.dev/component": "conductor",
 						"runner.ontai.dev/cluster":   clusterName,
+					},
+					Annotations: map[string]string{
+						"platform.ontai.dev/cluster-ref": clusterName,
+						"platform.ontai.dev/role":        "tenant",
 					},
 				},
 				Spec: corev1.PodSpec{
