@@ -64,13 +64,14 @@ func buildImportTalosCluster(name, namespace string) *platformv1alpha1.TalosClus
 }
 
 // buildFakeTalosconfigSecret returns a Secret mimicking the talosconfig Secret
-// that the import path reads from seam-system. Content is a minimal valid YAML
-// placeholder — the talos goclient is bypassed via KubeconfigGeneratorFn in tests.
+// that the import path reads from seam-tenant-{cluster}. Content is a minimal
+// valid YAML placeholder -- the talos goclient is bypassed via KubeconfigGeneratorFn.
+// Governor ruling 2026-04-21: talosconfig Secret lives in seam-tenant-{clusterName}.
 func buildFakeTalosconfigSecret(clusterName string) *corev1.Secret {
 	return &corev1.Secret{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      "seam-mc-" + clusterName + "-talosconfig",
-			Namespace: "seam-system",
+			Namespace: "seam-tenant-" + clusterName,
 		},
 		Data: map[string][]byte{
 			"talosconfig": []byte("context: " + clusterName + "\ncontexts:\n  " + clusterName + ":\n    endpoints: []\n"),
@@ -181,11 +182,12 @@ func TestTalosClusterReconcile_ImportModeCreatesRunnerConfigAndTransitionsToRead
 		t.Errorf("Bootstrapped reason = %q, want %q", bootstrapCond.Reason, platformv1alpha1.ReasonImportComplete)
 	}
 
-	// Kubeconfig Secret must exist in seam-system.
+	// Kubeconfig Secret must exist in seam-tenant-{cluster}.
+	// Governor ruling 2026-04-21: kubeconfig Secret lives in seam-tenant-{clusterName}.
 	kubeconfigSecret := &corev1.Secret{}
 	if err := c.Get(context.Background(), types.NamespacedName{
 		Name:      "seam-mc-ccs-mgmt-kubeconfig",
-		Namespace: "seam-system",
+		Namespace: "seam-tenant-ccs-mgmt",
 	}, kubeconfigSecret); err != nil {
 		t.Fatalf("kubeconfig Secret not created: %v", err)
 	}

@@ -28,9 +28,6 @@ import (
 )
 
 const (
-	// importSecretsNamespace is the namespace where import-path Secrets are stored.
-	importSecretsNamespace = "seam-system"
-
 	// talosconfigSecretKey is the data key under which the raw talosconfig YAML is
 	// stored in the seam-mc-{cluster}-talosconfig Secret.
 	talosconfigSecretKey = "talosconfig"
@@ -43,6 +40,13 @@ const (
 	// cluster they belong to.
 	importClusterLabel = "platform.ontai.dev/cluster"
 )
+
+// importSecretsNamespace returns the namespace where import-path Secrets
+// (talosconfig, kubeconfig) are stored for a given cluster.
+// Governor ruling 2026-04-21: seam-tenant-{clusterName} holds these Secrets.
+func importSecretsNamespace(clusterName string) string {
+	return "seam-tenant-" + clusterName
+}
 
 // talosconfigSecretName returns the name of the talosconfig Secret for a cluster.
 // platform-schema.md §9.
@@ -57,9 +61,9 @@ func kubeconfigSecretName(clusterName string) string {
 }
 
 // ensureKubeconfigSecret generates a kubeconfig Secret for the management cluster
-// import path. It reads the talosconfig Secret from seam-system, uses the talos
-// goclient to request a kubeconfig from the cluster, and stores the result as a
-// Secret in seam-system.
+// import path. It reads the talosconfig Secret from seam-tenant-{cluster}, uses the
+// talos goclient to request a kubeconfig from the cluster, and stores the result as
+// a Secret in seam-tenant-{cluster}. Governor ruling 2026-04-21.
 //
 // Returns (ctrl.Result{}, nil) when the kubeconfig Secret is already present
 // (idempotent) or has been successfully written.
@@ -74,19 +78,20 @@ func kubeconfigSecretName(clusterName string) string {
 // CP-INV-001 extension: talos goclient use authorized by Governor directive 2026-04-10.
 func (r *TalosClusterReconciler) ensureKubeconfigSecret(ctx context.Context, tc *platformv1alpha1.TalosCluster) (ctrl.Result, error) {
 	kubeconfigName := kubeconfigSecretName(tc.Name)
+	secretsNS := importSecretsNamespace(tc.Name)
 
 	// Idempotency guard: if kubeconfig Secret already exists, nothing to do.
 	existing := &corev1.Secret{}
 	err := r.Client.Get(ctx, types.NamespacedName{
 		Name:      kubeconfigName,
-		Namespace: importSecretsNamespace,
+		Namespace: secretsNS,
 	}, existing)
 	if err == nil {
 		return ctrl.Result{}, nil
 	}
 	if !apierrors.IsNotFound(err) {
 		return ctrl.Result{}, fmt.Errorf("ensureKubeconfigSecret: check kubeconfig secret %s/%s: %w",
-			importSecretsNamespace, kubeconfigName, err)
+			secretsNS, kubeconfigName, err)
 	}
 
 	// Read talosconfig Secret.
@@ -94,7 +99,7 @@ func (r *TalosClusterReconciler) ensureKubeconfigSecret(ctx context.Context, tc 
 	talosconfigSecret := &corev1.Secret{}
 	if err := r.Client.Get(ctx, types.NamespacedName{
 		Name:      talosconfigName,
-		Namespace: importSecretsNamespace,
+		Namespace: secretsNS,
 	}, talosconfigSecret); err != nil {
 		if apierrors.IsNotFound(err) {
 			// Talosconfig not yet present. Set condition and requeue.
@@ -103,19 +108,19 @@ func (r *TalosClusterReconciler) ensureKubeconfigSecret(ctx context.Context, tc 
 				platformv1alpha1.ConditionTypeKubeconfigUnavailable,
 				metav1.ConditionTrue,
 				platformv1alpha1.ReasonTalosConfigSecretAbsent,
-				fmt.Sprintf("Waiting for talosconfig Secret %s/%s — create it before kubeconfig generation can proceed.", importSecretsNamespace, talosconfigName),
+				fmt.Sprintf("Waiting for talosconfig Secret %s/%s -- create it before kubeconfig generation can proceed.", secretsNS, talosconfigName),
 				tc.Generation,
 			)
 			return ctrl.Result{RequeueAfter: bootstrapPollInterval}, nil
 		}
 		return ctrl.Result{}, fmt.Errorf("ensureKubeconfigSecret: get talosconfig secret %s/%s: %w",
-			importSecretsNamespace, talosconfigName, err)
+			secretsNS, talosconfigName, err)
 	}
 
 	talosconfigBytes, ok := talosconfigSecret.Data[talosconfigSecretKey]
 	if !ok || len(talosconfigBytes) == 0 {
 		return ctrl.Result{}, fmt.Errorf("ensureKubeconfigSecret: talosconfig secret %s/%s missing %q key or empty",
-			importSecretsNamespace, talosconfigName, talosconfigSecretKey)
+			secretsNS, talosconfigName, talosconfigSecretKey)
 	}
 
 	// Generate kubeconfig.
@@ -151,11 +156,11 @@ func (r *TalosClusterReconciler) ensureKubeconfigSecret(ctx context.Context, tc 
 		}
 	}
 
-	// Store kubeconfig as a Secret in seam-system.
+	// Store kubeconfig Secret in seam-tenant-{cluster}.
 	secret := &corev1.Secret{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      kubeconfigName,
-			Namespace: importSecretsNamespace,
+			Namespace: secretsNS,
 			Labels: map[string]string{
 				importClusterLabel: tc.Name,
 			},
@@ -166,7 +171,7 @@ func (r *TalosClusterReconciler) ensureKubeconfigSecret(ctx context.Context, tc 
 	}
 	if err := r.Client.Create(ctx, secret); err != nil {
 		return ctrl.Result{}, fmt.Errorf("ensureKubeconfigSecret: create kubeconfig secret %s/%s: %w",
-			importSecretsNamespace, kubeconfigName, err)
+			secretsNS, kubeconfigName, err)
 	}
 
 	// Clear KubeconfigUnavailable if it was previously set.
@@ -175,7 +180,7 @@ func (r *TalosClusterReconciler) ensureKubeconfigSecret(ctx context.Context, tc 
 		platformv1alpha1.ConditionTypeKubeconfigUnavailable,
 		metav1.ConditionFalse,
 		"KubeconfigGenerated",
-		fmt.Sprintf("Kubeconfig Secret %s/%s generated successfully.", importSecretsNamespace, kubeconfigName),
+		fmt.Sprintf("Kubeconfig Secret %s/%s generated successfully.", secretsNS, kubeconfigName),
 		tc.Generation,
 	)
 
@@ -187,7 +192,7 @@ func (r *TalosClusterReconciler) ensureKubeconfigSecret(ctx context.Context, tc 
 // Operators look for this name when routing target cluster API access. WS5.
 const tenantKubeconfigSecretName = "target-cluster-kubeconfig"
 
-// ensureTenantKubeconfigCopy copies the kubeconfig Secret from seam-system into the
+// ensureTenantKubeconfigCopy copies the kubeconfig Secret from seam-tenant-{clusterName} into the
 // seam-tenant-{clusterName} namespace as "target-cluster-kubeconfig". This makes the
 // kubeconfig available alongside other tenant-scoped resources for operators that look
 // in seam-tenant-* namespaces. Only called for role=tenant clusters on the direct path.
@@ -207,15 +212,16 @@ func (r *TalosClusterReconciler) ensureTenantKubeconfigCopy(ctx context.Context,
 			tenantNS, tenantKubeconfigSecretName, err)
 	}
 
-	// Read the kubeconfig from seam-system.
+	// Read the kubeconfig from seam-tenant-{cluster}.
 	sourceName := kubeconfigSecretName(tc.Name)
 	source := &corev1.Secret{}
+	secretsNS := importSecretsNamespace(tc.Name)
 	if err := r.Client.Get(ctx, types.NamespacedName{
 		Name:      sourceName,
-		Namespace: importSecretsNamespace,
+		Namespace: secretsNS,
 	}, source); err != nil {
 		return fmt.Errorf("ensureTenantKubeconfigCopy: read source kubeconfig %s/%s: %w",
-			importSecretsNamespace, sourceName, err)
+			secretsNS, sourceName, err)
 	}
 
 	// Write the copy to seam-tenant-{clusterName}.
