@@ -965,6 +965,7 @@ func (r *TalosClusterReconciler) handleTalosClusterDeletion(
 			}
 		}
 
+		tenantSecretNS := importSecretsNamespace(tc.Name)
 		for _, secretName := range []string{
 			"seam-mc-" + tc.Name + "-kubeconfig",
 			"seam-mc-" + tc.Name + "-talosconfig",
@@ -972,7 +973,7 @@ func (r *TalosClusterReconciler) handleTalosClusterDeletion(
 			secret := &corev1.Secret{}
 			err := r.Client.Get(ctx, types.NamespacedName{
 				Name:      secretName,
-				Namespace: "seam-system",
+				Namespace: tenantSecretNS,
 			}, secret)
 			if err != nil && !apierrors.IsNotFound(err) {
 				return ctrl.Result{}, fmt.Errorf("handleTalosClusterDeletion: get Secret %s: %w", secretName, err)
