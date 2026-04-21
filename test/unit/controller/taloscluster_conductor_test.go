@@ -27,9 +27,10 @@ import (
 	"github.com/ontai-dev/platform/internal/controller"
 )
 
-// TestConductorAgentDeployment_RoleStamp verifies that conductorAgentDeployment
-// builds a Deployment with CONDUCTOR_ROLE=tenant as a first-class spec field.
-// conductor-schema.md §15: the role field is in the container spec, never in metadata.
+// TestConductorAgentDeployment_RoleStamp verifies that BuildConductorAgentDeployment
+// stamps CONDUCTOR_ROLE and CLUSTER_REF as downward API fieldRefs sourced from
+// Deployment annotations, and that the annotations are set correctly.
+// conductor-schema.md §15. platform-schema.md §12.
 func TestConductorAgentDeployment_RoleStamp(t *testing.T) {
 	dep := controller.BuildConductorAgentDeployment("test-cluster")
 
@@ -40,20 +41,42 @@ func TestConductorAgentDeployment_RoleStamp(t *testing.T) {
 		t.Errorf("Deployment namespace = %q, want %q", dep.Namespace, "ont-system")
 	}
 
+	// Annotations must carry cluster-ref and role for downward API injection.
+	if dep.Annotations["platform.ontai.dev/cluster-ref"] != "test-cluster" {
+		t.Errorf("annotation cluster-ref = %q, want %q",
+			dep.Annotations["platform.ontai.dev/cluster-ref"], "test-cluster")
+	}
+	if dep.Annotations["platform.ontai.dev/role"] != "tenant" {
+		t.Errorf("annotation role = %q, want %q",
+			dep.Annotations["platform.ontai.dev/role"], "tenant")
+	}
+
 	containers := dep.Spec.Template.Spec.Containers
 	if len(containers) == 0 {
 		t.Fatal("no containers in Deployment spec")
 	}
 
-	var roleValue string
+	var roleFieldPath, clusterRefFieldPath string
 	for _, env := range containers[0].Env {
-		if env.Name == "CONDUCTOR_ROLE" {
-			roleValue = env.Value
-			break
+		if env.ValueFrom == nil || env.ValueFrom.FieldRef == nil {
+			continue
+		}
+		switch env.Name {
+		case "CONDUCTOR_ROLE":
+			roleFieldPath = env.ValueFrom.FieldRef.FieldPath
+		case "CLUSTER_REF":
+			clusterRefFieldPath = env.ValueFrom.FieldRef.FieldPath
 		}
 	}
-	if roleValue != "tenant" {
-		t.Errorf("CONDUCTOR_ROLE = %q, want %q", roleValue, "tenant")
+
+	wantRoleField := "metadata.annotations['platform.ontai.dev/role']"
+	if roleFieldPath != wantRoleField {
+		t.Errorf("CONDUCTOR_ROLE fieldPath = %q, want %q", roleFieldPath, wantRoleField)
+	}
+
+	wantClusterRefField := "metadata.annotations['platform.ontai.dev/cluster-ref']"
+	if clusterRefFieldPath != wantClusterRefField {
+		t.Errorf("CLUSTER_REF fieldPath = %q, want %q", clusterRefFieldPath, wantClusterRefField)
 	}
 }
 

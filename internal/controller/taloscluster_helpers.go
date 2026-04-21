@@ -820,9 +820,9 @@ func (r *TalosClusterReconciler) EnsureConductorDeploymentOnTargetCluster(
 }
 
 // BuildConductorAgentDeployment builds the Conductor agent Deployment spec for a
-// tenant cluster. The Deployment is stamped with CONDUCTOR_ROLE=tenant as a
-// first-class spec field in the container env. conductor-schema.md §15.
-// platform-schema.md §12.
+// tenant cluster. CLUSTER_REF and CONDUCTOR_ROLE are injected via downward API
+// fieldRef from Deployment annotations so the pod reads its own identity without
+// hard-coding values. conductor-schema.md §15. platform-schema.md §12.
 func BuildConductorAgentDeployment(clusterName string) *appsv1.Deployment {
 	replicas := int32(1)
 	return &appsv1.Deployment{
@@ -832,6 +832,10 @@ func BuildConductorAgentDeployment(clusterName string) *appsv1.Deployment {
 			Labels: map[string]string{
 				"runner.ontai.dev/component": "conductor",
 				"runner.ontai.dev/cluster":   clusterName,
+			},
+			Annotations: map[string]string{
+				"platform.ontai.dev/cluster-ref": clusterName,
+				"platform.ontai.dev/role":        "tenant",
 			},
 		},
 		Spec: appsv1.DeploymentSpec{
@@ -853,21 +857,24 @@ func BuildConductorAgentDeployment(clusterName string) *appsv1.Deployment {
 					Containers: []corev1.Container{
 						{
 							Name:  "conductor",
-							Image: conductorImage, // Resolved from RunnerConfig.agentImage — placeholder per SC-INV-002.
+							Image: conductorImage, // Resolved from RunnerConfig.agentImage -- placeholder per SC-INV-002.
 							Args:  []string{"agent"},
 							Env: []corev1.EnvVar{
 								{
-									// CONDUCTOR_ROLE is the first-class role stamp on the Deployment.
-									// conductor-schema.md §15: "first-class field on the Conductor
-									// Deployment, not an environment variable or ConfigMap mount" —
-									// the spec field IS the container env within the pod spec.
-									// Never modified after Deployment creation.
-									Name:  conductorRoleEnvVar,
-									Value: "tenant",
+									Name: conductorRoleEnvVar,
+									ValueFrom: &corev1.EnvVarSource{
+										FieldRef: &corev1.ObjectFieldSelector{
+											FieldPath: "metadata.annotations['platform.ontai.dev/role']",
+										},
+									},
 								},
 								{
-									Name:  "CLUSTER_NAME",
-									Value: clusterName,
+									Name: "CLUSTER_REF",
+									ValueFrom: &corev1.EnvVarSource{
+										FieldRef: &corev1.ObjectFieldSelector{
+											FieldPath: "metadata.annotations['platform.ontai.dev/cluster-ref']",
+										},
+									},
 								},
 							},
 						},
