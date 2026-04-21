@@ -164,7 +164,7 @@ func (r *TalosClusterReconciler) ensureBootstrapRunnerConfig(ctx context.Context
 	// to the TalosCluster's InfrastructureLineageIndex. The ILI is in tc.Namespace
 	// (seam-system) while the RunnerConfig is in ont-system; the explicit ILI namespace
 	// label enables the cross-namespace lookup. seam-core-schema.md §3.
-	lineage.SetDescendantLabels(rc, lineage.IndexName("TalosCluster", tc.Name), tc.Namespace, "platform", lineage.ConductorAssignment)
+	lineage.SetDescendantLabels(rc, lineage.IndexName("TalosCluster", tc.Name), tc.Namespace, "platform", lineage.ConductorAssignment, tc.GetAnnotations()[lineage.AnnotationDeclaringPrincipal])
 	if err := r.Client.Create(ctx, rc); err != nil && !apierrors.IsAlreadyExists(err) {
 		return fmt.Errorf("ensureBootstrapRunnerConfig: create RunnerConfig %s/%s: %w",
 			bootstrapRunnerConfigNamespace, name, err)
@@ -350,7 +350,7 @@ func (r *TalosClusterReconciler) ensureSeamInfrastructureCluster(ctx context.Con
 			return fmt.Errorf("ensureSeamInfrastructureCluster: set controlPlaneEndpoint: %w", err)
 		}
 
-		lineage.SetDescendantLabels(sic, lineage.IndexName("TalosCluster", tc.Name), tc.Namespace, "platform", lineage.ClusterProvision)
+		lineage.SetDescendantLabels(sic, lineage.IndexName("TalosCluster", tc.Name), tc.Namespace, "platform", lineage.ClusterProvision, tc.GetAnnotations()[lineage.AnnotationDeclaringPrincipal])
 		if err := r.Client.Create(ctx, sic); err != nil && !apierrors.IsAlreadyExists(err) {
 			return fmt.Errorf("ensureSeamInfrastructureCluster: create: %w", err)
 		}
@@ -411,7 +411,7 @@ func (r *TalosClusterReconciler) ensureCAPICluster(ctx context.Context, tc *plat
 			return fmt.Errorf("ensureCAPICluster: set controlPlaneRef: %w", err)
 		}
 
-		lineage.SetDescendantLabels(cluster, lineage.IndexName("TalosCluster", tc.Name), tc.Namespace, "platform", lineage.ClusterProvision)
+		lineage.SetDescendantLabels(cluster, lineage.IndexName("TalosCluster", tc.Name), tc.Namespace, "platform", lineage.ClusterProvision, tc.GetAnnotations()[lineage.AnnotationDeclaringPrincipal])
 		if err := r.Client.Create(ctx, cluster); err != nil && !apierrors.IsAlreadyExists(err) {
 			return fmt.Errorf("ensureCAPICluster: create: %w", err)
 		}
@@ -542,7 +542,7 @@ func (r *TalosClusterReconciler) ensureTalosControlPlane(ctx context.Context, tc
 			return fmt.Errorf("ensureTalosControlPlane: set spec: %w", err)
 		}
 
-		lineage.SetDescendantLabels(tcp, lineage.IndexName("TalosCluster", tc.Name), tc.Namespace, "platform", lineage.ClusterProvision)
+		lineage.SetDescendantLabels(tcp, lineage.IndexName("TalosCluster", tc.Name), tc.Namespace, "platform", lineage.ClusterProvision, tc.GetAnnotations()[lineage.AnnotationDeclaringPrincipal])
 		if err := r.Client.Create(ctx, tcp); err != nil && !apierrors.IsAlreadyExists(err) {
 			return fmt.Errorf("ensureTalosControlPlane: create: %w", err)
 		}
@@ -656,7 +656,7 @@ func (r *TalosClusterReconciler) ensureWorkerPool(ctx context.Context, tc *platf
 			return fmt.Errorf("ensureWorkerPool %s: set MachineDeployment spec: %w", pool.Name, err)
 		}
 
-		lineage.SetDescendantLabels(md, lineage.IndexName("TalosCluster", tc.Name), tc.Namespace, "platform", lineage.ClusterProvision)
+		lineage.SetDescendantLabels(md, lineage.IndexName("TalosCluster", tc.Name), tc.Namespace, "platform", lineage.ClusterProvision, tc.GetAnnotations()[lineage.AnnotationDeclaringPrincipal])
 		if err := r.Client.Create(ctx, md); err != nil && !apierrors.IsAlreadyExists(err) {
 			return fmt.Errorf("ensureWorkerPool %s: create MachineDeployment: %w", pool.Name, err)
 		}
