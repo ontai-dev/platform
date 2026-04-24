@@ -52,8 +52,8 @@ const (
 
 // TalosClusterRole declares the role of this cluster in the Seam topology.
 // Management clusters host the Seam control plane. Tenant clusters are governed
-// by the management cluster. This field is required on the direct bootstrap path
-// (capi.enabled=false) to determine namespace creation and kubeconfig routing.
+// by the management cluster. This field is mandatory on mode=import and absent
+// on all mode=bootstrap paths. It drives namespace creation and kubeconfig routing.
 // platform-schema.md §5. WS5.
 //
 // +kubebuilder:validation:Enum=management;tenant
@@ -344,9 +344,10 @@ type TalosClusterSpec struct {
 	InfrastructureProvider InfrastructureProvider `json:"infrastructureProvider,omitempty"`
 
 	// Role declares whether this TalosCluster is the Seam management cluster or a
-	// tenant (target) cluster. Required on the direct bootstrap path (capi.enabled=false)
-	// to determine namespace creation and kubeconfig routing. When absent, the
-	// reconciler defaults to management behaviour (no seam-tenant namespace).
+	// tenant (target) cluster. Mandatory on mode=import; absent on all mode=bootstrap
+	// paths (capi.enabled=false and capi.enabled=true). The Compiler enforces this
+	// invariant: mode=import without an explicit role is rejected at compile time.
+	// On mode=import, the role drives namespace creation and kubeconfig routing.
 	// platform-schema.md §5. WS5.
 	// +kubebuilder:validation:Enum=management;tenant
 	// +optional
