@@ -1,5 +1,5 @@
 # platform-schema
-> API Group: platform.ontai.dev (operational CRDs: TalosControlPlane, TalosWorkerConfig, EtcdMaintenance, NodeMaintenance, PKIRotation, ClusterReset, HardeningProfile, UpgradePolicy, NodeOperation, ClusterMaintenance, PlatformTenant, ClusterAssignment, QueueProfile, MaintenanceBundle)
+> API Group: platform.ontai.dev (operational CRDs: TalosControlPlane, TalosWorkerConfig, EtcdMaintenance, NodeMaintenance, PKIRotation, ClusterReset, HardeningProfile, UpgradePolicy, NodeOperation, ClusterMaintenance, PlatformTenant, QueueProfile, MaintenanceBundle)
 > InfrastructureTalosCluster: infrastructure.ontai.dev/v1alpha1 -- schema owned by seam-core (Decision G). Platform reconciles it; does not define it.
 > Operator: Platform
 > CAPI Providers: cluster.x-k8s.io, bootstrap.cluster.x-k8s.io, infrastructure.cluster.x-k8s.io
@@ -91,9 +91,9 @@ Every TalosConfigTemplate created by Platform includes:
 - Cilium-required sysctl values
 
 After CAPI bootstraps the cluster (nodes reach Running state but are NotReady
-because no CNI is present), the ClusterAssignment with bootstrapFlag=true triggers
-a PackExecution for the Cilium ClusterPack. This is the first pack deployed to
-every cluster. Nodes transition to Ready only after Cilium is up.
+because no CNI is present), Platform triggers a PackExecution for the Cilium
+ClusterPack referenced by spec.capi.ciliumPackRef. This is the first pack deployed
+to every cluster. Nodes transition to Ready only after Cilium is up.
 
 The CAPI MachineHealthCheck is configured with a tolerance window for the CNI
 installation period - nodes are not remediated during this window.
@@ -259,9 +259,9 @@ Fields introduced with CAPI adoption:
 - capi.controlPlane.replicas: number of control plane nodes.
 - capi.workers: list of worker pools, each with a name, replica count, and
   list of SeamInfrastructureMachine names pre-provisioned for that pool.
-- capi.ciliumPackRef: the ClusterPack name and version for Cilium. Applied
-  as the first pack via ClusterAssignment bootstrapFlag after cluster reaches
-  Running state.
+- capi.ciliumPackRef: the ClusterPack name and version for Cilium. Platform
+  triggers a PackExecution for this pack when the cluster reaches CAPI Running
+  state, before marking the cluster Ready.
 
 status.origin: bootstrapped or imported. Unchanged.
 status.capiClusterRef: reference to the owned CAPI Cluster object.
@@ -411,12 +411,13 @@ Key spec fields: clusterRef, windows, blockOutsideWindows.
 
 ## 6. Tenant Coordination CRDs
 
-### PlatformTenant, ClusterAssignment, QueueProfile
+### PlatformTenant, QueueProfile
 
-These CRDs are unchanged. Their semantics, namespace placement, and gate conditions
-are identical to the previous schema. ClusterAssignment now additionally gates on
-CAPI Cluster status.phase=Running before the Cilium ClusterPack PackExecution is
-triggered via bootstrapFlag.
+PlatformTenant and QueueProfile semantics, namespace placement, and gate conditions
+are unchanged. ClusterAssignment has been removed -- it was a pre-seam binding record
+with no role in the current seam operator family. Cilium bootstrap is now triggered
+directly by Platform via spec.capi.ciliumPackRef when the CAPI Cluster reaches
+Running state.
 
 QueueProfile is scoped to Wrapper's quota profile only. The ClusterQueue and
 ResourceFlavor resources provisioned by Guardian from QueueProfile govern
@@ -557,7 +558,7 @@ independently resolves an S3 destination is an invariant violation.
 
 Reads: security.ontai.dev/RBACProfile status (gate check).
 Reads: infrastructure.ontai.dev/InfrastructureClusterPack (validate Cilium pack reference in InfrastructureTalosCluster).
-Reads: infrastructure.ontai.dev/InfrastructurePackInstance (gate ClusterAssignment on Cilium Ready).
+Reads: infrastructure.ontai.dev/InfrastructurePackInstance (gate Cilium PackExecution on Ready).
 Owns: cluster.x-k8s.io/Cluster and all CAPI child objects for target clusters.
 Owns: SeamInfrastructureCluster, SeamInfrastructureMachine in tenant namespaces.
 Creates: tenant namespaces - sole authority.
