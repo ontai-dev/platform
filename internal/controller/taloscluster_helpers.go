@@ -45,13 +45,17 @@ const (
 	// clusterNamespaceLabel is the namespace label applied to identify the cluster.
 	clusterNamespaceLabel = "ontai.dev/cluster"
 
-	// conductorImageName is the base image name for the Conductor binary.
-	// conductor-schema.md §3.
+	// conductorImageName is the base image name for the Conductor agent binary
+	// (distroless, deployed to clusters via ont-system). conductor-schema.md §3.
 	conductorImageName = "conductor"
 
-	// devRevision is the revision suffix used for lab/development conductor images.
-	// Stable releases use v{talosVersion}-r{N}. Dev builds use {talosVersion}-dev.
-	// conductor-schema.md §3, INV-011.
+	// conductorExecuteImageName is the base image name for the Conductor executor
+	// binary (debian-slim, used for executor Jobs). conductor-schema.md §3, Decision 12.
+	conductorExecuteImageName = "conductor-execute"
+
+	// devRevision is the image tag used for lab/development builds.
+	// Production releases use {talosVersion} for executor and agent images.
+	// conductor-schema.md §3, INV-011, INV-023.
 	devRevision = "dev"
 
 	// conductorRegistryEnv is the env var name for overriding the conductor image registry.
@@ -66,6 +70,17 @@ const (
 // TalosCluster.Spec.TalosVersion is empty. The caller must return ctrl.Result{}
 // without error — the PhaseFailed condition is already written to tc.Status.
 var errTalosVersionRequired = errors.New("spec.talosVersion is required for conductor image derivation")
+
+// executorImageTag returns the conductor-execute (or conductor agent) image tag.
+// In dev/lab (devRevision=="dev"): returns "dev" regardless of talosVersion.
+// In production: returns talosVersion so the executor tracks the cluster's Talos version.
+// conductor-schema.md §3, INV-011, INV-023.
+func executorImageTag(talosVersion string) string {
+	if devRevision == "dev" {
+		return devRevision
+	}
+	return talosVersion
+}
 
 // bootstrapJobName returns the Kubernetes Job name for the bootstrap Job of a
 // given TalosCluster.
@@ -106,10 +121,12 @@ func (r *TalosClusterReconciler) getBootstrapRunnerConfig(ctx context.Context, c
 // ensureBootstrapRunnerConfig creates the RunnerConfig CR in bootstrapRunnerConfigNamespace
 // (ont-system) for a management cluster bootstrap or import if it does not already exist.
 // Name equals TalosCluster.Name so Conductor can locate it by cluster-ref flag value.
-// RunnerImage is derived from tc.Spec.TalosVersion per INV-012 and conductor-schema.md §3:
+// RunnerImage uses conductorExecuteImageName (conductor-execute) with a tag derived from
+// tc.Spec.TalosVersion per INV-012 and conductor-schema.md §3:
 //
-//	{CONDUCTOR_REGISTRY}/{conductorImageName}:{talosVersion}-dev
+//	{CONDUCTOR_REGISTRY}/conductor-execute:{tag}
 //
+// In dev/lab: tag = "dev". In production: tag = tc.Spec.TalosVersion.
 // If TalosVersion is empty, sets ConditionTypePhaseFailed on tc and returns
 // errTalosVersionRequired — the caller must return ctrl.Result{}, nil.
 // Idempotent — returns nil when RunnerConfig already present.
@@ -131,7 +148,7 @@ func (r *TalosClusterReconciler) ensureBootstrapRunnerConfig(ctx context.Context
 	if registry == "" {
 		registry = conductorRegistryDefault
 	}
-	runnerImage := fmt.Sprintf("%s/%s:%s-%s", registry, conductorImageName, tc.Spec.TalosVersion, devRevision)
+	runnerImage := fmt.Sprintf("%s/%s:%s", registry, conductorExecuteImageName, executorImageTag(tc.Spec.TalosVersion))
 
 	name := bootstrapRunnerConfigName(tc.Name)
 	rc := &OperationalRunnerConfig{
@@ -184,14 +201,14 @@ func (r *TalosClusterReconciler) getBootstrapJob(ctx context.Context, namespace,
 
 // submitBootstrapJob creates the bootstrap Conductor Job for a management cluster
 // TalosCluster (capi.enabled=false). The job runs the bootstrap capability in executor
-// mode. Image is derived from tc.Spec.TalosVersion the same way as ensureBootstrapRunnerConfig.
+// mode. Image uses conductorExecuteImageName with executorImageTag derivation.
 // platform-design.md §5.
 func (r *TalosClusterReconciler) submitBootstrapJob(ctx context.Context, tc *platformv1alpha1.TalosCluster, jobName string) error {
 	registry := os.Getenv(conductorRegistryEnv)
 	if registry == "" {
 		registry = conductorRegistryDefault
 	}
-	runnerImage := fmt.Sprintf("%s/%s:%s-%s", registry, conductorImageName, tc.Spec.TalosVersion, devRevision)
+	runnerImage := fmt.Sprintf("%s/%s:%s", registry, conductorExecuteImageName, executorImageTag(tc.Spec.TalosVersion))
 
 	ttlSeconds := int32(600)
 	backoffLimit := int32(0) // INV-018: gate failures are permanent, no retry.
@@ -801,12 +818,13 @@ func (r *TalosClusterReconciler) EnsureConductorDeploymentOnTargetCluster(
 				conductorAgentNamespace, conductorDeploymentName, tc.Name, err)
 		}
 		// Deployment does not exist — create it.
-		// Derive agent image from tc.Spec.TalosVersion — same formula as ensureBootstrapRunnerConfig.
+		// Derive agent image: conductor (distroless) with tag from tc.Spec.TalosVersion.
+		// Dev: conductor:dev. Production: conductor:{talosVersion}. conductor-schema.md §3.
 		agentRegistry := os.Getenv(conductorRegistryEnv)
 		if agentRegistry == "" {
 			agentRegistry = conductorRegistryDefault
 		}
-		agentImage := fmt.Sprintf("%s/%s:%s-%s", agentRegistry, conductorImageName, tc.Spec.TalosVersion, devRevision)
+		agentImage := fmt.Sprintf("%s/%s:%s", agentRegistry, conductorImageName, executorImageTag(tc.Spec.TalosVersion))
 		newDep := BuildConductorAgentDeployment(tc.Name, agentImage)
 		if _, createErr := remoteK8s.AppsV1().Deployments(conductorAgentNamespace).Create(
 			ctx, newDep, metav1.CreateOptions{}); createErr != nil && !apierrors.IsAlreadyExists(createErr) {
@@ -1281,6 +1299,11 @@ func (r *TalosClusterReconciler) ensureTenantExecutorResources(ctx context.Conte
 					APIGroups: []string{"platform.ontai.dev"},
 					Resources: []string{"etcdmaintenances", "nodemaintenances", "nodeoperations", "pkirotations"},
 					Verbs:     []string{"get", "list", "watch"},
+				},
+				{
+					APIGroups: []string{""},
+					Resources: []string{"secrets"},
+					Verbs:     []string{"get", "create", "update", "patch"},
 				},
 			},
 		}

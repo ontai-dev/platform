@@ -228,8 +228,13 @@ func resolveOperatorLeaderNode(ctx context.Context, c client.Client, apiReader c
 	}
 	// Use the uncached API reader to avoid triggering a cluster-scope Pod informer.
 	// Treat Forbidden the same as NotFound: skip leader exclusion rather than failing.
+	// apiReader may be nil in unit tests — fall back to the cached client in that case.
+	reader := client.Reader(c)
+	if apiReader != nil {
+		reader = apiReader
+	}
 	pod := &corev1.Pod{}
-	if err := apiReader.Get(ctx, types.NamespacedName{Name: podName, Namespace: "seam-system"}, pod); err != nil {
+	if err := reader.Get(ctx, types.NamespacedName{Name: podName, Namespace: "seam-system"}, pod); err != nil {
 		if apierrors.IsNotFound(err) || apierrors.IsForbidden(err) {
 			return "", nil
 		}

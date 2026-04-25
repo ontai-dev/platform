@@ -143,9 +143,9 @@ func TestTalosClusterReconcile_ImportModeCreatesRunnerConfigAndTransitionsToRead
 		if rc.Namespace != "ont-system" {
 			t.Errorf("RunnerConfig namespace = %q, want ont-system", rc.Namespace)
 		}
-		// Image derived from TalosVersion="v1.9.3" + default registry + devRevision.
-		// conductor-schema.md §3, INV-012.
-		wantImage := "10.20.0.1:5000/ontai-dev/conductor:v1.9.3-dev"
+		// Image: conductor-execute (executor image) with :dev tag in lab.
+		// conductor-schema.md §3, INV-012, Decision 12.
+		wantImage := "10.20.0.1:5000/ontai-dev/conductor-execute:dev"
 		if rc.Spec.RunnerImage != wantImage {
 			t.Errorf("RunnerConfig RunnerImage = %q, want %q", rc.Spec.RunnerImage, wantImage)
 		}
