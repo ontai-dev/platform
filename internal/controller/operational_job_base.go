@@ -96,9 +96,10 @@ func jobSpec(jobName, namespace, clusterName, capability, runnerImage string) *b
 					},
 					Containers: []corev1.Container{
 						{
-							Name:  "executor",
-							Image: runnerImage,
-							Args:  []string{"execute"},
+							Name:            "executor",
+							Image:           runnerImage,
+							ImagePullPolicy: corev1.PullAlways,
+							Args:            []string{"execute"},
 							Env: []corev1.EnvVar{
 								{Name: "CAPABILITY", Value: capability},
 								{Name: "CLUSTER_REF", Value: clusterName},
@@ -200,10 +201,11 @@ func jobSpecWithExclusions(jobName, namespace, clusterName, capability string, n
 
 // resolveOperatorLeaderNode reads the platform-leader Lease from seam-system,
 // resolves the holder pod, and returns the pod's node name. Returns an empty
-// string (not an error) when the Lease is absent or the holder pod is not found —
-// this allows reconcilers to proceed without exclusions rather than failing.
+// string (not an error) when the Lease is absent or the holder pod is not found.
+// apiReader must be an uncached reader (mgr.GetAPIReader()) to avoid establishing
+// a cluster-scope Pod informer that the platform SA lacks permission to populate.
 // conductor-schema.md §13, CP-INV-007.
-func resolveOperatorLeaderNode(ctx context.Context, c client.Client) (string, error) {
+func resolveOperatorLeaderNode(ctx context.Context, c client.Client, apiReader client.Reader) (string, error) {
 	lease := &coordinationv1.Lease{}
 	if err := c.Get(ctx, types.NamespacedName{
 		Name:      "platform-leader",
@@ -224,9 +226,11 @@ func resolveOperatorLeaderNode(ctx context.Context, c client.Client) (string, er
 	if idx := strings.Index(holderIdentity, "_"); idx != -1 {
 		podName = holderIdentity[:idx]
 	}
+	// Use the uncached API reader to avoid triggering a cluster-scope Pod informer.
+	// Treat Forbidden the same as NotFound: skip leader exclusion rather than failing.
 	pod := &corev1.Pod{}
-	if err := c.Get(ctx, types.NamespacedName{Name: podName, Namespace: "seam-system"}, pod); err != nil {
-		if apierrors.IsNotFound(err) {
+	if err := apiReader.Get(ctx, types.NamespacedName{Name: podName, Namespace: "seam-system"}, pod); err != nil {
+		if apierrors.IsNotFound(err) || apierrors.IsForbidden(err) {
 			return "", nil
 		}
 		return "", fmt.Errorf("get leader pod %s/seam-system: %w", podName, err)

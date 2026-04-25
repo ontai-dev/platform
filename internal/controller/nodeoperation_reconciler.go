@@ -43,9 +43,10 @@ const (
 
 // NodeOperationReconciler reconciles NodeOperation objects.
 type NodeOperationReconciler struct {
-	Client   client.Client
-	Scheme   *runtime.Scheme
-	Recorder clientevents.EventRecorder
+	Client    client.Client
+	APIReader client.Reader
+	Scheme    *runtime.Scheme
+	Recorder  clientevents.EventRecorder
 }
 
 // +kubebuilder:rbac:groups=platform.ontai.dev,resources=nodeoperations,verbs=get;list;watch;create;update;patch;delete
@@ -309,7 +310,7 @@ func (r *NodeOperationReconciler) reconcileDirectNodeOp(ctx context.Context, nop
 	}
 
 	if existingJob == nil {
-		leaderNode, lErr := resolveOperatorLeaderNode(ctx, r.Client)
+		leaderNode, lErr := resolveOperatorLeaderNode(ctx, r.Client, r.APIReader)
 		if lErr != nil {
 			return ctrl.Result{}, fmt.Errorf("NodeOperationReconciler: resolve leader node: %w", lErr)
 		}

@@ -29,9 +29,10 @@ const capabilityPKIRotate = "pki-rotate"
 
 // PKIRotationReconciler reconciles PKIRotation objects.
 type PKIRotationReconciler struct {
-	Client   client.Client
-	Scheme   *runtime.Scheme
-	Recorder clientevents.EventRecorder
+	Client    client.Client
+	APIReader client.Reader
+	Scheme    *runtime.Scheme
+	Recorder  clientevents.EventRecorder
 }
 
 // +kubebuilder:rbac:groups=platform.ontai.dev,resources=pkirotations,verbs=get;list;watch;create;update;patch;delete
@@ -127,7 +128,7 @@ func (r *PKIRotationReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 	}
 
 	if existingJob == nil {
-		leaderNode, lErr := resolveOperatorLeaderNode(ctx, r.Client)
+		leaderNode, lErr := resolveOperatorLeaderNode(ctx, r.Client, r.APIReader)
 		if lErr != nil {
 			return ctrl.Result{}, fmt.Errorf("PKIRotationReconciler: resolve leader node: %w", lErr)
 		}
