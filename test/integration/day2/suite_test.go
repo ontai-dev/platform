@@ -30,7 +30,7 @@ import (
 
 	infrav1alpha1 "github.com/ontai-dev/platform/api/infrastructure/v1alpha1"
 	platformv1alpha1 "github.com/ontai-dev/platform/api/v1alpha1"
-	"github.com/ontai-dev/platform/internal/controller"
+	seamcorev1alpha1 "github.com/ontai-dev/seam-core/api/v1alpha1"
 )
 
 var (
@@ -52,7 +52,7 @@ func TestMain(m *testing.M) {
 	_ = platformv1alpha1.AddToScheme(testScheme)
 	_ = infrav1alpha1.AddToScheme(testScheme)
 	_ = coordinationv1.AddToScheme(testScheme)
-	_ = controller.AddOperationalRunnerConfigToScheme(testScheme)
+	_ = seamcorev1alpha1.AddToScheme(testScheme)
 
 	testEnv = &envtest.Environment{
 		CRDDirectoryPaths: []string{

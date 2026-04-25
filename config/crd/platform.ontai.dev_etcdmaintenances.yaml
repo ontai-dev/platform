@@ -180,6 +180,13 @@ spec:
                   Named Conductor capabilities: etcd-backup, etcd-restore, etcd-defrag.
                   platform-schema.md §5 EtcdMaintenance.
                 type: string
+              pvcFallbackEnabled:
+                description: |-
+                  PVCFallbackEnabled instructs the reconciler to set EtcdBackupLocalFallback
+                  and proceed with RunnerConfig submission (no S3 params) when operation=backup
+                  and no S3 destination is configured. The executor writes the snapshot to a
+                  PVC mounted in the Job pod. platform-schema.md §10.
+                type: boolean
               s3Destination:
                 description: |-
                   S3Destination is the S3 location to write the etcd snapshot to.

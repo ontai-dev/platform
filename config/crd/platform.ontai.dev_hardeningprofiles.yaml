@@ -151,7 +151,7 @@ spec:
               conditions:
                 description: |-
                   Conditions is the list of status conditions for this HardeningProfile.
-                  Condition types: LineageSynced.
+                  Condition types: Valid, LineageSynced.
                 items:
                   description: Condition contains details for one aspect of the current
                     state of this API Resource.

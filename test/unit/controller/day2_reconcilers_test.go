@@ -21,6 +21,7 @@ import (
 	infrav1alpha1 "github.com/ontai-dev/platform/api/infrastructure/v1alpha1"
 	platformv1alpha1 "github.com/ontai-dev/platform/api/v1alpha1"
 	"github.com/ontai-dev/platform/internal/controller"
+	seamcorev1alpha1 "github.com/ontai-dev/seam-core/api/v1alpha1"
 )
 
 // fakeRecorder returns a buffered fake event recorder for use in tests.
@@ -42,8 +43,8 @@ func buildDay2Scheme(t *testing.T) *runtime.Scheme {
 	if err := infrav1alpha1.AddToScheme(s); err != nil {
 		t.Fatalf("add infrav1alpha1 scheme: %v", err)
 	}
-	if err := controller.AddOperationalRunnerConfigToScheme(s); err != nil {
-		t.Fatalf("add OperationalRunnerConfig scheme: %v", err)
+	if err := seamcorev1alpha1.AddToScheme(s); err != nil {
+		t.Fatalf("add seamcorev1alpha1 scheme: %v", err)
 	}
 	return s
 }

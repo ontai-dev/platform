@@ -921,7 +921,7 @@ func (r *TalosClusterReconciler) ensureTenantNamespaceCleanupFinalizer(
 	ctx context.Context,
 	tc *platformv1alpha1.TalosCluster,
 ) error {
-	if !tc.Spec.CAPIEnabled() {
+	if tc.Spec.CAPI == nil || !tc.Spec.CAPI.Enabled {
 		return nil
 	}
 	if controllerutil.ContainsFinalizer(tc, finalizerTenantNamespaceCleanup) {

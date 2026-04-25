@@ -19,6 +19,7 @@ import (
 
 	infrav1alpha1 "github.com/ontai-dev/platform/api/infrastructure/v1alpha1"
 	platformv1alpha1 "github.com/ontai-dev/platform/api/v1alpha1"
+	seamcorev1alpha1 "github.com/ontai-dev/seam-core/api/v1alpha1"
 	"github.com/ontai-dev/platform/internal/controller"
 )
 
@@ -28,10 +29,9 @@ func init() {
 	utilruntime.Must(clientgoscheme.AddToScheme(scheme))
 	utilruntime.Must(platformv1alpha1.AddToScheme(scheme))
 	utilruntime.Must(infrav1alpha1.AddToScheme(scheme))
-	// Register the local OperationalRunnerConfig type so the manager client can
-	// create and read RunnerConfig CRs emitted by day-2 reconcilers.
-	// conductor-schema.md §17.
-	utilruntime.Must(controller.AddOperationalRunnerConfigToScheme(scheme))
+	// TalosCluster and RunnerConfig types are now owned by seam-core.
+	// infrastructure.ontai.dev/v1alpha1. T-2B-8.
+	utilruntime.Must(seamcorev1alpha1.AddToScheme(scheme))
 }
 
 func main() {

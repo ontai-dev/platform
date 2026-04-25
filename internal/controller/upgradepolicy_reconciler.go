@@ -367,7 +367,7 @@ func (r *UpgradePolicyReconciler) upgradeCAPIEnabled(ctx context.Context, up *pl
 		}
 		return false, fmt.Errorf("get TalosCluster %s/%s: %w", ns, up.Spec.ClusterRef.Name, err)
 	}
-	return tc.Spec.CAPIEnabled(), nil
+	return tc.Spec.CAPI != nil && tc.Spec.CAPI.Enabled, nil
 }
 
 
