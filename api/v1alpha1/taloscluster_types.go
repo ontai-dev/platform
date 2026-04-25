@@ -68,6 +68,8 @@ const (
 	ConditionTypeScreenProviderNotImplemented = conditions.ConditionTypeScreenProviderNotImplemented
 	ConditionTypePhaseFailed                  = conditions.ConditionTypePhaseFailed
 	ConditionTypeKubeconfigUnavailable        = conditions.ConditionTypeKubeconfigUnavailable
+	ConditionTypeVersionUpgradePending        = conditions.ConditionTypeVersionUpgradePending
+	ConditionTypeVersionRegressionBlocked     = conditions.ConditionTypeVersionRegressionBlocked
 )
 
 // Reason constants for TalosCluster -- re-exported from seam-core/pkg/conditions.
@@ -89,4 +91,8 @@ const (
 	ReasonScreenNotImplemented           = conditions.ReasonScreenNotImplemented
 	ReasonTalosVersionRequired           = conditions.ReasonTalosVersionRequired
 	ReasonTalosConfigSecretAbsent        = conditions.ReasonTalosConfigSecretAbsent
+	ReasonVersionUpgradeRequested        = conditions.ReasonVersionUpgradeRequested
+	ReasonVersionUpgradeSubmitted        = conditions.ReasonVersionUpgradeSubmitted
+	ReasonVersionUpgradeComplete         = conditions.ReasonVersionUpgradeComplete
+	ReasonVersionRegressionAttempted     = conditions.ReasonVersionRegressionAttempted
 )

@@ -144,6 +144,8 @@ func getOperationalJob(ctx context.Context, c client.Client, namespace, jobName 
 
 // readOperationalResult checks for the InfrastructureTalosClusterOperationResult CR
 // written by the Conductor executor. CR name equals the Job name.
+// When a terminal status (Succeeded or Failed) is found, the TCOR is archived
+// via stubDumpTCORToGraphQueryDB before the TTL controller deletes it.
 // Returns (complete, failed, message).
 func readOperationalResult(ctx context.Context, c client.Client, namespace, jobName string) (complete, failed bool, message string) {
 	tcor := &seamcorev1alpha1.InfrastructureTalosClusterOperationResult{}
@@ -153,8 +155,10 @@ func readOperationalResult(ctx context.Context, c client.Client, namespace, jobN
 	}
 	switch tcor.Spec.Status {
 	case seamcorev1alpha1.TalosClusterResultSucceeded:
+		stubDumpTCORToGraphQueryDB(ctx, tcor)
 		return true, false, tcor.Spec.Message
 	case seamcorev1alpha1.TalosClusterResultFailed:
+		stubDumpTCORToGraphQueryDB(ctx, tcor)
 		msg := tcor.Spec.Message
 		if tcor.Spec.FailureReason != nil && tcor.Spec.FailureReason.Reason != "" {
 			msg = tcor.Spec.FailureReason.Reason

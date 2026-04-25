@@ -254,6 +254,7 @@ func (r *TalosClusterReconciler) submitBootstrapJob(ctx context.Context, tc *pla
 
 // readOperationResult checks for the InfrastructureTalosClusterOperationResult CR
 // written by the bootstrap Conductor executor. CR name equals the Job name.
+// Archives the TCOR via stubDumpTCORToGraphQueryDB when a terminal status is found.
 // Returns (complete, failed, message).
 func (r *TalosClusterReconciler) readOperationResult(ctx context.Context, namespace, jobName string) (complete, failed bool, message string) {
 	tcor := &TalosClusterOperationResult{}
@@ -263,8 +264,10 @@ func (r *TalosClusterReconciler) readOperationResult(ctx context.Context, namesp
 	}
 	switch tcor.Spec.Status {
 	case "Succeeded":
+		stubDumpTCORToGraphQueryDB(ctx, tcor)
 		return true, false, tcor.Spec.Message
 	case "Failed":
+		stubDumpTCORToGraphQueryDB(ctx, tcor)
 		msg := tcor.Spec.Message
 		if tcor.Spec.FailureReason != nil && tcor.Spec.FailureReason.Reason != "" {
 			msg = tcor.Spec.FailureReason.Reason
