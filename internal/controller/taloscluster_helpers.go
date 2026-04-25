@@ -11,6 +11,7 @@ import (
 	appsv1 "k8s.io/api/apps/v1"
 	batchv1 "k8s.io/api/batch/v1"
 	corev1 "k8s.io/api/core/v1"
+	rbacv1 "k8s.io/api/rbac/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
@@ -1157,6 +1158,14 @@ func (r *TalosClusterReconciler) ensureTenantOnboarding(ctx context.Context, tc 
 		return fmt.Errorf("ensureTenantOnboarding: local queue: %w", err)
 	}
 
+	// Step 4 — Executor talosconfig secret and executor SA/Role/RoleBinding for day-2 Jobs.
+	if err := r.ensureExecutorTalosconfig(ctx, tc); err != nil {
+		return fmt.Errorf("ensureTenantOnboarding: executor talosconfig: %w", err)
+	}
+	if err := r.ensureTenantExecutorResources(ctx, tc); err != nil {
+		return fmt.Errorf("ensureTenantOnboarding: tenant executor resources: %w", err)
+	}
+
 	return nil
 }
 
@@ -1174,27 +1183,21 @@ func (r *TalosClusterReconciler) ensureManagementOnboarding(ctx context.Context,
 	if err := r.ensureExecutorTalosconfig(ctx, tc); err != nil {
 		return fmt.Errorf("ensureManagementOnboarding: executor talosconfig: %w", err)
 	}
+	if err := r.ensureTenantExecutorResources(ctx, tc); err != nil {
+		return fmt.Errorf("ensureManagementOnboarding: tenant executor resources: %w", err)
+	}
 	return nil
 }
 
-// ensureExecutorTalosconfig copies the cluster talosconfig Secret from
-// seam-tenant-{clusterName} to ont-system as {clusterName}-talosconfig so that
-// platform executor Jobs running in ont-system can mount it for Talos API access.
-// Idempotent — skips if the destination Secret already exists. Returns nil on
-// NotFound of the source (non-fatal; cluster may not yet have reached import ready state).
+// ensureExecutorTalosconfig copies the cluster talosconfig Secret into both
+// ont-system (for Conductor agent Jobs) and seam-tenant-{clusterName} (for
+// day-2 executor Jobs). The secret name is {clusterName}-talosconfig in both
+// destinations. Idempotent — skips a destination if the Secret already exists.
+// Returns nil on NotFound of the source (non-fatal; cluster may not yet be ready).
 func (r *TalosClusterReconciler) ensureExecutorTalosconfig(ctx context.Context, tc *platformv1alpha1.TalosCluster) error {
 	srcNS := importSecretsNamespace(tc.Name)
 	srcName := talosconfigSecretName(tc.Name)
 	dstName := tc.Name + "-talosconfig"
-	dstNS := bootstrapRunnerConfigNamespace // ont-system
-
-	// Check if destination already exists — idempotent.
-	dst := &corev1.Secret{}
-	if err := r.Client.Get(ctx, types.NamespacedName{Name: dstName, Namespace: dstNS}, dst); err == nil {
-		return nil
-	} else if !apierrors.IsNotFound(err) {
-		return fmt.Errorf("ensureExecutorTalosconfig: get dest Secret %s/%s: %w", dstNS, dstName, err)
-	}
 
 	// Read source talosconfig Secret.
 	src := &corev1.Secret{}
@@ -1205,19 +1208,114 @@ func (r *TalosClusterReconciler) ensureExecutorTalosconfig(ctx context.Context, 
 		return fmt.Errorf("ensureExecutorTalosconfig: get source Secret %s/%s: %w", srcNS, srcName, err)
 	}
 
-	copy := &corev1.Secret{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      dstName,
-			Namespace: dstNS,
-			Labels: map[string]string{
-				"platform.ontai.dev/cluster": tc.Name,
+	// Copy to ont-system (Conductor agent Jobs) and to seam-tenant-{cluster} (day-2 executor Jobs).
+	for _, dstNS := range []string{bootstrapRunnerConfigNamespace, "seam-tenant-" + tc.Name} {
+		dst := &corev1.Secret{}
+		if err := r.Client.Get(ctx, types.NamespacedName{Name: dstName, Namespace: dstNS}, dst); err == nil {
+			continue // already exists
+		} else if !apierrors.IsNotFound(err) {
+			return fmt.Errorf("ensureExecutorTalosconfig: get dest Secret %s/%s: %w", dstNS, dstName, err)
+		}
+		cp := &corev1.Secret{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      dstName,
+				Namespace: dstNS,
+				Labels: map[string]string{
+					"platform.ontai.dev/cluster": tc.Name,
+				},
 			},
-		},
-		Type: corev1.SecretTypeOpaque,
-		Data: src.Data,
+			Type: corev1.SecretTypeOpaque,
+			Data: src.Data,
+		}
+		if err := r.Client.Create(ctx, cp); err != nil && !apierrors.IsAlreadyExists(err) {
+			return fmt.Errorf("ensureExecutorTalosconfig: create dest Secret %s/%s: %w", dstNS, dstName, err)
+		}
 	}
-	if err := r.Client.Create(ctx, copy); err != nil && !apierrors.IsAlreadyExists(err) {
-		return fmt.Errorf("ensureExecutorTalosconfig: create dest Secret %s/%s: %w", dstNS, dstName, err)
+	return nil
+}
+
+// ensureTenantExecutorResources creates the platform-executor ServiceAccount,
+// Role, and RoleBinding in seam-tenant-{clusterName} so that day-2 Conductor
+// executor Jobs can write InfrastructureTalosClusterOperationResult CRs and
+// read platform CRDs (NodeOperation, NodeMaintenance, etc.) in that namespace.
+// CP-INV-003, CP-INV-004: RBAC is Guardian-governed; this creates the minimal
+// namespace-scoped resources required for executor Job pods.
+func (r *TalosClusterReconciler) ensureTenantExecutorResources(ctx context.Context, tc *platformv1alpha1.TalosCluster) error {
+	tenantNS := "seam-tenant-" + tc.Name
+
+	sa := &corev1.ServiceAccount{}
+	if err := r.Client.Get(ctx, types.NamespacedName{Name: "platform-executor", Namespace: tenantNS}, sa); err != nil {
+		if !apierrors.IsNotFound(err) {
+			return fmt.Errorf("ensureTenantExecutorResources: get SA: %w", err)
+		}
+		sa = &corev1.ServiceAccount{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      "platform-executor",
+				Namespace: tenantNS,
+				Labels:    map[string]string{"platform.ontai.dev/cluster": tc.Name},
+			},
+		}
+		if err := r.Client.Create(ctx, sa); err != nil && !apierrors.IsAlreadyExists(err) {
+			return fmt.Errorf("ensureTenantExecutorResources: create SA: %w", err)
+		}
+	}
+
+	role := &rbacv1.Role{}
+	if err := r.Client.Get(ctx, types.NamespacedName{Name: "platform-executor", Namespace: tenantNS}, role); err != nil {
+		if !apierrors.IsNotFound(err) {
+			return fmt.Errorf("ensureTenantExecutorResources: get Role: %w", err)
+		}
+		role = &rbacv1.Role{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      "platform-executor",
+				Namespace: tenantNS,
+				Labels:    map[string]string{"platform.ontai.dev/cluster": tc.Name},
+			},
+			Rules: []rbacv1.PolicyRule{
+				{
+					APIGroups: []string{"infrastructure.ontai.dev"},
+					Resources: []string{"infrastructuretalosclusteroperationresults"},
+					Verbs:     []string{"get", "create", "update", "patch"},
+				},
+				{
+					APIGroups: []string{"platform.ontai.dev"},
+					Resources: []string{"etcdmaintenances", "nodemaintenances", "nodeoperations", "pkirotations"},
+					Verbs:     []string{"get", "list", "watch"},
+				},
+			},
+		}
+		if err := r.Client.Create(ctx, role); err != nil && !apierrors.IsAlreadyExists(err) {
+			return fmt.Errorf("ensureTenantExecutorResources: create Role: %w", err)
+		}
+	}
+
+	rb := &rbacv1.RoleBinding{}
+	if err := r.Client.Get(ctx, types.NamespacedName{Name: "platform-executor", Namespace: tenantNS}, rb); err != nil {
+		if !apierrors.IsNotFound(err) {
+			return fmt.Errorf("ensureTenantExecutorResources: get RoleBinding: %w", err)
+		}
+		rb = &rbacv1.RoleBinding{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      "platform-executor",
+				Namespace: tenantNS,
+				Labels:    map[string]string{"platform.ontai.dev/cluster": tc.Name},
+			},
+			RoleRef: rbacv1.RoleRef{
+				APIGroup: "rbac.authorization.k8s.io",
+				Kind:     "Role",
+				Name:     "platform-executor",
+			},
+			Subjects: []rbacv1.Subject{
+				{
+					Kind:      "ServiceAccount",
+					Name:      "platform-executor",
+					Namespace: tenantNS,
+				},
+			},
+		}
+		if err := r.Client.Create(ctx, rb); err != nil && !apierrors.IsAlreadyExists(err) {
+			return fmt.Errorf("ensureTenantExecutorResources: create RoleBinding: %w", err)
+		}
 	}
 	return nil
 }
