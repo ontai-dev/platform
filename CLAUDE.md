@@ -3,7 +3,8 @@
 
 ### Schema authority
 Primary: docs/platform-schema.md
-Supporting: ~/ontai/conductor/docs/conductor-schema.md (RunnerConfig contract for operational Jobs)
+CRD schema authority: ~/ontai/seam-core/docs/seam-core-schema.md (Decision G: seam-core owns InfrastructureTalosCluster and InfrastructureRunnerConfig type definitions; platform owns reconciliation behavior)
+Supporting: ~/ontai/conductor/docs/conductor-schema.md (Conductor capabilities and job protocol for operational Jobs)
 Supporting: ~/ontai/guardian/docs/guardian-schema.md (RBACProfile gate and enable phase order)
 Supporting: ~/ontai/wrapper/docs/wrapper-schema.md (PackInstance gate for Cilium deployment)
 
