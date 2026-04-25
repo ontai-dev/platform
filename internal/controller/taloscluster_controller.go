@@ -367,7 +367,7 @@ func (r *TalosClusterReconciler) reconcileDirectBootstrap(ctx context.Context, t
 	}
 
 	// Bootstrap Job exists — check for OperationResult.
-	complete, failed, result := r.readOperationResult(ctx, tc.Namespace, jobName)
+	complete, failed, result := r.readOperationResult(ctx, tc.Name, jobName)
 	if failed {
 		platformv1alpha1.SetCondition(
 			&tc.Status.Conditions,

@@ -163,7 +163,7 @@ func (r *MaintenanceBundleReconciler) Reconcile(ctx context.Context, req ctrl.Re
 	}
 
 	// Job exists — check for OperationResult.
-	complete, failed, result := readOperationalResult(ctx, r.Client, mb.Namespace, jobName)
+	complete, failed, result := readOperationRecord(ctx, r.Client, mb.Spec.ClusterRef.Name, jobName)
 	if failed {
 		mb.Status.OperationResult = result
 		platformv1alpha1.SetCondition(

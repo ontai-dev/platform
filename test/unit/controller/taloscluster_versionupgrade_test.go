@@ -321,6 +321,9 @@ func TestTalosCluster_VersionUpgrade_CompletesCondition(t *testing.T) {
 func TestUpgradePolicy_PatchesObservedTalosVersion(t *testing.T) {
 	scheme := buildDay2Scheme(t)
 
+	// buildReadyManagementCluster returns a *platformv1alpha1.TalosCluster, which is a type
+	// alias for *seamcorev1alpha1.InfrastructureTalosCluster. patchObservedTalosVersion
+	// patches status on this same object. observedVersion="v1.9.3" is the pre-upgrade value.
 	tc := buildReadyManagementCluster("ccs-mgmt", "seam-system", "v1.9.4", "v1.9.3")
 
 	up := &platformv1alpha1.UpgradePolicy{
@@ -333,12 +336,13 @@ func TestUpgradePolicy_PatchesObservedTalosVersion(t *testing.T) {
 		},
 	}
 
-	// Pre-create the Job and TCOR with Succeeded status so the reconciler sees completion.
+	// Pre-create the Job and per-cluster TCOR with Succeeded status so the reconciler
+	// sees completion. TCOR is named by clusterRef, lives in seam-tenant-{clusterRef}.
 	jobName := "upgrade-test-talos-upgrade"
 	existingJob := &batchv1.Job{
 		ObjectMeta: metav1.ObjectMeta{Name: jobName, Namespace: "seam-system"},
 	}
-	resultTCOR := successResultTCOR(jobName, "seam-system")
+	resultTCOR := successResultTCOR("ccs-mgmt", jobName)
 
 	// Pre-create a cluster RunnerConfig so the capability gate passes.
 	rc := clusterRC("ccs-mgmt", "talos-upgrade")
@@ -388,18 +392,18 @@ func TestUpgradePolicy_PatchesObservedTalosVersion(t *testing.T) {
 	}
 }
 
-// TestTCOR_DeletionLifecycle verifies that a TCOR CR owned by an UpgradePolicy
-// is garbage-collected when the UpgradePolicy is deleted (ownerReference chain).
-// This validates the N-1 archival prerequisite: platform reads the TCOR at
-// completion time (stubDumpTCORToGraphQueryDB called in readOperationalResult),
-// so the archive happens before the owning CR is deleted and GC removes the TCOR.
-func TestTCOR_DeletionLifecycle(t *testing.T) {
+// TestTCOR_RevisionBumpedAfterUpgrade verifies that when an UpgradePolicy for a talos
+// upgrade completes, bumpTCORRevision advances the per-cluster TCOR to a new revision
+// epoch: Revision increments, TalosVersion updates, and Operations are cleared.
+// The TCOR is never deleted — it is a long-lived accumulator for infrastructure memory.
+// CONDUCTOR-BL-GRAPHQUERY-ARCHIVE: archive stub phase.
+func TestTCOR_RevisionBumpedAfterUpgrade(t *testing.T) {
 	scheme := buildDay2Scheme(t)
 
 	up := &platformv1alpha1.UpgradePolicy{
 		ObjectMeta: metav1.ObjectMeta{
-			Name:      "upgrade-lifecycle-test",
-			Namespace: "seam-system",
+			Name:       "upgrade-rev-test",
+			Namespace:  "seam-system",
 			Generation: 1,
 		},
 		Spec: platformv1alpha1.UpgradePolicySpec{
@@ -409,49 +413,49 @@ func TestTCOR_DeletionLifecycle(t *testing.T) {
 		},
 	}
 
-	// TCOR owned by the UpgradePolicy via ownerReference.
-	jobName := "upgrade-lifecycle-test-talos-upgrade"
-	tcor := successResultTCOR(jobName, "seam-system")
-	tcor.OwnerReferences = []metav1.OwnerReference{
-		{
-			APIVersion:         "platform.ontai.dev/v1alpha1",
-			Kind:               "UpgradePolicy",
-			Name:               up.Name,
-			UID:                up.UID,
-			Controller:         func(b bool) *bool { return &b }(true),
-			BlockOwnerDeletion: func(b bool) *bool { return &b }(true),
-		},
+	// Pre-create the per-cluster TCOR at seam-tenant-ccs-mgmt/ccs-mgmt with TalosVersion=v1.9.3
+	// and a prior operation record. After upgrade completes, revision must advance to 2,
+	// TalosVersion must update to v1.9.4, and Operations must be cleared.
+	jobName := "upgrade-rev-test-talos-upgrade"
+	existingTCOR := successResultTCOR("ccs-mgmt", jobName)
+
+	existingJob := &batchv1.Job{
+		ObjectMeta: metav1.ObjectMeta{Name: jobName, Namespace: "seam-system"},
 	}
+	tc := buildReadyManagementCluster("ccs-mgmt", "seam-system", "v1.9.4", "v1.9.3")
+	rc := clusterRC("ccs-mgmt", "talos-upgrade")
 
 	c := fake.NewClientBuilder().
 		WithScheme(scheme).
-		WithObjects(up, tcor).
-		WithStatusSubresource(up).
+		WithObjects(tc, up, existingJob, existingTCOR, rc).
+		WithStatusSubresource(tc, up).
 		Build()
+	r := &controller.UpgradePolicyReconciler{Client: c, Scheme: scheme, Recorder: clientevents.NewFakeRecorder(32)}
 
-	// Verify TCOR exists before deletion.
-	existing := successResultTCOR(jobName, "seam-system")
+	if _, err := r.Reconcile(context.Background(), ctrl.Request{
+		NamespacedName: types.NamespacedName{Name: "upgrade-rev-test", Namespace: "seam-system"},
+	}); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	// TCOR must still exist at seam-tenant-ccs-mgmt/ccs-mgmt — never deleted.
+	tcor := &seamcorev1alpha1.InfrastructureTalosClusterOperationResult{}
 	if err := c.Get(context.Background(), types.NamespacedName{
-		Name: jobName, Namespace: "seam-system",
-	}, existing); err != nil {
-		t.Fatalf("TCOR should exist before deletion: %v", err)
+		Name: "ccs-mgmt", Namespace: "seam-tenant-ccs-mgmt",
+	}, tcor); err != nil {
+		t.Fatalf("TCOR not found after upgrade: %v", err)
 	}
 
-	// OwnerReference is set correctly.
-	if len(existing.OwnerReferences) != 1 {
-		t.Errorf("expected 1 ownerReference on TCOR, got %d", len(existing.OwnerReferences))
+	// Revision must advance from 1 to 2.
+	if tcor.Spec.Revision != 2 {
+		t.Errorf("Revision = %d, want 2", tcor.Spec.Revision)
 	}
-	if existing.OwnerReferences[0].Name != up.Name {
-		t.Errorf("TCOR ownerReference.Name = %q, want %q",
-			existing.OwnerReferences[0].Name, up.Name)
+	// TalosVersion must reflect the upgrade target.
+	if tcor.Spec.TalosVersion != "v1.9.4" {
+		t.Errorf("TalosVersion = %q, want v1.9.4", tcor.Spec.TalosVersion)
 	}
-	if existing.OwnerReferences[0].Kind != "UpgradePolicy" {
-		t.Errorf("TCOR ownerReference.Kind = %q, want UpgradePolicy",
-			existing.OwnerReferences[0].Kind)
+	// Operations cleared — new epoch begins empty.
+	if len(tcor.Spec.Operations) != 0 {
+		t.Errorf("Operations len = %d after revision bump, want 0", len(tcor.Spec.Operations))
 	}
-	// Note: the fake client does not simulate GC cascades. In a real cluster,
-	// deleting the UpgradePolicy would trigger GC deletion of the TCOR.
-	// The stubDumpTCORToGraphQueryDB call happens in readOperationalResult when the
-	// reconciler first sees the terminal TCOR status — before the TTL or GC removes it.
-	// CONDUCTOR-BL-GRAPHQUERY-ARCHIVE: stub phase.
 }

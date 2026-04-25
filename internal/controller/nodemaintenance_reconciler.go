@@ -180,7 +180,7 @@ func (r *NodeMaintenanceReconciler) Reconcile(ctx context.Context, req ctrl.Requ
 	}
 
 	// Job exists — check OperationResult ConfigMap.
-	complete, failed, result := readOperationalResult(ctx, r.Client, nm.Namespace, jobName)
+	complete, failed, result := readOperationRecord(ctx, r.Client, nm.Spec.ClusterRef.Name, jobName)
 	if failed {
 		nm.Status.OperationResult = result
 		platformv1alpha1.SetCondition(

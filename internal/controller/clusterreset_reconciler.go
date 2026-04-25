@@ -303,7 +303,7 @@ func (r *ClusterResetReconciler) submitAndWatchResetJob(ctx context.Context, crs
 	}
 
 	// Job exists — check OperationResult ConfigMap.
-	complete, failed, result := readOperationalResult(ctx, r.Client, jobNamespace, jobName)
+	complete, failed, result := readOperationRecord(ctx, r.Client, crst.Spec.ClusterRef.Name, jobName)
 	if failed {
 		crst.Status.OperationResult = result
 		platformv1alpha1.SetCondition(

@@ -340,7 +340,7 @@ func (r *NodeOperationReconciler) reconcileDirectNodeOp(ctx context.Context, nop
 	}
 
 	// Job exists — check OperationResult ConfigMap.
-	complete, failed, result := readOperationalResult(ctx, r.Client, nop.Namespace, jobName)
+	complete, failed, result := readOperationRecord(ctx, r.Client, nop.Spec.ClusterRef.Name, jobName)
 	if failed {
 		nop.Status.OperationResult = result
 		platformv1alpha1.SetCondition(

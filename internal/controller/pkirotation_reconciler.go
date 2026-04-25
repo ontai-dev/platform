@@ -158,7 +158,7 @@ func (r *PKIRotationReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 	}
 
 	// Job exists — check OperationResult ConfigMap.
-	complete, failed, result := readOperationalResult(ctx, r.Client, pkir.Namespace, jobName)
+	complete, failed, result := readOperationRecord(ctx, r.Client, pkir.Spec.ClusterRef.Name, jobName)
 	if failed {
 		pkir.Status.OperationResult = result
 		platformv1alpha1.SetCondition(

@@ -333,8 +333,9 @@ func TestTalosClusterReconcile_ManagementBootstrapComplete(t *testing.T) {
 		},
 	}
 
-	// Pre-create the TCOR CR with status=Succeeded. CR name equals the Job name.
-	resultTCOR := successResultTCOR("ccs-mgmt-bootstrap", "seam-system")
+	// Pre-create the per-cluster TCOR at seam-tenant-ccs-mgmt/ccs-mgmt with the bootstrap
+	// job result. readOperationRecord looks up by (clusterRef="ccs-mgmt", jobName).
+	resultTCOR := successResultTCOR("ccs-mgmt", "ccs-mgmt-bootstrap")
 
 	c := fake.NewClientBuilder().
 		WithScheme(scheme).

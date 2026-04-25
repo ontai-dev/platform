@@ -323,7 +323,7 @@ func (r *UpgradePolicyReconciler) reconcileDirectUpgrade(ctx context.Context, up
 	}
 
 	// Job exists — check OperationResult ConfigMap.
-	complete, failed, result := readOperationalResult(ctx, r.Client, up.Namespace, jobName)
+	complete, failed, result := readOperationRecord(ctx, r.Client, up.Spec.ClusterRef.Name, jobName)
 	if failed {
 		up.Status.OperationResult = result
 		platformv1alpha1.SetCondition(
@@ -363,6 +363,12 @@ func (r *UpgradePolicyReconciler) reconcileDirectUpgrade(ctx context.Context, up
 			up.Spec.UpgradeType == platformv1alpha1.UpgradeTypeStack) {
 		if pErr := r.patchObservedTalosVersion(ctx, up, up.Spec.TargetTalosVersion); pErr != nil {
 			logger.Error(pErr, "failed to patch InfrastructureTalosCluster observedTalosVersion",
+				"cluster", up.Spec.ClusterRef.Name, "version", up.Spec.TargetTalosVersion)
+		}
+		// Advance the TCOR to a new revision epoch for the new talosVersion.
+		// Archives N-1 operations to GraphQuery DB stub and clears the operations map.
+		if bumpErr := bumpTCORRevision(ctx, r.Client, up.Spec.ClusterRef.Name, up.Spec.TargetTalosVersion); bumpErr != nil {
+			logger.Error(bumpErr, "failed to bump TCOR revision",
 				"cluster", up.Spec.ClusterRef.Name, "version", up.Spec.TargetTalosVersion)
 		}
 	}

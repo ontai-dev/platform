@@ -226,7 +226,7 @@ func (r *EtcdMaintenanceReconciler) Reconcile(ctx context.Context, req ctrl.Requ
 	}
 
 	// Job exists — check OperationResult ConfigMap.
-	complete, failed, result := readOperationalResult(ctx, r.Client, em.Namespace, jobName)
+	complete, failed, result := readOperationRecord(ctx, r.Client, em.Spec.ClusterRef.Name, jobName)
 	if failed {
 		em.Status.OperationResult = result
 		platformv1alpha1.SetCondition(

@@ -270,30 +270,10 @@ func (r *TalosClusterReconciler) submitBootstrapJob(ctx context.Context, tc *pla
 	return nil
 }
 
-// readOperationResult checks for the InfrastructureTalosClusterOperationResult CR
-// written by the bootstrap Conductor executor. CR name equals the Job name.
-// Archives the TCOR via stubDumpTCORToGraphQueryDB when a terminal status is found.
-// Returns (complete, failed, message).
-func (r *TalosClusterReconciler) readOperationResult(ctx context.Context, namespace, jobName string) (complete, failed bool, message string) {
-	tcor := &TalosClusterOperationResult{}
-	if err := r.Client.Get(ctx, types.NamespacedName{Name: jobName, Namespace: namespace}, tcor); err != nil {
-		// Not yet written — job still running.
-		return false, false, ""
-	}
-	switch tcor.Spec.Status {
-	case "Succeeded":
-		stubDumpTCORToGraphQueryDB(ctx, tcor)
-		return true, false, tcor.Spec.Message
-	case "Failed":
-		stubDumpTCORToGraphQueryDB(ctx, tcor)
-		msg := tcor.Spec.Message
-		if tcor.Spec.FailureReason != nil && tcor.Spec.FailureReason.Reason != "" {
-			msg = tcor.Spec.FailureReason.Reason
-		}
-		return false, true, msg
-	default:
-		return false, false, ""
-	}
+// readOperationResult delegates to readOperationRecord using the TalosCluster
+// name as clusterRef. Used by the bootstrap conductor Job path.
+func (r *TalosClusterReconciler) readOperationResult(ctx context.Context, clusterName, jobName string) (complete, failed bool, message string) {
+	return readOperationRecord(ctx, r.Client, clusterName, jobName)
 }
 
 // ensureTenantNamespace creates the seam-tenant-{cluster-name} namespace if it
@@ -1339,6 +1319,14 @@ func (r *TalosClusterReconciler) ensureTenantExecutorResources(ctx context.Conte
 		if err := r.Client.Create(ctx, rb); err != nil && !apierrors.IsAlreadyExists(err) {
 			return fmt.Errorf("ensureTenantExecutorResources: create RoleBinding: %w", err)
 		}
+	}
+	// Ensure the per-cluster TCOR exists so Conductor executor Jobs can append records.
+	talosVersion := ""
+	if tc.Spec.TalosVersion != "" {
+		talosVersion = tc.Spec.TalosVersion
+	}
+	if err := ensureTCOR(ctx, r.Client, tc.Name, talosVersion); err != nil {
+		return fmt.Errorf("ensureTenantExecutorResources: %w", err)
 	}
 	return nil
 }

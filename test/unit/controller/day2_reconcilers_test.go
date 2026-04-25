@@ -65,30 +65,47 @@ func clusterRC(clusterName string, capabilities ...string) *controller.Operation
 }
 
 // successResultTCOR builds an InfrastructureTalosClusterOperationResult CR indicating success.
-// CR name equals jobName (no suffix). The conductor executor creates it with OPERATION_RESULT_CR=jobName.
-func successResultTCOR(jobName, namespace string) *seamcorev1alpha1.InfrastructureTalosClusterOperationResult {
+// One TCOR per cluster: named clusterRef in seam-tenant-{clusterRef}. The jobName is the
+// Operations map key (OPERATION_RESULT_CR env value set by the platform reconciler).
+func successResultTCOR(clusterRef, jobName string) *seamcorev1alpha1.InfrastructureTalosClusterOperationResult {
 	return &seamcorev1alpha1.InfrastructureTalosClusterOperationResult{
-		ObjectMeta: metav1.ObjectMeta{Name: jobName, Namespace: namespace},
+		ObjectMeta: metav1.ObjectMeta{Name: clusterRef, Namespace: "seam-tenant-" + clusterRef},
 		Spec: seamcorev1alpha1.InfrastructureTalosClusterOperationResultSpec{
-			Capability: "test-capability",
-			ClusterRef: "test-cluster",
-			JobRef:     jobName,
-			Status:     seamcorev1alpha1.TalosClusterResultSucceeded,
-			Message:    "operation completed",
+			ClusterRef:   clusterRef,
+			TalosVersion: "v1.9.3",
+			Revision:     1,
+			Operations: map[string]seamcorev1alpha1.TalosClusterOperationRecord{
+				jobName: {
+					Capability: "test-capability",
+					JobRef:     jobName,
+					Status:     seamcorev1alpha1.TalosClusterResultSucceeded,
+					Message:    "operation completed",
+				},
+			},
 		},
 	}
 }
 
 // failedResultTCOR builds an InfrastructureTalosClusterOperationResult CR indicating failure.
-func failedResultTCOR(jobName, namespace, message string) *seamcorev1alpha1.InfrastructureTalosClusterOperationResult {
+func failedResultTCOR(clusterRef, jobName, message string) *seamcorev1alpha1.InfrastructureTalosClusterOperationResult {
 	return &seamcorev1alpha1.InfrastructureTalosClusterOperationResult{
-		ObjectMeta: metav1.ObjectMeta{Name: jobName, Namespace: namespace},
+		ObjectMeta: metav1.ObjectMeta{Name: clusterRef, Namespace: "seam-tenant-" + clusterRef},
 		Spec: seamcorev1alpha1.InfrastructureTalosClusterOperationResultSpec{
-			Capability: "test-capability",
-			ClusterRef: "test-cluster",
-			JobRef:     jobName,
-			Status:     seamcorev1alpha1.TalosClusterResultFailed,
-			Message:    message,
+			ClusterRef:   clusterRef,
+			TalosVersion: "v1.9.3",
+			Revision:     1,
+			Operations: map[string]seamcorev1alpha1.TalosClusterOperationRecord{
+				jobName: {
+					Capability: "test-capability",
+					JobRef:     jobName,
+					Status:     seamcorev1alpha1.TalosClusterResultFailed,
+					Message:    message,
+					FailureReason: &seamcorev1alpha1.TalosClusterOperationFailureReason{
+						Category: "ExecutionFailure",
+						Reason:   message,
+					},
+				},
+			},
 		},
 	}
 }
@@ -214,7 +231,7 @@ func TestEtcdMaintenanceReconcile_JobComplete(t *testing.T) {
 			em,
 			clusterRC("test-cluster", "etcd-backup"),
 			preExistingJob(jobName, "seam-tenant-test"),
-			successResultTCOR(jobName, "seam-tenant-test"),
+			successResultTCOR("test-cluster", jobName),
 		).
 		WithStatusSubresource(em).
 		Build()
@@ -375,7 +392,7 @@ func TestClusterResetReconcile_JobComplete(t *testing.T) {
 			crst,
 			clusterRC("ccs-mgmt", "cluster-reset"),
 			preExistingJob(jobName, "ont-system"),
-			successResultTCOR(jobName, "ont-system"),
+			successResultTCOR("ccs-mgmt", jobName),
 		).
 		WithStatusSubresource(crst).
 		Build()
@@ -422,7 +439,7 @@ func TestClusterResetReconcile_JobFailed(t *testing.T) {
 			crst,
 			clusterRC("ccs-mgmt", "cluster-reset"),
 			preExistingJob(jobName, "ont-system"),
-			failedResultTCOR(jobName, "ont-system", "reset failed"),
+			failedResultTCOR("ccs-mgmt", jobName, "reset failed"),
 		).
 		WithStatusSubresource(crst).
 		Build()
@@ -722,7 +739,7 @@ func TestPKIRotationReconcile_Complete(t *testing.T) {
 			pkir,
 			clusterRC("test-cluster", "pki-rotate"),
 			preExistingJob(jobName, "seam-tenant-test"),
-			successResultTCOR(jobName, "seam-tenant-test"),
+			successResultTCOR("test-cluster", jobName),
 		).
 		WithStatusSubresource(pkir).
 		Build()
@@ -773,7 +790,7 @@ func TestPKIRotationReconcile_Failed(t *testing.T) {
 			pkir,
 			clusterRC("test-cluster", "pki-rotate"),
 			preExistingJob(jobName, "seam-tenant-test"),
-			failedResultTCOR(jobName, "seam-tenant-test", "pki rotation error"),
+			failedResultTCOR("test-cluster", jobName, "pki rotation error"),
 		).
 		WithStatusSubresource(pkir).
 		Build()
@@ -1273,7 +1290,7 @@ func TestUpgradePolicyReconcile_Failed(t *testing.T) {
 			up,
 			clusterRC("ccs-mgmt", "talos-upgrade"),
 			preExistingJob(jobName, "ont-system"),
-			failedResultTCOR(jobName, "ont-system", "upgrade failed"),
+			failedResultTCOR("ccs-mgmt", jobName, "upgrade failed"),
 		).
 		WithStatusSubresource(up).
 		Build()
@@ -1406,7 +1423,7 @@ func TestNodeOperationReconcile_Failed(t *testing.T) {
 			nop,
 			clusterRC("ccs-mgmt", "node-scale-up"),
 			preExistingJob(jobName, "ont-system"),
-			failedResultTCOR(jobName, "ont-system", "scale-up failed"),
+			failedResultTCOR("ccs-mgmt", jobName, "scale-up failed"),
 		).
 		WithStatusSubresource(nop).
 		Build()
@@ -1810,8 +1827,10 @@ func TestMaintenanceBundleReconcile_JobSucceeds(t *testing.T) {
 			Namespace: "seam-system",
 		},
 	}
-	resultTCOR := successResultTCOR("test-etcd-backup-etcd-backup", "seam-system")
-	resultTCOR.Spec.Message = "backup completed"
+	resultTCOR := successResultTCOR("test-cluster", "test-etcd-backup-etcd-backup")
+	rec := resultTCOR.Spec.Operations["test-etcd-backup-etcd-backup"]
+	rec.Message = "backup completed"
+	resultTCOR.Spec.Operations["test-etcd-backup-etcd-backup"] = rec
 	c := fake.NewClientBuilder().WithScheme(scheme).
 		WithObjects(mb, existingJob, resultTCOR, clusterRC("test-cluster", "etcd-backup")).WithStatusSubresource(mb).Build()
 	r := &controller.MaintenanceBundleReconciler{Client: c, Scheme: scheme, Recorder: fakeRecorder()}
@@ -1859,7 +1878,7 @@ func TestMaintenanceBundleReconcile_JobFails(t *testing.T) {
 			Namespace: "seam-system",
 		},
 	}
-	resultTCOR := failedResultTCOR("test-etcd-backup-etcd-backup", "seam-system", "S3 unreachable")
+	resultTCOR := failedResultTCOR("test-cluster", "test-etcd-backup-etcd-backup", "S3 unreachable")
 	c := fake.NewClientBuilder().WithScheme(scheme).
 		WithObjects(mb, existingJob, resultTCOR, clusterRC("test-cluster", "etcd-backup")).WithStatusSubresource(mb).Build()
 	r := &controller.MaintenanceBundleReconciler{Client: c, Scheme: scheme, Recorder: fakeRecorder()}

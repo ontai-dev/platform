@@ -143,31 +143,87 @@ func getOperationalJob(ctx context.Context, c client.Client, namespace, jobName 
 	return job, nil
 }
 
-// readOperationalResult checks for the InfrastructureTalosClusterOperationResult CR
-// written by the Conductor executor. CR name equals the Job name.
-// When a terminal status (Succeeded or Failed) is found, the TCOR is archived
-// via stubDumpTCORToGraphQueryDB before the TTL controller deletes it.
+// tenantNS returns the seam-tenant-{clusterRef} namespace.
+func tenantNS(clusterRef string) string {
+	return "seam-tenant-" + clusterRef
+}
+
+// readOperationRecord reads the per-cluster TCOR (named clusterRef in
+// seam-tenant-{clusterRef}) and looks up the record by jobName key.
 // Returns (complete, failed, message).
-func readOperationalResult(ctx context.Context, c client.Client, namespace, jobName string) (complete, failed bool, message string) {
+// Returns (false, false, "") when the TCOR does not yet exist or the
+// record has not been written yet — the Job is still running.
+func readOperationRecord(ctx context.Context, c client.Client, clusterRef, jobName string) (complete, failed bool, message string) {
 	tcor := &seamcorev1alpha1.InfrastructureTalosClusterOperationResult{}
-	if err := c.Get(ctx, types.NamespacedName{Name: jobName, Namespace: namespace}, tcor); err != nil {
-		// Not yet written — job still running.
+	if err := c.Get(ctx, types.NamespacedName{Name: clusterRef, Namespace: tenantNS(clusterRef)}, tcor); err != nil {
 		return false, false, ""
 	}
-	switch tcor.Spec.Status {
+	rec, ok := tcor.Spec.Operations[jobName]
+	if !ok {
+		return false, false, ""
+	}
+	switch rec.Status {
 	case seamcorev1alpha1.TalosClusterResultSucceeded:
-		stubDumpTCORToGraphQueryDB(ctx, tcor)
-		return true, false, tcor.Spec.Message
+		return true, false, rec.Message
 	case seamcorev1alpha1.TalosClusterResultFailed:
-		stubDumpTCORToGraphQueryDB(ctx, tcor)
-		msg := tcor.Spec.Message
-		if tcor.Spec.FailureReason != nil && tcor.Spec.FailureReason.Reason != "" {
-			msg = tcor.Spec.FailureReason.Reason
+		msg := rec.Message
+		if rec.FailureReason != nil && rec.FailureReason.Reason != "" {
+			msg = rec.FailureReason.Reason
 		}
 		return false, true, msg
-	default:
-		return false, false, ""
 	}
+	return false, false, ""
+}
+
+// ensureTCOR creates the per-cluster TCOR in seam-tenant-{clusterRef} if it
+// does not yet exist. Called by ensureTenantExecutorResources on cluster admission.
+func ensureTCOR(ctx context.Context, c client.Client, clusterRef, talosVersion string) error {
+	ns := tenantNS(clusterRef)
+	tcor := &seamcorev1alpha1.InfrastructureTalosClusterOperationResult{}
+	if err := c.Get(ctx, types.NamespacedName{Name: clusterRef, Namespace: ns}, tcor); err == nil {
+		return nil
+	} else if !apierrors.IsNotFound(err) {
+		return fmt.Errorf("ensureTCOR: get TCOR %s/%s: %w", ns, clusterRef, err)
+	}
+	tcor = &seamcorev1alpha1.InfrastructureTalosClusterOperationResult{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      clusterRef,
+			Namespace: ns,
+			Labels:    map[string]string{"platform.ontai.dev/cluster": clusterRef},
+		},
+		Spec: seamcorev1alpha1.InfrastructureTalosClusterOperationResultSpec{
+			ClusterRef:   clusterRef,
+			TalosVersion: talosVersion,
+			Revision:     1,
+		},
+	}
+	if err := c.Create(ctx, tcor); err != nil && !apierrors.IsAlreadyExists(err) {
+		return fmt.Errorf("ensureTCOR: create TCOR %s/%s: %w", ns, clusterRef, err)
+	}
+	return nil
+}
+
+// bumpTCORRevision archives the current revision of the cluster TCOR to the
+// GraphQuery DB stub, then advances to a new revision for the given talosVersion.
+// Called by UpgradePolicyReconciler after a successful talosVersion upgrade.
+func bumpTCORRevision(ctx context.Context, c client.Client, clusterRef, newTalosVersion string) error {
+	ns := tenantNS(clusterRef)
+	tcor := &seamcorev1alpha1.InfrastructureTalosClusterOperationResult{}
+	if err := c.Get(ctx, types.NamespacedName{Name: clusterRef, Namespace: ns}, tcor); err != nil {
+		if apierrors.IsNotFound(err) {
+			return ensureTCOR(ctx, c, clusterRef, newTalosVersion)
+		}
+		return fmt.Errorf("bumpTCORRevision: get TCOR %s/%s: %w", ns, clusterRef, err)
+	}
+	if tcor.Spec.TalosVersion == newTalosVersion {
+		return nil
+	}
+	stubDumpTCORRevisionToGraphQueryDB(ctx, clusterRef, tcor.Spec.Revision, tcor.Spec.TalosVersion, tcor.Spec.Operations)
+	patch := client.MergeFrom(tcor.DeepCopy())
+	tcor.Spec.Revision++
+	tcor.Spec.TalosVersion = newTalosVersion
+	tcor.Spec.Operations = nil
+	return c.Patch(ctx, tcor, patch)
 }
 
 // jobSpecWithExclusions builds a Conductor executor Job spec and applies NotIn
