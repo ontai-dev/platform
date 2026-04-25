@@ -318,8 +318,8 @@ func TestTalosClusterReconcile_ManagementBootstrapJobSubmitted(t *testing.T) {
 }
 
 // TestTalosClusterReconcile_ManagementBootstrapComplete verifies that when the
-// OperationResult ConfigMap reports status=success, the reconciler transitions the
-// TalosCluster to Ready=True and clears the Bootstrapping condition.
+// InfrastructureTalosClusterOperationResult CR reports status=Succeeded, the reconciler
+// transitions the TalosCluster to Ready=True and clears the Bootstrapping condition.
 // platform-design.md §5.
 func TestTalosClusterReconcile_ManagementBootstrapComplete(t *testing.T) {
 	scheme := buildDay2Scheme(t)
@@ -333,21 +333,12 @@ func TestTalosClusterReconcile_ManagementBootstrapComplete(t *testing.T) {
 		},
 	}
 
-	// Pre-create the OperationResult ConfigMap with status=success.
-	resultCM := &corev1.ConfigMap{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      "ccs-mgmt-bootstrap-result",
-			Namespace: "seam-system",
-		},
-		Data: map[string]string{
-			"status":  "success",
-			"message": "cluster bootstrapped",
-		},
-	}
+	// Pre-create the TCOR CR with status=Succeeded. CR name equals the Job name.
+	resultTCOR := successResultTCOR("ccs-mgmt-bootstrap", "seam-system")
 
 	c := fake.NewClientBuilder().
 		WithScheme(scheme).
-		WithObjects(tc, existingJob, resultCM).
+		WithObjects(tc, existingJob, resultTCOR).
 		WithStatusSubresource(tc).
 		Build()
 	r := &controller.TalosClusterReconciler{

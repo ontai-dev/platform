@@ -197,7 +197,7 @@ func (r *EtcdMaintenanceReconciler) Reconcile(ctx context.Context, req ctrl.Requ
 		}
 		nodeExclusions := buildNodeExclusions(em.Spec.TargetNodes, leaderNode)
 
-		job := jobSpecWithExclusions(jobName, em.Namespace, em.Spec.ClusterRef.Name, capability, nodeExclusions)
+		job := jobSpecWithExclusions(jobName, em.Namespace, em.Spec.ClusterRef.Name, capability, nodeExclusions, clusterRC.Spec.RunnerImage)
 		if err := controllerutil.SetControllerReference(em, job, r.Scheme); err != nil {
 			return ctrl.Result{}, fmt.Errorf("EtcdMaintenanceReconciler: set owner reference: %w", err)
 		}

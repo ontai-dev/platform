@@ -252,7 +252,7 @@ func (r *TalosClusterReconciler) reconcileDirectBootstrap(ctx context.Context, t
 			}
 		} else {
 			// WS2: register the management cluster in the platform RBAC policy.
-			if err := r.ensureManagementOnboarding(ctx); err != nil {
+			if err := r.ensureManagementOnboarding(ctx, tc); err != nil {
 				return ctrl.Result{}, fmt.Errorf("reconcileDirectBootstrap: management onboarding (import): %w", err)
 			}
 		}
@@ -312,7 +312,7 @@ func (r *TalosClusterReconciler) reconcileDirectBootstrap(ctx context.Context, t
 				tc.Generation,
 			)
 			// WS2: register management cluster in the platform RBAC policy.
-			if err := r.ensureManagementOnboarding(ctx); err != nil {
+			if err := r.ensureManagementOnboarding(ctx, tc); err != nil {
 				return ctrl.Result{}, fmt.Errorf("reconcileDirectBootstrap: management onboarding (pre-existing): %w", err)
 			}
 			logger.Info("management cluster pre-existing — transitioning to Ready without bootstrap Job",
@@ -391,7 +391,7 @@ func (r *TalosClusterReconciler) reconcileDirectBootstrap(ctx context.Context, t
 		tc.Generation,
 	)
 	// WS2: register management cluster in the platform RBAC policy.
-	if err := r.ensureManagementOnboarding(ctx); err != nil {
+	if err := r.ensureManagementOnboarding(ctx, tc); err != nil {
 		return ctrl.Result{}, fmt.Errorf("reconcileDirectBootstrap: management onboarding (bootstrap complete): %w", err)
 	}
 	logger.Info("management cluster bootstrap complete, cluster Ready",

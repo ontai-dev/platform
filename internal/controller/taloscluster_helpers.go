@@ -38,10 +38,6 @@ const (
 	// WS2: was incorrectly "cluster-bootstrap" — corrected to "bootstrap".
 	bootstrapCapability = "bootstrap"
 
-	// operationResultConfigMapSuffix is appended to the job name to form the
-	// OperationResult ConfigMap name.
-	operationResultConfigMapSuffix = "-result"
-
 	// tenantNamespaceLabel is the namespace label applied to all tenant namespaces.
 	tenantNamespaceLabel = "ontai.dev/tenant"
 
@@ -186,10 +182,16 @@ func (r *TalosClusterReconciler) getBootstrapJob(ctx context.Context, namespace,
 }
 
 // submitBootstrapJob creates the bootstrap Conductor Job for a management cluster
-// TalosCluster (capi.enabled=false). The job mounts the bootstrap secrets from
-// ont-system and runs the cluster-bootstrap capability in executor mode.
+// TalosCluster (capi.enabled=false). The job runs the bootstrap capability in executor
+// mode. Image is derived from tc.Spec.TalosVersion the same way as ensureBootstrapRunnerConfig.
 // platform-design.md §5.
 func (r *TalosClusterReconciler) submitBootstrapJob(ctx context.Context, tc *platformv1alpha1.TalosCluster, jobName string) error {
+	registry := os.Getenv(conductorRegistryEnv)
+	if registry == "" {
+		registry = conductorRegistryDefault
+	}
+	runnerImage := fmt.Sprintf("%s/%s:%s-%s", registry, conductorImageName, tc.Spec.TalosVersion, devRevision)
+
 	ttlSeconds := int32(600)
 	backoffLimit := int32(0) // INV-018: gate failures are permanent, no retry.
 	job := &batchv1.Job{
@@ -216,26 +218,20 @@ func (r *TalosClusterReconciler) submitBootstrapJob(ctx context.Context, tc *pla
 					ServiceAccountName: "platform-executor",
 					Containers: []corev1.Container{
 						{
-							// Image is resolved at runtime from RunnerConfig.
-							// This is a placeholder — the conductor image is pulled
-							// from the cluster's RunnerConfig.conductorImage field.
-							// TODO: read image from RunnerConfig when RunnerConfig
-							// CRD transfer to seam-core is complete (SC-INV-002).
 							Name:  "executor",
-							Image: "registry.ontai.dev/ontai-dev/conductor:latest",
-							Args: []string{
-								"execute",
-								"--capability", bootstrapCapability,
-								"--cluster", tc.Name,
-							},
+							Image: runnerImage,
+							Args:  []string{"execute"},
 							Env: []corev1.EnvVar{
+								{Name: "CAPABILITY", Value: bootstrapCapability},
+								{Name: "CLUSTER_REF", Value: tc.Name},
+								{Name: "OPERATION_RESULT_CR", Value: jobName},
 								{
-									Name:  "CLUSTER_NAME",
-									Value: tc.Name,
-								},
-								{
-									Name:  "CLUSTER_NAMESPACE",
-									Value: tc.Namespace,
+									Name: "POD_NAMESPACE",
+									ValueFrom: &corev1.EnvVarSource{
+										FieldRef: &corev1.ObjectFieldSelector{
+											FieldPath: "metadata.namespace",
+										},
+									},
 								},
 							},
 						},
@@ -256,24 +252,26 @@ func (r *TalosClusterReconciler) submitBootstrapJob(ctx context.Context, tc *pla
 	return nil
 }
 
-// readOperationResult checks for the OperationResult ConfigMap written by the
-// bootstrap Conductor executor. Returns (complete, failed, message).
+// readOperationResult checks for the InfrastructureTalosClusterOperationResult CR
+// written by the bootstrap Conductor executor. CR name equals the Job name.
+// Returns (complete, failed, message).
 func (r *TalosClusterReconciler) readOperationResult(ctx context.Context, namespace, jobName string) (complete, failed bool, message string) {
-	cmName := jobName + operationResultConfigMapSuffix
-	cm := &corev1.ConfigMap{}
-	if err := r.Client.Get(ctx, types.NamespacedName{Name: cmName, Namespace: namespace}, cm); err != nil {
-		// ConfigMap not yet written — job still running.
+	tcor := &TalosClusterOperationResult{}
+	if err := r.Client.Get(ctx, types.NamespacedName{Name: jobName, Namespace: namespace}, tcor); err != nil {
+		// Not yet written — job still running.
 		return false, false, ""
 	}
-	status := cm.Data["status"]
-	msg := cm.Data["message"]
-	switch status {
-	case "success":
-		return true, false, msg
-	case "failure", "failed":
+	switch tcor.Spec.Status {
+	case "Succeeded":
+		return true, false, tcor.Spec.Message
+	case "Failed":
+		msg := tcor.Spec.Message
+		if tcor.Spec.FailureReason != nil && tcor.Spec.FailureReason.Reason != "" {
+			msg = tcor.Spec.FailureReason.Reason
+		}
 		return false, true, msg
 	default:
-		return false, false, msg
+		return false, false, ""
 	}
 }
 
@@ -799,7 +797,13 @@ func (r *TalosClusterReconciler) EnsureConductorDeploymentOnTargetCluster(
 				conductorAgentNamespace, conductorDeploymentName, tc.Name, err)
 		}
 		// Deployment does not exist — create it.
-		newDep := BuildConductorAgentDeployment(tc.Name)
+		// Derive agent image from tc.Spec.TalosVersion — same formula as ensureBootstrapRunnerConfig.
+		agentRegistry := os.Getenv(conductorRegistryEnv)
+		if agentRegistry == "" {
+			agentRegistry = conductorRegistryDefault
+		}
+		agentImage := fmt.Sprintf("%s/%s:%s-%s", agentRegistry, conductorImageName, tc.Spec.TalosVersion, devRevision)
+		newDep := BuildConductorAgentDeployment(tc.Name, agentImage)
 		if _, createErr := remoteK8s.AppsV1().Deployments(conductorAgentNamespace).Create(
 			ctx, newDep, metav1.CreateOptions{}); createErr != nil && !apierrors.IsAlreadyExists(createErr) {
 			return false, fmt.Errorf("ensureConductorDeployment: create deployment on %s: %w", tc.Name, createErr)
@@ -824,8 +828,9 @@ func (r *TalosClusterReconciler) EnsureConductorDeploymentOnTargetCluster(
 // fieldRef from pod template annotations so the pod reads its own identity without
 // hard-coding values. Annotations must be on the pod template, not the Deployment
 // metadata: fieldRef metadata.annotations resolves from the pod's own annotations.
+// runnerImage is the fully qualified image ref derived from RunnerConfig.Spec.RunnerImage.
 // conductor-schema.md §15. platform-schema.md §12.
-func BuildConductorAgentDeployment(clusterName string) *appsv1.Deployment {
+func BuildConductorAgentDeployment(clusterName, runnerImage string) *appsv1.Deployment {
 	replicas := int32(1)
 	return &appsv1.Deployment{
 		ObjectMeta: metav1.ObjectMeta{
@@ -859,7 +864,7 @@ func BuildConductorAgentDeployment(clusterName string) *appsv1.Deployment {
 					Containers: []corev1.Container{
 						{
 							Name:  "conductor",
-							Image: conductorImage, // Resolved from RunnerConfig.agentImage -- placeholder per SC-INV-002.
+							Image: runnerImage,
 							Args:  []string{"agent"},
 							Env: []corev1.EnvVar{
 								{
@@ -1153,14 +1158,63 @@ func (r *TalosClusterReconciler) ensureTenantOnboarding(ctx context.Context, tc 
 }
 
 // ensureManagementOnboarding appends "management" to seam-platform-rbac-policy
-// spec.allowedClusters when the management TalosCluster reaches Ready. Idempotent
-// and non-fatal on NotFound. PLATFORM-BL-3 WS2.
-func (r *TalosClusterReconciler) ensureManagementOnboarding(ctx context.Context) error {
+// spec.allowedClusters and copies the cluster talosconfig Secret to ont-system so
+// platform executor Jobs can mount it. Idempotent and non-fatal on NotFound.
+// PLATFORM-BL-3 WS2.
+func (r *TalosClusterReconciler) ensureManagementOnboarding(ctx context.Context, tc *platformv1alpha1.TalosCluster) error {
 	if err := r.appendToUnstructuredStringSlice(
 		ctx, rbacPolicyGVK, rbacPolicyNamespace, "seam-platform-rbac-policy",
 		[]string{"spec", "allowedClusters"}, "management",
 	); err != nil {
-		return fmt.Errorf("ensureManagementOnboarding: %w", err)
+		return fmt.Errorf("ensureManagementOnboarding: rbac policy: %w", err)
+	}
+	if err := r.ensureExecutorTalosconfig(ctx, tc); err != nil {
+		return fmt.Errorf("ensureManagementOnboarding: executor talosconfig: %w", err)
+	}
+	return nil
+}
+
+// ensureExecutorTalosconfig copies the cluster talosconfig Secret from
+// seam-tenant-{clusterName} to ont-system as {clusterName}-talosconfig so that
+// platform executor Jobs running in ont-system can mount it for Talos API access.
+// Idempotent — skips if the destination Secret already exists. Returns nil on
+// NotFound of the source (non-fatal; cluster may not yet have reached import ready state).
+func (r *TalosClusterReconciler) ensureExecutorTalosconfig(ctx context.Context, tc *platformv1alpha1.TalosCluster) error {
+	srcNS := importSecretsNamespace(tc.Name)
+	srcName := talosconfigSecretName(tc.Name)
+	dstName := tc.Name + "-talosconfig"
+	dstNS := bootstrapRunnerConfigNamespace // ont-system
+
+	// Check if destination already exists — idempotent.
+	dst := &corev1.Secret{}
+	if err := r.Client.Get(ctx, types.NamespacedName{Name: dstName, Namespace: dstNS}, dst); err == nil {
+		return nil
+	} else if !apierrors.IsNotFound(err) {
+		return fmt.Errorf("ensureExecutorTalosconfig: get dest Secret %s/%s: %w", dstNS, dstName, err)
+	}
+
+	// Read source talosconfig Secret.
+	src := &corev1.Secret{}
+	if err := r.Client.Get(ctx, types.NamespacedName{Name: srcName, Namespace: srcNS}, src); err != nil {
+		if apierrors.IsNotFound(err) {
+			return nil // source not yet present, skip silently
+		}
+		return fmt.Errorf("ensureExecutorTalosconfig: get source Secret %s/%s: %w", srcNS, srcName, err)
+	}
+
+	copy := &corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      dstName,
+			Namespace: dstNS,
+			Labels: map[string]string{
+				"platform.ontai.dev/cluster": tc.Name,
+			},
+		},
+		Type: corev1.SecretTypeOpaque,
+		Data: src.Data,
+	}
+	if err := r.Client.Create(ctx, copy); err != nil && !apierrors.IsAlreadyExists(err) {
+		return fmt.Errorf("ensureExecutorTalosconfig: create dest Secret %s/%s: %w", dstNS, dstName, err)
 	}
 	return nil
 }

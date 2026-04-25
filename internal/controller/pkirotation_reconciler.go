@@ -133,7 +133,7 @@ func (r *PKIRotationReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 		}
 		nodeExclusions := buildNodeExclusions(nil, leaderNode)
 
-		job := jobSpecWithExclusions(jobName, pkir.Namespace, pkir.Spec.ClusterRef.Name, capabilityPKIRotate, nodeExclusions)
+		job := jobSpecWithExclusions(jobName, pkir.Namespace, pkir.Spec.ClusterRef.Name, capabilityPKIRotate, nodeExclusions, clusterRC.Spec.RunnerImage)
 		if err := controllerutil.SetControllerReference(pkir, job, r.Scheme); err != nil {
 			return ctrl.Result{}, fmt.Errorf("PKIRotationReconciler: set owner reference: %w", err)
 		}

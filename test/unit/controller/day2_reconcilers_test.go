@@ -59,23 +59,37 @@ func clusterRC(clusterName string, capabilities ...string) *controller.Operation
 	rc := &controller.OperationalRunnerConfig{
 		ObjectMeta: metav1.ObjectMeta{Name: clusterName, Namespace: "ont-system"},
 	}
+	rc.Spec.RunnerImage = "10.20.0.1:5000/ontai-dev/conductor:v1.9.3-dev"
 	rc.Status.Capabilities = caps
 	return rc
 }
 
-// successResultCM builds an OperationResult ConfigMap indicating success.
-func successResultCM(jobName, namespace string) *corev1.ConfigMap {
-	return &corev1.ConfigMap{
-		ObjectMeta: metav1.ObjectMeta{Name: jobName + "-result", Namespace: namespace},
-		Data:       map[string]string{"status": "success", "message": "operation completed"},
+// successResultTCOR builds an InfrastructureTalosClusterOperationResult CR indicating success.
+// CR name equals jobName (no suffix). The conductor executor creates it with OPERATION_RESULT_CR=jobName.
+func successResultTCOR(jobName, namespace string) *seamcorev1alpha1.InfrastructureTalosClusterOperationResult {
+	return &seamcorev1alpha1.InfrastructureTalosClusterOperationResult{
+		ObjectMeta: metav1.ObjectMeta{Name: jobName, Namespace: namespace},
+		Spec: seamcorev1alpha1.InfrastructureTalosClusterOperationResultSpec{
+			Capability: "test-capability",
+			ClusterRef: "test-cluster",
+			JobRef:     jobName,
+			Status:     seamcorev1alpha1.TalosClusterResultSucceeded,
+			Message:    "operation completed",
+		},
 	}
 }
 
-// failedResultCM builds an OperationResult ConfigMap indicating failure.
-func failedResultCM(jobName, namespace, message string) *corev1.ConfigMap {
-	return &corev1.ConfigMap{
-		ObjectMeta: metav1.ObjectMeta{Name: jobName + "-result", Namespace: namespace},
-		Data:       map[string]string{"status": "failed", "message": message},
+// failedResultTCOR builds an InfrastructureTalosClusterOperationResult CR indicating failure.
+func failedResultTCOR(jobName, namespace, message string) *seamcorev1alpha1.InfrastructureTalosClusterOperationResult {
+	return &seamcorev1alpha1.InfrastructureTalosClusterOperationResult{
+		ObjectMeta: metav1.ObjectMeta{Name: jobName, Namespace: namespace},
+		Spec: seamcorev1alpha1.InfrastructureTalosClusterOperationResultSpec{
+			Capability: "test-capability",
+			ClusterRef: "test-cluster",
+			JobRef:     jobName,
+			Status:     seamcorev1alpha1.TalosClusterResultFailed,
+			Message:    message,
+		},
 	}
 }
 
@@ -200,7 +214,7 @@ func TestEtcdMaintenanceReconcile_JobComplete(t *testing.T) {
 			em,
 			clusterRC("test-cluster", "etcd-backup"),
 			preExistingJob(jobName, "seam-tenant-test"),
-			successResultCM(jobName, "seam-tenant-test"),
+			successResultTCOR(jobName, "seam-tenant-test"),
 		).
 		WithStatusSubresource(em).
 		Build()
@@ -361,7 +375,7 @@ func TestClusterResetReconcile_JobComplete(t *testing.T) {
 			crst,
 			clusterRC("ccs-mgmt", "cluster-reset"),
 			preExistingJob(jobName, "ont-system"),
-			successResultCM(jobName, "ont-system"),
+			successResultTCOR(jobName, "ont-system"),
 		).
 		WithStatusSubresource(crst).
 		Build()
@@ -408,7 +422,7 @@ func TestClusterResetReconcile_JobFailed(t *testing.T) {
 			crst,
 			clusterRC("ccs-mgmt", "cluster-reset"),
 			preExistingJob(jobName, "ont-system"),
-			failedResultCM(jobName, "ont-system", "reset failed"),
+			failedResultTCOR(jobName, "ont-system", "reset failed"),
 		).
 		WithStatusSubresource(crst).
 		Build()
@@ -708,7 +722,7 @@ func TestPKIRotationReconcile_Complete(t *testing.T) {
 			pkir,
 			clusterRC("test-cluster", "pki-rotate"),
 			preExistingJob(jobName, "seam-tenant-test"),
-			successResultCM(jobName, "seam-tenant-test"),
+			successResultTCOR(jobName, "seam-tenant-test"),
 		).
 		WithStatusSubresource(pkir).
 		Build()
@@ -759,7 +773,7 @@ func TestPKIRotationReconcile_Failed(t *testing.T) {
 			pkir,
 			clusterRC("test-cluster", "pki-rotate"),
 			preExistingJob(jobName, "seam-tenant-test"),
-			failedResultCM(jobName, "seam-tenant-test", "pki rotation error"),
+			failedResultTCOR(jobName, "seam-tenant-test", "pki rotation error"),
 		).
 		WithStatusSubresource(pkir).
 		Build()
@@ -1259,7 +1273,7 @@ func TestUpgradePolicyReconcile_Failed(t *testing.T) {
 			up,
 			clusterRC("ccs-mgmt", "talos-upgrade"),
 			preExistingJob(jobName, "ont-system"),
-			failedResultCM(jobName, "ont-system", "upgrade failed"),
+			failedResultTCOR(jobName, "ont-system", "upgrade failed"),
 		).
 		WithStatusSubresource(up).
 		Build()
@@ -1392,7 +1406,7 @@ func TestNodeOperationReconcile_Failed(t *testing.T) {
 			nop,
 			clusterRC("ccs-mgmt", "node-scale-up"),
 			preExistingJob(jobName, "ont-system"),
-			failedResultCM(jobName, "ont-system", "scale-up failed"),
+			failedResultTCOR(jobName, "ont-system", "scale-up failed"),
 		).
 		WithStatusSubresource(nop).
 		Build()
@@ -1728,7 +1742,8 @@ func TestMaintenanceBundleReconcile_SubmitsJobWithPreEncodedContext(t *testing.T
 			OperatorLeaderNode:     "control-plane-1",
 		},
 	}
-	c := fake.NewClientBuilder().WithScheme(scheme).WithObjects(mb).WithStatusSubresource(mb).Build()
+	rc := clusterRC("test-cluster", "drain")
+	c := fake.NewClientBuilder().WithScheme(scheme).WithObjects(mb, rc).WithStatusSubresource(mb, rc).Build()
 	r := &controller.MaintenanceBundleReconciler{Client: c, Scheme: scheme, Recorder: fakeRecorder()}
 
 	result, err := r.Reconcile(context.Background(), ctrl.Request{
@@ -1795,15 +1810,10 @@ func TestMaintenanceBundleReconcile_JobSucceeds(t *testing.T) {
 			Namespace: "seam-system",
 		},
 	}
-	resultCM := &corev1.ConfigMap{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      "test-etcd-backup-etcd-backup-result",
-			Namespace: "seam-system",
-		},
-		Data: map[string]string{"status": "success", "message": "backup completed"},
-	}
+	resultTCOR := successResultTCOR("test-etcd-backup-etcd-backup", "seam-system")
+	resultTCOR.Spec.Message = "backup completed"
 	c := fake.NewClientBuilder().WithScheme(scheme).
-		WithObjects(mb, existingJob, resultCM).WithStatusSubresource(mb).Build()
+		WithObjects(mb, existingJob, resultTCOR, clusterRC("test-cluster", "etcd-backup")).WithStatusSubresource(mb).Build()
 	r := &controller.MaintenanceBundleReconciler{Client: c, Scheme: scheme, Recorder: fakeRecorder()}
 
 	_, err := r.Reconcile(context.Background(), ctrl.Request{
@@ -1849,15 +1859,9 @@ func TestMaintenanceBundleReconcile_JobFails(t *testing.T) {
 			Namespace: "seam-system",
 		},
 	}
-	resultCM := &corev1.ConfigMap{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      "test-etcd-backup-etcd-backup-result",
-			Namespace: "seam-system",
-		},
-		Data: map[string]string{"status": "failed", "message": "S3 unreachable"},
-	}
+	resultTCOR := failedResultTCOR("test-etcd-backup-etcd-backup", "seam-system", "S3 unreachable")
 	c := fake.NewClientBuilder().WithScheme(scheme).
-		WithObjects(mb, existingJob, resultCM).WithStatusSubresource(mb).Build()
+		WithObjects(mb, existingJob, resultTCOR, clusterRC("test-cluster", "etcd-backup")).WithStatusSubresource(mb).Build()
 	r := &controller.MaintenanceBundleReconciler{Client: c, Scheme: scheme, Recorder: fakeRecorder()}
 
 	_, err := r.Reconcile(context.Background(), ctrl.Request{
@@ -2067,5 +2071,108 @@ func TestMaintenanceBundleReconcile_IdempotentAfterSuccess(t *testing.T) {
 	}
 	if len(jobList.Items) != 0 {
 		t.Errorf("expected no Jobs created on idempotent reconcile, got %d", len(jobList.Items))
+	}
+}
+
+// TestJobSpec_ConductorEnvInterface verifies that Jobs created by day-2 reconcilers
+// use the correct conductor binary interface:
+//   - Args: ["execute"] only (no --capability / --cluster flags)
+//   - CAPABILITY, CLUSTER_REF, OPERATION_RESULT_CM env vars are set
+//   - POD_NAMESPACE sourced from downward API
+//   - TALOSCONFIG_PATH set and volume mounted
+//   - RunnerImage from RunnerConfig.Spec.RunnerImage
+//
+// This test guards against regressions to the conductor execute-mode ENV contract.
+// conductor-schema.md §17, config.EnvCapability/EnvClusterRef/EnvOperationResultCR.
+func TestJobSpec_ConductorEnvInterface(t *testing.T) {
+	scheme := buildDay2Scheme(t)
+	nop := &platformv1alpha1.NodeOperation{
+		ObjectMeta: metav1.ObjectMeta{Name: "reboot-1", Namespace: "ont-system", Generation: 1},
+		Spec: platformv1alpha1.NodeOperationSpec{
+			ClusterRef:  platformv1alpha1.LocalObjectRef{Name: "test-cluster"},
+			Operation:   "reboot",
+			TargetNodes: []string{"worker-1"},
+		},
+	}
+	rc := clusterRC("test-cluster", "node-reboot")
+	rc.Spec.RunnerImage = "10.20.0.1:5000/ontai-dev/conductor:v1.9.3-dev"
+
+	c := fake.NewClientBuilder().WithScheme(scheme).WithObjects(nop, rc).WithStatusSubresource(nop, rc).Build()
+	r := &controller.NodeOperationReconciler{Client: c, Scheme: scheme, Recorder: fakeRecorder()}
+
+	_, err := r.Reconcile(context.Background(), ctrl.Request{
+		NamespacedName: types.NamespacedName{Name: "reboot-1", Namespace: "ont-system"},
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	jobList := &batchv1.JobList{}
+	if err := c.List(context.Background(), jobList); err != nil {
+		t.Fatalf("list jobs: %v", err)
+	}
+	if len(jobList.Items) != 1 {
+		t.Fatalf("expected 1 Job, got %d", len(jobList.Items))
+	}
+	job := jobList.Items[0]
+	containers := job.Spec.Template.Spec.Containers
+	if len(containers) == 0 {
+		t.Fatal("no containers in job spec")
+	}
+	c0 := containers[0]
+
+	// Args: exactly ["execute"]
+	if len(c0.Args) != 1 || c0.Args[0] != "execute" {
+		t.Errorf("container Args = %v, want [execute]", c0.Args)
+	}
+
+	// Image from RunnerConfig.Spec.RunnerImage
+	if c0.Image != "10.20.0.1:5000/ontai-dev/conductor:v1.9.3-dev" {
+		t.Errorf("container Image = %q, want RunnerConfig.Spec.RunnerImage", c0.Image)
+	}
+
+	envMap := make(map[string]string)
+	for _, e := range c0.Env {
+		if e.Value != "" {
+			envMap[e.Name] = e.Value
+		}
+	}
+	if envMap["CAPABILITY"] != "node-reboot" {
+		t.Errorf("CAPABILITY = %q, want node-reboot", envMap["CAPABILITY"])
+	}
+	if envMap["CLUSTER_REF"] != "test-cluster" {
+		t.Errorf("CLUSTER_REF = %q, want test-cluster", envMap["CLUSTER_REF"])
+	}
+	jobName := job.Name
+	// OPERATION_RESULT_CR = jobName (no suffix); conductor creates TCOR CR with this name.
+	if envMap["OPERATION_RESULT_CR"] != jobName {
+		t.Errorf("OPERATION_RESULT_CR = %q, want %q", envMap["OPERATION_RESULT_CR"], jobName)
+	}
+	if envMap["TALOSCONFIG_PATH"] == "" {
+		t.Error("TALOSCONFIG_PATH not set")
+	}
+
+	// POD_NAMESPACE from downward API
+	var podNSFieldPath string
+	for _, e := range c0.Env {
+		if e.Name == "POD_NAMESPACE" && e.ValueFrom != nil && e.ValueFrom.FieldRef != nil {
+			podNSFieldPath = e.ValueFrom.FieldRef.FieldPath
+		}
+	}
+	if podNSFieldPath != "metadata.namespace" {
+		t.Errorf("POD_NAMESPACE fieldPath = %q, want metadata.namespace", podNSFieldPath)
+	}
+
+	// talosconfig volume mounted
+	var foundVol bool
+	for _, vol := range job.Spec.Template.Spec.Volumes {
+		if vol.Name == "talosconfig" && vol.Secret != nil {
+			if vol.Secret.SecretName == "test-cluster-talosconfig" {
+				foundVol = true
+			}
+		}
+	}
+	if !foundVol {
+		t.Error("talosconfig volume not found or wrong Secret name")
 	}
 }

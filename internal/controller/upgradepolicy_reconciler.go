@@ -277,7 +277,7 @@ func (r *UpgradePolicyReconciler) reconcileDirectUpgrade(ctx context.Context, up
 		}
 		nodeExclusions := buildNodeExclusions(nil, leaderNode)
 
-		job := jobSpecWithExclusions(jobName, up.Namespace, up.Spec.ClusterRef.Name, capability, nodeExclusions)
+		job := jobSpecWithExclusions(jobName, up.Namespace, up.Spec.ClusterRef.Name, capability, nodeExclusions, clusterRC.Spec.RunnerImage)
 		if err := controllerutil.SetControllerReference(up, job, r.Scheme); err != nil {
 			return ctrl.Result{}, fmt.Errorf("UpgradePolicyReconciler: set owner reference: %w", err)
 		}

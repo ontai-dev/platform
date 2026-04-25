@@ -155,7 +155,7 @@ func (r *NodeMaintenanceReconciler) Reconcile(ctx context.Context, req ctrl.Requ
 		}
 		nodeExclusions := buildNodeExclusions(nm.Spec.TargetNodes, leaderNode)
 
-		job := jobSpecWithExclusions(jobName, nm.Namespace, nm.Spec.ClusterRef.Name, capability, nodeExclusions)
+		job := jobSpecWithExclusions(jobName, nm.Namespace, nm.Spec.ClusterRef.Name, capability, nodeExclusions, clusterRC.Spec.RunnerImage)
 		if err := controllerutil.SetControllerReference(nm, job, r.Scheme); err != nil {
 			return ctrl.Result{}, fmt.Errorf("NodeMaintenanceReconciler: set owner reference: %w", err)
 		}

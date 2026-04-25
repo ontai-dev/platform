@@ -108,6 +108,23 @@ func (r *MaintenanceBundleReconciler) Reconcile(ctx context.Context, req ctrl.Re
 		return ctrl.Result{}, nil
 	}
 
+	// Read the cluster RunnerConfig to obtain the executor image. CP-INV-003.
+	clusterRC, err := getClusterRunnerConfig(ctx, r.Client, mb.Spec.ClusterRef.Name)
+	if err != nil {
+		return ctrl.Result{}, fmt.Errorf("MaintenanceBundleReconciler: get cluster RunnerConfig: %w", err)
+	}
+	if clusterRC == nil {
+		platformv1alpha1.SetCondition(
+			&mb.Status.Conditions,
+			platformv1alpha1.ConditionTypeMaintenanceBundlePending,
+			metav1.ConditionTrue,
+			platformv1alpha1.ReasonMaintenanceBundleJobSubmitted,
+			"Cluster RunnerConfig not yet present in ont-system. Waiting for Conductor agent.",
+			mb.Generation,
+		)
+		return ctrl.Result{RequeueAfter: capabilityUnavailableRetryInterval}, nil
+	}
+
 	jobName := operationalJobName(mb.Name, capability)
 
 	// Check for an existing Job.
@@ -122,7 +139,7 @@ func (r *MaintenanceBundleReconciler) Reconcile(ctx context.Context, req ctrl.Re
 		// the reconciler consumes them directly without any cluster queries.
 		nodeExclusions := buildNodeExclusions(mb.Spec.MaintenanceTargetNodes, mb.Spec.OperatorLeaderNode)
 
-		job := jobSpecWithExclusions(jobName, mb.Namespace, mb.Spec.ClusterRef.Name, capability, nodeExclusions)
+		job := jobSpecWithExclusions(jobName, mb.Namespace, mb.Spec.ClusterRef.Name, capability, nodeExclusions, clusterRC.Spec.RunnerImage)
 		if err := controllerutil.SetControllerReference(mb, job, r.Scheme); err != nil {
 			return ctrl.Result{}, fmt.Errorf("MaintenanceBundleReconciler: set owner reference: %w", err)
 		}

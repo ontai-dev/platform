@@ -32,7 +32,7 @@ import (
 // Deployment annotations, and that the annotations are set correctly.
 // conductor-schema.md §15. platform-schema.md §12.
 func TestConductorAgentDeployment_RoleStamp(t *testing.T) {
-	dep := controller.BuildConductorAgentDeployment("test-cluster")
+	dep := controller.BuildConductorAgentDeployment("test-cluster", "10.20.0.1:5000/ontai-dev/conductor:v1.9.3-dev")
 
 	if dep.Name != "conductor-agent" {
 		t.Errorf("Deployment name = %q, want %q", dep.Name, "conductor-agent")
@@ -85,7 +85,7 @@ func TestConductorAgentDeployment_RoleStamp(t *testing.T) {
 
 // TestConductorAgentDeployment_ClusterLabel verifies the cluster label is set.
 func TestConductorAgentDeployment_ClusterLabel(t *testing.T) {
-	dep := controller.BuildConductorAgentDeployment("my-cluster")
+	dep := controller.BuildConductorAgentDeployment("my-cluster", "10.20.0.1:5000/ontai-dev/conductor:v1.9.3-dev")
 
 	if dep.Labels["runner.ontai.dev/cluster"] != "my-cluster" {
 		t.Errorf("cluster label = %q, want %q",

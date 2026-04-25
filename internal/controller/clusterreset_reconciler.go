@@ -278,7 +278,7 @@ func (r *ClusterResetReconciler) submitAndWatchResetJob(ctx context.Context, crs
 		}
 		nodeExclusions := buildNodeExclusions(nil, leaderNode)
 
-		job := jobSpecWithExclusions(jobName, jobNamespace, crst.Spec.ClusterRef.Name, capabilityClusterReset, nodeExclusions)
+		job := jobSpecWithExclusions(jobName, jobNamespace, crst.Spec.ClusterRef.Name, capabilityClusterReset, nodeExclusions, clusterRC.Spec.RunnerImage)
 		if err := controllerutil.SetControllerReference(crst, job, r.Scheme); err != nil {
 			return ctrl.Result{}, fmt.Errorf("ClusterResetReconciler: set owner reference: %w", err)
 		}

@@ -315,7 +315,7 @@ func (r *NodeOperationReconciler) reconcileDirectNodeOp(ctx context.Context, nop
 		}
 		nodeExclusions := buildNodeExclusions(nop.Spec.TargetNodes, leaderNode)
 
-		job := jobSpecWithExclusions(jobName, nop.Namespace, nop.Spec.ClusterRef.Name, capability, nodeExclusions)
+		job := jobSpecWithExclusions(jobName, nop.Namespace, nop.Spec.ClusterRef.Name, capability, nodeExclusions, clusterRC.Spec.RunnerImage)
 		if err := controllerutil.SetControllerReference(nop, job, r.Scheme); err != nil {
 			return ctrl.Result{}, fmt.Errorf("NodeOperationReconciler: set owner reference: %w", err)
 		}

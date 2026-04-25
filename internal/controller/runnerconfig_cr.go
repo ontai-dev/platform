@@ -1,6 +1,6 @@
 package controller
 
-// RunnerConfig types are owned by seam-core (infrastructure.ontai.dev/v1alpha1).
+// RunnerConfig and OperationResult types are owned by seam-core (infrastructure.ontai.dev/v1alpha1).
 // Platform reconcilers reference these aliases through the controller package.
 // Replaces the previous AddKnownTypeWithName workaround for runner.ontai.dev/v1alpha1.
 // T-2B-8.
@@ -22,4 +22,9 @@ type (
 
 	// OperationalRunnerConfigStatus is an alias for InfrastructureRunnerConfigStatus.
 	OperationalRunnerConfigStatus = seamcorev1alpha1.InfrastructureRunnerConfigStatus
+
+	// TalosClusterOperationResult is the day-2 operation result CR written by the
+	// Conductor execute-mode Job. One CR per Job, in the Job namespace (ont-system).
+	TalosClusterOperationResult     = seamcorev1alpha1.InfrastructureTalosClusterOperationResult
+	TalosClusterOperationResultList = seamcorev1alpha1.InfrastructureTalosClusterOperationResultList
 )

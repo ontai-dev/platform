@@ -23,6 +23,8 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+
+	seamcorev1alpha1 "github.com/ontai-dev/seam-core/api/v1alpha1"
 )
 
 const (
@@ -42,15 +44,24 @@ const (
 	// operationalJobBackoffLimit enforces INV-018: gate failures are permanent.
 	operationalJobBackoffLimit = int32(0)
 
-	// conductorImage is the Conductor executor image. In production this is
-	// resolved from RunnerConfig. Placeholder until SC-INV-002 completes.
-	conductorImage = "registry.ontai.dev/ontai-dev/conductor:latest"
+	// executorTalosconfigMountPath is the container mount path for the talosconfig Secret.
+	executorTalosconfigMountPath = "/var/run/secrets/talosconfig"
+
+	// executorTalosconfigEnvPath is the TALOSCONFIG_PATH value injected into executor Jobs.
+	executorTalosconfigEnvPath = executorTalosconfigMountPath + "/talosconfig"
 )
 
 // jobSpec builds a Conductor executor Job spec for the given capability and cluster.
-func jobSpec(jobName, namespace, clusterName, capability string) *batchv1.Job {
+// runnerImage is read from RunnerConfig.Spec.RunnerImage — callers must pass it explicitly.
+// The talosconfig Secret ({clusterName}-talosconfig) is mounted from the job namespace;
+// callers are responsible for ensuring it exists before submitting the Job.
+// OPERATION_RESULT_CR is set to jobName — conductor creates an
+// InfrastructureTalosClusterOperationResult CR with that name in POD_NAMESPACE.
+// conductor-schema.md §17, config.EnvCapability/EnvClusterRef/EnvOperationResultCR.
+func jobSpec(jobName, namespace, clusterName, capability, runnerImage string) *batchv1.Job {
 	ttl := operationalJobTTL
 	backoff := operationalJobBackoffLimit
+	talosconfigName := clusterName + "-talosconfig"
 	return &batchv1.Job{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      jobName,
@@ -73,23 +84,42 @@ func jobSpec(jobName, namespace, clusterName, capability string) *batchv1.Job {
 				Spec: corev1.PodSpec{
 					RestartPolicy:      corev1.RestartPolicyNever,
 					ServiceAccountName: "platform-executor",
+					Volumes: []corev1.Volume{
+						{
+							Name: "talosconfig",
+							VolumeSource: corev1.VolumeSource{
+								Secret: &corev1.SecretVolumeSource{
+									SecretName: talosconfigName,
+								},
+							},
+						},
+					},
 					Containers: []corev1.Container{
 						{
 							Name:  "executor",
-							Image: conductorImage,
-							Args: []string{
-								"execute",
-								"--capability", capability,
-								"--cluster", clusterName,
-							},
+							Image: runnerImage,
+							Args:  []string{"execute"},
 							Env: []corev1.EnvVar{
+								{Name: "CAPABILITY", Value: capability},
+								{Name: "CLUSTER_REF", Value: clusterName},
+								// OPERATION_RESULT_CR: conductor creates a TCOR CR with this name.
+								// The platform reconciler reads it back by the same name.
+								{Name: "OPERATION_RESULT_CR", Value: jobName},
 								{
-									Name:  "CLUSTER_NAME",
-									Value: clusterName,
+									Name: "POD_NAMESPACE",
+									ValueFrom: &corev1.EnvVarSource{
+										FieldRef: &corev1.ObjectFieldSelector{
+											FieldPath: "metadata.namespace",
+										},
+									},
 								},
+								{Name: "TALOSCONFIG_PATH", Value: executorTalosconfigEnvPath},
+							},
+							VolumeMounts: []corev1.VolumeMount{
 								{
-									Name:  "CLUSTER_NAMESPACE",
-									Value: namespace,
+									Name:      "talosconfig",
+									MountPath: executorTalosconfigMountPath,
+									ReadOnly:  true,
 								},
 							},
 						},
@@ -112,23 +142,26 @@ func getOperationalJob(ctx context.Context, c client.Client, namespace, jobName 
 	return job, nil
 }
 
-// readOperationalResult checks for the OperationResult ConfigMap written by the
-// Conductor executor. Returns (complete, failed, message).
+// readOperationalResult checks for the InfrastructureTalosClusterOperationResult CR
+// written by the Conductor executor. CR name equals the Job name.
+// Returns (complete, failed, message).
 func readOperationalResult(ctx context.Context, c client.Client, namespace, jobName string) (complete, failed bool, message string) {
-	cmName := jobName + operationResultConfigMapSuffix
-	cm := &corev1.ConfigMap{}
-	if err := c.Get(ctx, types.NamespacedName{Name: cmName, Namespace: namespace}, cm); err != nil {
+	tcor := &seamcorev1alpha1.InfrastructureTalosClusterOperationResult{}
+	if err := c.Get(ctx, types.NamespacedName{Name: jobName, Namespace: namespace}, tcor); err != nil {
+		// Not yet written — job still running.
 		return false, false, ""
 	}
-	status := cm.Data["status"]
-	msg := cm.Data["message"]
-	switch status {
-	case "success":
-		return true, false, msg
-	case "failure", "failed":
+	switch tcor.Spec.Status {
+	case seamcorev1alpha1.TalosClusterResultSucceeded:
+		return true, false, tcor.Spec.Message
+	case seamcorev1alpha1.TalosClusterResultFailed:
+		msg := tcor.Spec.Message
+		if tcor.Spec.FailureReason != nil && tcor.Spec.FailureReason.Reason != "" {
+			msg = tcor.Spec.FailureReason.Reason
+		}
 		return false, true, msg
 	default:
-		return false, false, msg
+		return false, false, ""
 	}
 }
 
@@ -136,8 +169,8 @@ func readOperationalResult(ctx context.Context, c client.Client, namespace, jobN
 // NodeAffinity constraints to prevent the Job pod from landing on the listed nodes.
 // Used for all day-2 self-operation Jobs to avoid scheduling on maintenance targets
 // or the operator leader node. conductor-schema.md §13.
-func jobSpecWithExclusions(jobName, namespace, clusterName, capability string, nodeExclusions []string) *batchv1.Job {
-	job := jobSpec(jobName, namespace, clusterName, capability)
+func jobSpecWithExclusions(jobName, namespace, clusterName, capability string, nodeExclusions []string, runnerImage string) *batchv1.Job {
+	job := jobSpec(jobName, namespace, clusterName, capability, runnerImage)
 	if len(nodeExclusions) == 0 {
 		return job
 	}
