@@ -600,6 +600,27 @@ solely responsible for correct role stamping. See conductor-schema.md §15.
 - The Conductor image tag used must match the RunnerConfig.agentImage for this cluster.
   Platform reads agentImage from RunnerConfig before creating the Deployment.
 
+**Import-mode cluster specifics:**
+For clusters with `spec.mode: import`, Platform drives an additional two-site onboarding
+sequence beyond the Conductor Deployment. The complete sequence is specified in
+guardian-schema.md §20 and includes:
+
+1. Create seam-tenant-{clusterName} namespace on the management cluster (CP-INV-004).
+2. Store tenant kubeconfig Secret in seam-tenant-{clusterName}.
+3. Create ont-system namespace on the tenant cluster.
+4. Create conductor ServiceAccount in ont-system on the tenant cluster.
+5. Create conductor Deployment (role=tenant) in ont-system on the tenant cluster.
+6. Create conductor RBACProfile in ont-system on the tenant cluster (Seam operator
+   profile, rbacPolicyRef: management-policy, permissionSetRef: management-maximum).
+7. Observe PermissionSnapshotReceipt acknowledgement from the management conductor
+   (written to InfrastructureTalosCluster.status.conductorHandshake).
+8. Advance InfrastructureTalosCluster.status.phase to Operational on acknowledgement.
+
+Platform sets InfrastructureTalosCluster.status.phase: ConductorPending when the
+Deployment is created. Phase does not advance until the gRPC handshake completes.
+See guardian-schema.md §20 for the full handshake protocol and PermissionSnapshot
+delivery sequence.
+
 ---
 
 *platform.ontai.dev schema - Platform*
@@ -649,3 +670,10 @@ solely responsible for correct role stamping. See conductor-schema.md §15.
 *  Platform does not deploy Conductor to the management cluster - compiler enable owns*
 *  that Deployment (role=management). Platform must recreate Deployment on deletion.*
 *  Conductor image tag must match RunnerConfig.agentImage for the cluster.*
+
+*2026-04-26 - Section 12 extended: import-mode cluster specifics added. For*
+*  spec.mode=import clusters, Platform drives a two-site onboarding sequence including*
+*  namespace creation on both clusters, conductor RBACProfile creation in ont-system*
+*  (Seam operator profile referencing management-policy/management-maximum), and*
+*  phase advancement on PermissionSnapshotReceipt acknowledgement. Full sequence*
+*  specified in guardian-schema.md §20.*

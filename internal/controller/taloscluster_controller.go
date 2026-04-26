@@ -270,23 +270,32 @@ func (r *TalosClusterReconciler) reconcileDirectBootstrap(ctx context.Context, t
 			if err := r.ensureTenantOnboarding(ctx, tc); err != nil {
 				return ctrl.Result{}, fmt.Errorf("reconcileDirectBootstrap: tenant onboarding: %w", err)
 			}
-		} else {
-			// WS2: register the management cluster in the platform RBAC policy.
-			if err := r.ensureManagementOnboarding(ctx, tc); err != nil {
-				return ctrl.Result{}, fmt.Errorf("reconcileDirectBootstrap: management onboarding (import): %w", err)
-			}
+
+			// Management-side onboarding complete. Mark Bootstrapped and drive the
+			// conductor state machine. Ready=True is gated on ConductorReady=True.
+			// platform-schema.md §12, guardian-schema.md §20.
+			platformv1alpha1.SetCondition(
+				&tc.Status.Conditions,
+				platformv1alpha1.ConditionTypeBootstrapped,
+				metav1.ConditionTrue,
+				platformv1alpha1.ReasonImportComplete,
+				"Tenant cluster import: RunnerConfig created, kubeconfig generated, tenant namespace provisioned.",
+				tc.Generation,
+			)
+			return r.ensureConductorReadyAndTransition(ctx, tc)
 		}
 
-		clusterRole := "management"
-		if tc.Spec.Role == platformv1alpha1.TalosClusterRoleTenant {
-			clusterRole = "tenant"
+		// Management cluster import: Conductor (role=management) is already deployed
+		// by compiler enable. No remote conductor deployment needed. Transition directly.
+		if err := r.ensureManagementOnboarding(ctx, tc); err != nil {
+			return ctrl.Result{}, fmt.Errorf("reconcileDirectBootstrap: management onboarding (import): %w", err)
 		}
 		platformv1alpha1.SetCondition(
 			&tc.Status.Conditions,
 			platformv1alpha1.ConditionTypeBootstrapped,
 			metav1.ConditionTrue,
 			platformv1alpha1.ReasonImportComplete,
-			fmt.Sprintf("%s cluster import: RunnerConfig created, kubeconfig generated, cluster adopted under Seam governance without bootstrap Job.", clusterRole),
+			"Management cluster import: RunnerConfig created, kubeconfig generated, cluster adopted under Seam governance without bootstrap Job.",
 			tc.Generation,
 		)
 		platformv1alpha1.SetCondition(
@@ -294,11 +303,10 @@ func (r *TalosClusterReconciler) reconcileDirectBootstrap(ctx context.Context, t
 			platformv1alpha1.ConditionTypeReady,
 			metav1.ConditionTrue,
 			platformv1alpha1.ReasonClusterReady,
-			fmt.Sprintf("%s cluster imported and Ready.", clusterRole),
+			"Management cluster imported and Ready.",
 			tc.Generation,
 		)
-		logger.Info("cluster import complete — transitioning to Ready",
-			"name", tc.Name, "role", clusterRole)
+		logger.Info("management cluster import complete -- transitioning to Ready", "name", tc.Name)
 		return ctrl.Result{}, nil
 	}
 
@@ -533,6 +541,9 @@ func (r *TalosClusterReconciler) reconcileCAPIPath(ctx context.Context, tc *plat
 		Namespace: tc.Namespace,
 	}
 
+	// CAPI-bootstrapped cluster: origin is bootstrapped.
+	tc.Status.Origin = platformv1alpha1.TalosClusterOriginBootstrapped
+
 	// Step 9 — Check Cilium PackInstance Ready status.
 	if tc.Spec.CAPI.CiliumPackRef == nil {
 		// No Cilium pack configured — skip Cilium gate (development mode).
@@ -605,9 +616,9 @@ func (r *TalosClusterReconciler) ensureConductorReadyAndTransition(
 	return ctrl.Result{}, nil
 }
 
-// transitionToReady sets the TalosCluster to the fully Ready state.
+// transitionToReady sets the Ready and CiliumPending conditions for the final Ready state.
+// Origin is set by each calling path before invoking this function.
 func (r *TalosClusterReconciler) transitionToReady(tc *platformv1alpha1.TalosCluster) {
-	tc.Status.Origin = platformv1alpha1.TalosClusterOriginBootstrapped
 	platformv1alpha1.SetCondition(
 		&tc.Status.Conditions,
 		platformv1alpha1.ConditionTypeCiliumPending,
