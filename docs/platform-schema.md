@@ -486,11 +486,34 @@ per node, using the naming convention:
 
 in the `seam-tenant-{cluster-name}` namespace.
 
+**Provisioning by mode:**
+
+`spec.mode=bootstrap`: Platform generates machineconfig Secrets from `InfrastructureTalosCluster`
+spec at bootstrap time. The Compiler emits only the `InfrastructureTalosCluster` CR; it does
+not emit machineconfig Secrets for bootstrap clusters. Platform applies `HardeningProfile` patches
+on top of the generated base config when `spec.hardeningProfileRef` is set (PLATFORM-BL-HARDENINGPROFILE-MERGE,
+pending schema amendment to add node topology fields to `InfrastructureTalosClusterSpec`).
+Until that schema amendment lands, the Compiler bootstrap subcommand continues to emit machineconfig
+Secrets for management-cluster bootstrap to preserve the existing bootstrap Job path.
+
+`spec.mode=import`: Platform captures machineconfig Secrets from the running cluster via the Talos
+COSI API (`/system/state/config.yaml`) immediately after the kubeconfig Secret is generated. Platform
+uses the talosconfig Secret (compiler-emitted, admin-applied before the TalosCluster CR) to authenticate,
+lists nodes from the running cluster via kubeconfig, and reads the machineconfig from each node.
+The Compiler emits only the `InfrastructureTalosCluster` CR and the talosconfig Secret for import clusters.
+It does not emit machineconfig Secrets for import clusters. (PLATFORM-BL-MACHINECONFIG-IMPORT-CAPTURE tracks
+the platform-side implementation.)
+
 **Lifecycle:**
-Platform generates these Secrets at bootstrap time from the TalosCluster and
-TalosControlPlane/TalosWorkerConfig specs. When node configuration changes - for
-example when a HardeningProfile is updated or a machineconfig patch is applied -
-Platform regenerates and reconciles the affected Secrets.
+After initial capture (import mode) or generation (bootstrap mode), Platform reconciles
+these Secrets when node configuration changes -- for example when a HardeningProfile is
+updated or a machineconfig patch is applied via NodeMaintenance.
+
+**Namespace authority:**
+Platform creates `seam-tenant-{cluster-name}` for ALL cluster modes and roles. CP-INV-004.
+For mode=import: the Compiler does not emit a namespace manifest; Platform creates the namespace
+when the TalosCluster CR is admitted. For mode=bootstrap: Platform creates the namespace as the first
+step in the reconcile path (already the case for the CAPI path; same authority for native bootstrap).
 
 **Design rationale:**
 This mirrors the CAPI bootstrap provider secret pattern intentionally. The CAPI path
@@ -499,7 +522,7 @@ stores them as Seam-named Secrets managed by Platform. The operational model is
 consistent regardless of provisioning path: a named Secret per node holds the node's
 current authoritative machineconfig.
 
-No other operator or Conductor capability handler generates or owns these Secrets.
+No other operator or Conductor capability handler owns these Secrets.
 A machineconfig Secret owned by Platform must never be modified by any other component.
 This invariant has no exceptions and requires a Platform Governor constitutional
 amendment to change.
@@ -677,3 +700,12 @@ delivery sequence.
 *  (Seam operator profile referencing management-policy/management-maximum), and*
 *  phase advancement on PermissionSnapshotReceipt acknowledgement. Full sequence*
 *  specified in guardian-schema.md §20.*
+
+*2026-04-26 - Section 9 corrected: mode-specific machineconfig provisioning contract*
+*  added. mode=import: Platform captures machineconfigs from running cluster via Talos*
+*  COSI API after kubeconfig generation; Compiler emits only TalosCluster CR and*
+*  talosconfig Secret. mode=bootstrap: Platform generates machineconfigs from*
+*  InfrastructureTalosCluster spec; Compiler emits only TalosCluster CR (pending*
+*  schema amendment PLATFORM-BL-HARDENINGPROFILE-MERGE for node topology fields).*
+*  Namespace authority clarified: Platform creates seam-tenant-{cluster} for ALL*
+*  modes; Compiler no longer emits seam-tenant-namespace.yaml. CP-INV-004.*

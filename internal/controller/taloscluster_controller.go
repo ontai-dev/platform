@@ -240,12 +240,27 @@ func (r *TalosClusterReconciler) reconcileDirectBootstrap(ctx context.Context, t
 	// Import mode — the cluster already exists and is being brought under Seam
 	// governance. Never submit a bootstrap Job. RunnerConfig is ensured above so
 	// Conductor can attach to the cluster.
-	// Before transitioning to Ready, generate the kubeconfig Secret from the
-	// talosconfig Secret so downstream consumers have API access. If the talosconfig
-	// Secret is absent, ensureKubeconfigSecret sets KubeconfigUnavailable and requeues.
+	//
+	// Namespace-first ordering: for role=tenant clusters, seam-tenant-{cluster} does
+	// not pre-exist (compiler no longer emits it; CP-INV-004). Create it before
+	// reading the talosconfig Secret so the admin can apply secrets to the namespace
+	// after the TalosCluster CR is admitted. platform-schema.md §9.
+	//
+	// Admin apply order for import clusters: TalosCluster CR first; once the
+	// seam-tenant-{cluster} namespace appears, apply the talosconfig Secret there.
+	// Platform requeues with KubeconfigUnavailable until the talosconfig is present.
 	// platform-schema.md §5 TalosClusterModeImport.
 	if tc.Spec.Mode == platformv1alpha1.TalosClusterModeImport {
 		tc.Status.Origin = platformv1alpha1.TalosClusterOriginImported
+
+		// Role=tenant: create seam-tenant-{cluster} namespace before reading any
+		// Secrets that live there. For role=management the namespace already exists
+		// (compiler enable bundle creates seam-tenant-{mgmt-cluster}). CP-INV-004.
+		if tc.Spec.Role == platformv1alpha1.TalosClusterRoleTenant {
+			if err := r.ensureTenantNamespace(ctx, tc); err != nil {
+				return ctrl.Result{}, fmt.Errorf("reconcileDirectBootstrap: ensure tenant namespace for role=tenant: %w", err)
+			}
+		}
 
 		if result, err := r.ensureKubeconfigSecret(ctx, tc); err != nil {
 			return ctrl.Result{}, fmt.Errorf("reconcileDirectBootstrap: import kubeconfig: %w", err)
@@ -254,14 +269,7 @@ func (r *TalosClusterReconciler) reconcileDirectBootstrap(ctx context.Context, t
 			return result, nil
 		}
 
-		// Role=tenant on the direct path: create the seam-tenant namespace and copy
-		// the kubeconfig Secret there so operators can locate it alongside other
-		// tenant-scoped resources. CP-INV-004: Platform is the sole namespace creation
-		// authority. WS5.
 		if tc.Spec.Role == platformv1alpha1.TalosClusterRoleTenant {
-			if err := r.ensureTenantNamespace(ctx, tc); err != nil {
-				return ctrl.Result{}, fmt.Errorf("reconcileDirectBootstrap: ensure tenant namespace for role=tenant: %w", err)
-			}
 			if err := r.ensureTenantKubeconfigCopy(ctx, tc); err != nil {
 				return ctrl.Result{}, fmt.Errorf("reconcileDirectBootstrap: copy kubeconfig to tenant namespace: %w", err)
 			}
