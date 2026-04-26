@@ -750,13 +750,15 @@ func TestTalosClusterReconcile_StatusPatchRetryOnConflict(t *testing.T) {
 // when a Role=Tenant TalosCluster is imported (spec.mode=import), the reconciler
 // creates a Kueue LocalQueue named pack-deploy-queue in seam-tenant-{cluster-name}
 // pointing to ClusterQueue seam-pack-deploy.
+// RemoteConductorAvailableFn is injected to return false (Conductor not yet available)
+// so the reconcile does not attempt live remote-cluster API calls. guardian-schema.md §20.
 func TestTalosClusterReconcile_TenantImport_CreatesLocalQueue(t *testing.T) {
 	scheme := buildDay2Scheme(t)
 
 	tc := &platformv1alpha1.TalosCluster{
 		ObjectMeta: metav1.ObjectMeta{
-			Name:      "ccs-dev",
-			Namespace: "seam-system",
+			Name:       "ccs-dev",
+			Namespace:  "seam-system",
 			Generation: 1,
 		},
 		Spec: platformv1alpha1.TalosClusterSpec{
@@ -778,6 +780,9 @@ func TestTalosClusterReconcile_TenantImport_CreatesLocalQueue(t *testing.T) {
 		Scheme:                scheme,
 		Recorder:              clientevents.NewFakeRecorder(32),
 		KubeconfigGeneratorFn: fakeKubeconfigGenerator,
+		RemoteConductorAvailableFn: func(_ context.Context, _ string) (bool, error) {
+			return false, nil // Conductor not yet available -- Deployment just created.
+		},
 	}
 
 	_, err := r.Reconcile(context.Background(), ctrl.Request{

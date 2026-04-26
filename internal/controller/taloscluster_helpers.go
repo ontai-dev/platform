@@ -757,20 +757,31 @@ func (r *TalosClusterReconciler) EnsureConductorDeploymentOnTargetCluster(
 	}
 
 	tenantNS := "seam-tenant-" + tc.Name
-	kubeconfigSecretName := tc.Name + "-kubeconfig"
 
-	// Get the CAPI-generated kubeconfig Secret for the target cluster.
+	// Determine kubeconfig Secret name from cluster mode.
+	// - Import clusters: kubeconfig is at tenantKubeconfigSecretName ("target-cluster-kubeconfig"),
+	//   written by ensureTenantKubeconfigCopy. platform-schema.md §12.
+	// - CAPI clusters: kubeconfig is at "{cluster-name}-kubeconfig", written by CAPI after
+	//   the cluster reaches Running state.
+	var kubeSecretName string
+	if tc.Spec.Mode == platformv1alpha1.TalosClusterModeImport {
+		kubeSecretName = tenantKubeconfigSecretName
+	} else {
+		kubeSecretName = tc.Name + "-kubeconfig"
+	}
+
+	// Get the kubeconfig Secret for the target cluster.
 	kubeconfigSecret := &corev1.Secret{}
 	if err := r.Client.Get(ctx, types.NamespacedName{
-		Name:      kubeconfigSecretName,
+		Name:      kubeSecretName,
 		Namespace: tenantNS,
 	}, kubeconfigSecret); err != nil {
 		if apierrors.IsNotFound(err) {
-			// CAPI has not yet generated the kubeconfig — not fatal, requeue.
+			// Kubeconfig not yet available -- not fatal, requeue.
 			return false, nil
 		}
 		return false, fmt.Errorf("ensureConductorDeployment: get kubeconfig secret %s/%s: %w",
-			tenantNS, kubeconfigSecretName, err)
+			tenantNS, kubeSecretName, err)
 	}
 
 	kubeconfigBytes, ok := kubeconfigSecret.Data["value"]
@@ -787,6 +798,20 @@ func (r *TalosClusterReconciler) EnsureConductorDeploymentOnTargetCluster(
 	remoteK8s, err := kubernetes.NewForConfig(restConfig)
 	if err != nil {
 		return false, fmt.Errorf("ensureConductorDeployment: build remote client for %s: %w", tc.Name, err)
+	}
+
+	// For import clusters, ensure ont-system namespace and conductor ServiceAccount exist
+	// before attempting Deployment creation. CAPI clusters have ont-system pre-existing.
+	// platform-schema.md §12 steps 3-4.
+	if tc.Spec.Mode == platformv1alpha1.TalosClusterModeImport {
+		if err := ensureRemoteNamespace(ctx, remoteK8s, conductorAgentNamespace); err != nil {
+			return false, fmt.Errorf("ensureConductorDeployment: ensure namespace %s on %s: %w",
+				conductorAgentNamespace, tc.Name, err)
+		}
+		if err := ensureRemoteConductorServiceAccount(ctx, remoteK8s); err != nil {
+			return false, fmt.Errorf("ensureConductorDeployment: ensure conductor SA on %s: %w",
+				tc.Name, err)
+		}
 	}
 
 	// Check whether the Conductor Deployment already exists.
@@ -823,6 +848,33 @@ func (r *TalosClusterReconciler) EnsureConductorDeploymentOnTargetCluster(
 	}
 	// Deployment exists but not yet Available.
 	return false, nil
+}
+
+// ensureRemoteNamespace creates the given namespace on the remote cluster if it does not
+// already exist. Idempotent. Used to create ont-system on import-mode tenant clusters
+// before Conductor Deployment creation. platform-schema.md §12 step 3.
+func ensureRemoteNamespace(ctx context.Context, k8s kubernetes.Interface, name string) error {
+	ns := &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: name}}
+	if _, err := k8s.CoreV1().Namespaces().Create(ctx, ns, metav1.CreateOptions{}); err != nil && !apierrors.IsAlreadyExists(err) {
+		return fmt.Errorf("create namespace %s: %w", name, err)
+	}
+	return nil
+}
+
+// ensureRemoteConductorServiceAccount creates the conductor ServiceAccount in ont-system
+// on the remote cluster if it does not already exist. Idempotent. Used on import-mode
+// tenant clusters before Conductor Deployment creation. platform-schema.md §12 step 4.
+func ensureRemoteConductorServiceAccount(ctx context.Context, k8s kubernetes.Interface) error {
+	sa := &corev1.ServiceAccount{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "conductor",
+			Namespace: conductorAgentNamespace,
+		},
+	}
+	if _, err := k8s.CoreV1().ServiceAccounts(conductorAgentNamespace).Create(ctx, sa, metav1.CreateOptions{}); err != nil && !apierrors.IsAlreadyExists(err) {
+		return fmt.Errorf("create conductor ServiceAccount in %s: %w", conductorAgentNamespace, err)
+	}
+	return nil
 }
 
 // BuildConductorAgentDeployment builds the Conductor agent Deployment spec for a
