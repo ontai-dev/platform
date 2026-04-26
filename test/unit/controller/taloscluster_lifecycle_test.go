@@ -143,9 +143,9 @@ func TestTalosClusterReconcile_ImportModeCreatesRunnerConfigAndTransitionsToRead
 		if rc.Namespace != "ont-system" {
 			t.Errorf("RunnerConfig namespace = %q, want ont-system", rc.Namespace)
 		}
-		// Image derived from TalosVersion="v1.9.3" + default registry + devRevision.
-		// conductor-schema.md §3, INV-012.
-		wantImage := "10.20.0.1:5000/ontai-dev/conductor:v1.9.3-dev"
+		// Image: conductor-execute (executor image) with :dev tag in lab.
+		// conductor-schema.md §3, INV-012, Decision 12.
+		wantImage := "10.20.0.1:5000/ontai-dev/conductor-execute:dev"
 		if rc.Spec.RunnerImage != wantImage {
 			t.Errorf("RunnerConfig RunnerImage = %q, want %q", rc.Spec.RunnerImage, wantImage)
 		}
@@ -318,8 +318,8 @@ func TestTalosClusterReconcile_ManagementBootstrapJobSubmitted(t *testing.T) {
 }
 
 // TestTalosClusterReconcile_ManagementBootstrapComplete verifies that when the
-// OperationResult ConfigMap reports status=success, the reconciler transitions the
-// TalosCluster to Ready=True and clears the Bootstrapping condition.
+// InfrastructureTalosClusterOperationResult CR reports status=Succeeded, the reconciler
+// transitions the TalosCluster to Ready=True and clears the Bootstrapping condition.
 // platform-design.md §5.
 func TestTalosClusterReconcile_ManagementBootstrapComplete(t *testing.T) {
 	scheme := buildDay2Scheme(t)
@@ -333,21 +333,13 @@ func TestTalosClusterReconcile_ManagementBootstrapComplete(t *testing.T) {
 		},
 	}
 
-	// Pre-create the OperationResult ConfigMap with status=success.
-	resultCM := &corev1.ConfigMap{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      "ccs-mgmt-bootstrap-result",
-			Namespace: "seam-system",
-		},
-		Data: map[string]string{
-			"status":  "success",
-			"message": "cluster bootstrapped",
-		},
-	}
+	// Pre-create the per-cluster TCOR at seam-tenant-ccs-mgmt/ccs-mgmt with the bootstrap
+	// job result. readOperationRecord looks up by (clusterRef="ccs-mgmt", jobName).
+	resultTCOR := successResultTCOR("ccs-mgmt", "ccs-mgmt-bootstrap")
 
 	c := fake.NewClientBuilder().
 		WithScheme(scheme).
-		WithObjects(tc, existingJob, resultCM).
+		WithObjects(tc, existingJob, resultTCOR).
 		WithStatusSubresource(tc).
 		Build()
 	r := &controller.TalosClusterReconciler{

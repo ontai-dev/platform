@@ -7,9 +7,10 @@ replace github.com/ontai-dev/conductor => ../conductor
 replace github.com/ontai-dev/seam-core => ../seam-core
 
 require (
+	github.com/Masterminds/semver/v3 v3.4.0
 	github.com/onsi/ginkgo/v2 v2.27.2
 	github.com/onsi/gomega v1.38.2
-	github.com/ontai-dev/seam-core v0.1.0-alpha.0.20260421091707-a688712f9dff
+	github.com/ontai-dev/seam-core v0.1.0-alpha.0.20260425084313-fa4bedc389f6
 	github.com/siderolabs/talos/pkg/machinery v1.12.6
 	k8s.io/api v0.35.3
 	k8s.io/apimachinery v0.35.3
@@ -18,7 +19,6 @@ require (
 )
 
 require (
-	github.com/Masterminds/semver/v3 v3.4.0 // indirect
 	github.com/ProtonMail/go-crypto v1.3.0 // indirect
 	github.com/ProtonMail/go-mime v0.0.0-20230322103455-7d82a3887f2f // indirect
 	github.com/ProtonMail/gopenpgp/v2 v2.9.0 // indirect

@@ -39,18 +39,23 @@ const (
 
 // EtcdMaintenanceReconciler reconciles EtcdMaintenance objects.
 type EtcdMaintenanceReconciler struct {
-	Client   client.Client
-	Scheme   *runtime.Scheme
-	Recorder clientevents.EventRecorder
+	Client    client.Client
+	APIReader client.Reader
+	Scheme    *runtime.Scheme
+	Recorder  clientevents.EventRecorder
 }
 
 // +kubebuilder:rbac:groups=platform.ontai.dev,resources=etcdmaintenances,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=platform.ontai.dev,resources=etcdmaintenances/status,verbs=get;update;patch
 // +kubebuilder:rbac:groups=platform.ontai.dev,resources=etcdmaintenances/finalizers,verbs=update
 // +kubebuilder:rbac:groups="",resources=events,verbs=create;patch
-// +kubebuilder:rbac:groups=runner.ontai.dev,resources=runnerconfigs,verbs=get;list;watch
+// +kubebuilder:rbac:groups=infrastructure.ontai.dev,resources=infrastructurerunnerconfigs,verbs=get;list;watch
+// +kubebuilder:rbac:groups=infrastructure.ontai.dev,resources=infrastructuretalosclusteroperationresults,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=batch,resources=jobs,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups="",resources=configmaps,verbs=get;list;watch
+// +kubebuilder:rbac:groups=rbac.authorization.k8s.io,resources=roles;rolebindings,verbs=get;list;watch;create;update;patch
+// +kubebuilder:rbac:groups="",resources=serviceaccounts,verbs=get;list;watch;create;update;patch
+// +kubebuilder:rbac:groups="",resources=secrets,verbs=get;list;watch;create;update;patch
 
 func (r *EtcdMaintenanceReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
 	logger := log.FromContext(ctx)
@@ -191,13 +196,13 @@ func (r *EtcdMaintenanceReconciler) Reconcile(ctx context.Context, req ctrl.Requ
 
 		// Resolve operator leader node and build node exclusions.
 		// conductor-schema.md §13: SelfOperation=true — exclude targets + leader.
-		leaderNode, lErr := resolveOperatorLeaderNode(ctx, r.Client)
+		leaderNode, lErr := resolveOperatorLeaderNode(ctx, r.Client, r.APIReader)
 		if lErr != nil {
 			return ctrl.Result{}, fmt.Errorf("EtcdMaintenanceReconciler: resolve leader node: %w", lErr)
 		}
 		nodeExclusions := buildNodeExclusions(em.Spec.TargetNodes, leaderNode)
 
-		job := jobSpecWithExclusions(jobName, em.Namespace, em.Spec.ClusterRef.Name, capability, nodeExclusions)
+		job := jobSpecWithExclusions(jobName, em.Namespace, em.Spec.ClusterRef.Name, capability, nodeExclusions, clusterRC.Spec.RunnerImage)
 		if err := controllerutil.SetControllerReference(em, job, r.Scheme); err != nil {
 			return ctrl.Result{}, fmt.Errorf("EtcdMaintenanceReconciler: set owner reference: %w", err)
 		}
@@ -221,7 +226,7 @@ func (r *EtcdMaintenanceReconciler) Reconcile(ctx context.Context, req ctrl.Requ
 	}
 
 	// Job exists — check OperationResult ConfigMap.
-	complete, failed, result := readOperationalResult(ctx, r.Client, em.Namespace, jobName)
+	complete, failed, result := readOperationRecord(ctx, r.Client, em.Spec.ClusterRef.Name, jobName)
 	if failed {
 		em.Status.OperationResult = result
 		platformv1alpha1.SetCondition(

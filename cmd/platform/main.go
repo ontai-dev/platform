@@ -19,6 +19,7 @@ import (
 
 	infrav1alpha1 "github.com/ontai-dev/platform/api/infrastructure/v1alpha1"
 	platformv1alpha1 "github.com/ontai-dev/platform/api/v1alpha1"
+	seamcorev1alpha1 "github.com/ontai-dev/seam-core/api/v1alpha1"
 	"github.com/ontai-dev/platform/internal/controller"
 )
 
@@ -28,10 +29,9 @@ func init() {
 	utilruntime.Must(clientgoscheme.AddToScheme(scheme))
 	utilruntime.Must(platformv1alpha1.AddToScheme(scheme))
 	utilruntime.Must(infrav1alpha1.AddToScheme(scheme))
-	// Register the local OperationalRunnerConfig type so the manager client can
-	// create and read RunnerConfig CRs emitted by day-2 reconcilers.
-	// conductor-schema.md §17.
-	utilruntime.Must(controller.AddOperationalRunnerConfigToScheme(scheme))
+	// TalosCluster and RunnerConfig types are now owned by seam-core.
+	// infrastructure.ontai.dev/v1alpha1. T-2B-8.
+	utilruntime.Must(seamcorev1alpha1.AddToScheme(scheme))
 }
 
 func main() {
@@ -114,27 +114,30 @@ func main() {
 	// Day-2 operational reconcilers — F-P1.
 
 	if err := (&controller.EtcdMaintenanceReconciler{
-		Client:   mgr.GetClient(),
-		Scheme:   mgr.GetScheme(),
-		Recorder: mgr.GetEventRecorder("etcdmaintenance-controller"),
+		Client:    mgr.GetClient(),
+		APIReader: mgr.GetAPIReader(),
+		Scheme:    mgr.GetScheme(),
+		Recorder:  mgr.GetEventRecorder("etcdmaintenance-controller"),
 	}).SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "unable to create controller", "controller", "EtcdMaintenance")
 		os.Exit(1)
 	}
 
 	if err := (&controller.NodeMaintenanceReconciler{
-		Client:   mgr.GetClient(),
-		Scheme:   mgr.GetScheme(),
-		Recorder: mgr.GetEventRecorder("nodemaintenance-controller"),
+		Client:    mgr.GetClient(),
+		APIReader: mgr.GetAPIReader(),
+		Scheme:    mgr.GetScheme(),
+		Recorder:  mgr.GetEventRecorder("nodemaintenance-controller"),
 	}).SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "unable to create controller", "controller", "NodeMaintenance")
 		os.Exit(1)
 	}
 
 	if err := (&controller.PKIRotationReconciler{
-		Client:   mgr.GetClient(),
-		Scheme:   mgr.GetScheme(),
-		Recorder: mgr.GetEventRecorder("pkirotation-controller"),
+		Client:    mgr.GetClient(),
+		APIReader: mgr.GetAPIReader(),
+		Scheme:    mgr.GetScheme(),
+		Recorder:  mgr.GetEventRecorder("pkirotation-controller"),
 	}).SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "unable to create controller", "controller", "PKIRotation")
 		os.Exit(1)
@@ -143,9 +146,10 @@ func main() {
 	// ClusterResetReconciler enforces INV-007/CP-INV-006: holds at PendingApproval
 	// until ontai.dev/reset-approved=true annotation is present.
 	if err := (&controller.ClusterResetReconciler{
-		Client:   mgr.GetClient(),
-		Scheme:   mgr.GetScheme(),
-		Recorder: mgr.GetEventRecorder("clusterreset-controller"),
+		Client:    mgr.GetClient(),
+		APIReader: mgr.GetAPIReader(),
+		Scheme:    mgr.GetScheme(),
+		Recorder:  mgr.GetEventRecorder("clusterreset-controller"),
 	}).SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "unable to create controller", "controller", "ClusterReset")
 		os.Exit(1)
@@ -160,18 +164,20 @@ func main() {
 	}
 
 	if err := (&controller.UpgradePolicyReconciler{
-		Client:   mgr.GetClient(),
-		Scheme:   mgr.GetScheme(),
-		Recorder: mgr.GetEventRecorder("upgradepolicy-controller"),
+		Client:    mgr.GetClient(),
+		APIReader: mgr.GetAPIReader(),
+		Scheme:    mgr.GetScheme(),
+		Recorder:  mgr.GetEventRecorder("upgradepolicy-controller"),
 	}).SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "unable to create controller", "controller", "UpgradePolicy")
 		os.Exit(1)
 	}
 
 	if err := (&controller.NodeOperationReconciler{
-		Client:   mgr.GetClient(),
-		Scheme:   mgr.GetScheme(),
-		Recorder: mgr.GetEventRecorder("nodeoperation-controller"),
+		Client:    mgr.GetClient(),
+		APIReader: mgr.GetAPIReader(),
+		Scheme:    mgr.GetScheme(),
+		Recorder:  mgr.GetEventRecorder("nodeoperation-controller"),
 	}).SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "unable to create controller", "controller", "NodeOperation")
 		os.Exit(1)

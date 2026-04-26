@@ -49,9 +49,10 @@ const capabilityClusterReset = "cluster-reset"
 
 // ClusterResetReconciler reconciles ClusterReset objects.
 type ClusterResetReconciler struct {
-	Client   client.Client
-	Scheme   *runtime.Scheme
-	Recorder clientevents.EventRecorder
+	Client    client.Client
+	APIReader client.Reader
+	Scheme    *runtime.Scheme
+	Recorder  clientevents.EventRecorder
 }
 
 // +kubebuilder:rbac:groups=platform.ontai.dev,resources=clusterresets,verbs=get;list;watch;create;update;patch;delete
@@ -272,13 +273,13 @@ func (r *ClusterResetReconciler) submitAndWatchResetJob(ctx context.Context, crs
 	}
 
 	if existingJob == nil {
-		leaderNode, lErr := resolveOperatorLeaderNode(ctx, r.Client)
+		leaderNode, lErr := resolveOperatorLeaderNode(ctx, r.Client, r.APIReader)
 		if lErr != nil {
 			return ctrl.Result{}, fmt.Errorf("ClusterResetReconciler: resolve leader node: %w", lErr)
 		}
 		nodeExclusions := buildNodeExclusions(nil, leaderNode)
 
-		job := jobSpecWithExclusions(jobName, jobNamespace, crst.Spec.ClusterRef.Name, capabilityClusterReset, nodeExclusions)
+		job := jobSpecWithExclusions(jobName, jobNamespace, crst.Spec.ClusterRef.Name, capabilityClusterReset, nodeExclusions, clusterRC.Spec.RunnerImage)
 		if err := controllerutil.SetControllerReference(crst, job, r.Scheme); err != nil {
 			return ctrl.Result{}, fmt.Errorf("ClusterResetReconciler: set owner reference: %w", err)
 		}
@@ -302,7 +303,7 @@ func (r *ClusterResetReconciler) submitAndWatchResetJob(ctx context.Context, crs
 	}
 
 	// Job exists — check OperationResult ConfigMap.
-	complete, failed, result := readOperationalResult(ctx, r.Client, jobNamespace, jobName)
+	complete, failed, result := readOperationRecord(ctx, r.Client, crst.Spec.ClusterRef.Name, jobName)
 	if failed {
 		crst.Status.OperationResult = result
 		platformv1alpha1.SetCondition(
@@ -353,7 +354,7 @@ func (r *ClusterResetReconciler) isCAPIEnabled(ctx context.Context, crst *platfo
 		}
 		return false, fmt.Errorf("get TalosCluster %s/%s: %w", ns, crst.Spec.ClusterRef.Name, err)
 	}
-	return tc.Spec.CAPIEnabled(), nil
+	return tc.Spec.CAPI != nil && tc.Spec.CAPI.Enabled, nil
 }
 
 // SetupWithManager registers ClusterResetReconciler with the manager.

@@ -1,5 +1,6 @@
 # platform-schema
-> API Group: platform.ontai.dev
+> API Group: platform.ontai.dev (operational CRDs: TalosControlPlane, TalosWorkerConfig, EtcdMaintenance, NodeMaintenance, PKIRotation, ClusterReset, HardeningProfile, UpgradePolicy, NodeOperation, ClusterMaintenance, PlatformTenant, QueueProfile, MaintenanceBundle)
+> InfrastructureTalosCluster: infrastructure.ontai.dev/v1alpha1 -- schema owned by seam-core (Decision G). Platform reconciles it; does not define it.
 > Operator: Platform
 > CAPI Providers: cluster.x-k8s.io, bootstrap.cluster.x-k8s.io, infrastructure.cluster.x-k8s.io
 > Amended: 2026-03-30 - CAPI adopted for target cluster lifecycle. Management cluster
@@ -90,9 +91,9 @@ Every TalosConfigTemplate created by Platform includes:
 - Cilium-required sysctl values
 
 After CAPI bootstraps the cluster (nodes reach Running state but are NotReady
-because no CNI is present), the ClusterAssignment with bootstrapFlag=true triggers
-a PackExecution for the Cilium ClusterPack. This is the first pack deployed to
-every cluster. Nodes transition to Ready only after Cilium is up.
+because no CNI is present), Platform triggers a PackExecution for the Cilium
+ClusterPack referenced by spec.capi.ciliumPackRef. This is the first pack deployed
+to every cluster. Nodes transition to Ready only after Cilium is up.
 
 The CAPI MachineHealthCheck is configured with a tolerance window for the CNI
 installation period - nodes are not remediated during this window.
@@ -235,14 +236,16 @@ no equivalent concept, or because they represent dual-path operations where the
 management cluster path requires a direct conductor Job while CAPI handles the target
 cluster path natively.
 
-### TalosCluster
+### InfrastructureTalosCluster
 
-Scope: Namespaced - ont-system (management), tenant-{cluster-name} (target)
+Kind: InfrastructureTalosCluster. API group: infrastructure.ontai.dev/v1alpha1. Schema owned by seam-core (Decision G). Supersedes platform.ontai.dev/TalosCluster (Phase 2B, 2026-04-25).
+Platform reconciles this type but does not own its CRD definition. Condition constants are imported from seam-core/pkg/conditions, not defined locally in platform.
+Scope: Namespaced - seam-system (management), seam-tenant-{cluster-name} (target)
 Short name: tc
 Lives in: git and management cluster.
 
-The Seam root CR for every cluster. For target clusters, TalosCluster owns all
-CAPI objects as children. For the management cluster, TalosCluster has no CAPI
+The Seam root CR for every cluster. For target clusters, InfrastructureTalosCluster owns all
+CAPI objects as children. For the management cluster, InfrastructureTalosCluster has no CAPI
 children - it is the bootstrap record and operational anchor.
 
 spec.mode (v1alpha1 only): bootstrap or import. As before.
@@ -256,9 +259,9 @@ Fields introduced with CAPI adoption:
 - capi.controlPlane.replicas: number of control plane nodes.
 - capi.workers: list of worker pools, each with a name, replica count, and
   list of SeamInfrastructureMachine names pre-provisioned for that pool.
-- capi.ciliumPackRef: the ClusterPack name and version for Cilium. Applied
-  as the first pack via ClusterAssignment bootstrapFlag after cluster reaches
-  Running state.
+- capi.ciliumPackRef: the ClusterPack name and version for Cilium. Platform
+  triggers a PackExecution for this pack when the cluster reaches CAPI Running
+  state, before marking the cluster Ready.
 
 status.origin: bootstrapped or imported. Unchanged.
 status.capiClusterRef: reference to the owned CAPI Cluster object.
@@ -408,12 +411,13 @@ Key spec fields: clusterRef, windows, blockOutsideWindows.
 
 ## 6. Tenant Coordination CRDs
 
-### PlatformTenant, ClusterAssignment, QueueProfile
+### PlatformTenant, QueueProfile
 
-These CRDs are unchanged. Their semantics, namespace placement, and gate conditions
-are identical to the previous schema. ClusterAssignment now additionally gates on
-CAPI Cluster status.phase=Running before the Cilium ClusterPack PackExecution is
-triggered via bootstrapFlag.
+PlatformTenant and QueueProfile semantics, namespace placement, and gate conditions
+are unchanged. ClusterAssignment has been removed -- it was a pre-seam binding record
+with no role in the current seam operator family. Cilium bootstrap is now triggered
+directly by Platform via spec.capi.ciliumPackRef when the CAPI Cluster reaches
+Running state.
 
 QueueProfile is scoped to Wrapper's quota profile only. The ClusterQueue and
 ResourceFlavor resources provisioned by Guardian from QueueProfile govern
@@ -553,12 +557,12 @@ independently resolves an S3 destination is an invariant violation.
 ## 11. Cross-Domain Rules
 
 Reads: security.ontai.dev/RBACProfile status (gate check).
-Reads: infra.ontai.dev/ClusterPack (validate Cilium pack reference in TalosCluster).
-Reads: infra.ontai.dev/PackInstance (gate ClusterAssignment on Cilium Ready).
+Reads: infrastructure.ontai.dev/InfrastructureClusterPack (validate Cilium pack reference in InfrastructureTalosCluster).
+Reads: infrastructure.ontai.dev/InfrastructurePackInstance (gate Cilium PackExecution on Ready).
 Owns: cluster.x-k8s.io/Cluster and all CAPI child objects for target clusters.
 Owns: SeamInfrastructureCluster, SeamInfrastructureMachine in tenant namespaces.
 Creates: tenant namespaces - sole authority.
-Never writes to security.ontai.dev, infra.ontai.dev, or runner.ontai.dev CRDs.
+Never writes to security.ontai.dev or infrastructure.ontai.dev CRDs outside InfrastructureTalosCluster and InfrastructureRunnerConfig.
 
 ---
 

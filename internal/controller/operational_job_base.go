@@ -23,6 +23,8 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+
+	seamcorev1alpha1 "github.com/ontai-dev/seam-core/api/v1alpha1"
 )
 
 const (
@@ -42,15 +44,24 @@ const (
 	// operationalJobBackoffLimit enforces INV-018: gate failures are permanent.
 	operationalJobBackoffLimit = int32(0)
 
-	// conductorImage is the Conductor executor image. In production this is
-	// resolved from RunnerConfig. Placeholder until SC-INV-002 completes.
-	conductorImage = "registry.ontai.dev/ontai-dev/conductor:latest"
+	// executorTalosconfigMountPath is the container mount path for the talosconfig Secret.
+	executorTalosconfigMountPath = "/var/run/secrets/talosconfig"
+
+	// executorTalosconfigEnvPath is the TALOSCONFIG_PATH value injected into executor Jobs.
+	executorTalosconfigEnvPath = executorTalosconfigMountPath + "/talosconfig"
 )
 
 // jobSpec builds a Conductor executor Job spec for the given capability and cluster.
-func jobSpec(jobName, namespace, clusterName, capability string) *batchv1.Job {
+// runnerImage is read from RunnerConfig.Spec.RunnerImage — callers must pass it explicitly.
+// The talosconfig Secret ({clusterName}-talosconfig) is mounted from the job namespace;
+// callers are responsible for ensuring it exists before submitting the Job.
+// OPERATION_RESULT_CR is set to jobName — conductor creates an
+// InfrastructureTalosClusterOperationResult CR with that name in POD_NAMESPACE.
+// conductor-schema.md §17, config.EnvCapability/EnvClusterRef/EnvOperationResultCR.
+func jobSpec(jobName, namespace, clusterName, capability, runnerImage string) *batchv1.Job {
 	ttl := operationalJobTTL
 	backoff := operationalJobBackoffLimit
+	talosconfigName := clusterName + "-talosconfig"
 	return &batchv1.Job{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      jobName,
@@ -73,23 +84,43 @@ func jobSpec(jobName, namespace, clusterName, capability string) *batchv1.Job {
 				Spec: corev1.PodSpec{
 					RestartPolicy:      corev1.RestartPolicyNever,
 					ServiceAccountName: "platform-executor",
+					Volumes: []corev1.Volume{
+						{
+							Name: "talosconfig",
+							VolumeSource: corev1.VolumeSource{
+								Secret: &corev1.SecretVolumeSource{
+									SecretName: talosconfigName,
+								},
+							},
+						},
+					},
 					Containers: []corev1.Container{
 						{
-							Name:  "executor",
-							Image: conductorImage,
-							Args: []string{
-								"execute",
-								"--capability", capability,
-								"--cluster", clusterName,
-							},
+							Name:            "executor",
+							Image:           runnerImage,
+							ImagePullPolicy: corev1.PullAlways,
+							Args:            []string{"execute"},
 							Env: []corev1.EnvVar{
+								{Name: "CAPABILITY", Value: capability},
+								{Name: "CLUSTER_REF", Value: clusterName},
+								// OPERATION_RESULT_CR: conductor creates a TCOR CR with this name.
+								// The platform reconciler reads it back by the same name.
+								{Name: "OPERATION_RESULT_CR", Value: jobName},
 								{
-									Name:  "CLUSTER_NAME",
-									Value: clusterName,
+									Name: "POD_NAMESPACE",
+									ValueFrom: &corev1.EnvVarSource{
+										FieldRef: &corev1.ObjectFieldSelector{
+											FieldPath: "metadata.namespace",
+										},
+									},
 								},
+								{Name: "TALOSCONFIG_PATH", Value: executorTalosconfigEnvPath},
+							},
+							VolumeMounts: []corev1.VolumeMount{
 								{
-									Name:  "CLUSTER_NAMESPACE",
-									Value: namespace,
+									Name:      "talosconfig",
+									MountPath: executorTalosconfigMountPath,
+									ReadOnly:  true,
 								},
 							},
 						},
@@ -112,32 +143,95 @@ func getOperationalJob(ctx context.Context, c client.Client, namespace, jobName 
 	return job, nil
 }
 
-// readOperationalResult checks for the OperationResult ConfigMap written by the
-// Conductor executor. Returns (complete, failed, message).
-func readOperationalResult(ctx context.Context, c client.Client, namespace, jobName string) (complete, failed bool, message string) {
-	cmName := jobName + operationResultConfigMapSuffix
-	cm := &corev1.ConfigMap{}
-	if err := c.Get(ctx, types.NamespacedName{Name: cmName, Namespace: namespace}, cm); err != nil {
+// tenantNS returns the seam-tenant-{clusterRef} namespace.
+func tenantNS(clusterRef string) string {
+	return "seam-tenant-" + clusterRef
+}
+
+// readOperationRecord reads the per-cluster TCOR (named clusterRef in
+// seam-tenant-{clusterRef}) and looks up the record by jobName key.
+// Returns (complete, failed, message).
+// Returns (false, false, "") when the TCOR does not yet exist or the
+// record has not been written yet — the Job is still running.
+func readOperationRecord(ctx context.Context, c client.Client, clusterRef, jobName string) (complete, failed bool, message string) {
+	tcor := &seamcorev1alpha1.InfrastructureTalosClusterOperationResult{}
+	if err := c.Get(ctx, types.NamespacedName{Name: clusterRef, Namespace: tenantNS(clusterRef)}, tcor); err != nil {
 		return false, false, ""
 	}
-	status := cm.Data["status"]
-	msg := cm.Data["message"]
-	switch status {
-	case "success":
-		return true, false, msg
-	case "failure", "failed":
-		return false, true, msg
-	default:
-		return false, false, msg
+	rec, ok := tcor.Spec.Operations[jobName]
+	if !ok {
+		return false, false, ""
 	}
+	switch rec.Status {
+	case seamcorev1alpha1.TalosClusterResultSucceeded:
+		return true, false, rec.Message
+	case seamcorev1alpha1.TalosClusterResultFailed:
+		msg := rec.Message
+		if rec.FailureReason != nil && rec.FailureReason.Reason != "" {
+			msg = rec.FailureReason.Reason
+		}
+		return false, true, msg
+	}
+	return false, false, ""
+}
+
+// ensureTCOR creates the per-cluster TCOR in seam-tenant-{clusterRef} if it
+// does not yet exist. Called by ensureTenantExecutorResources on cluster admission.
+func ensureTCOR(ctx context.Context, c client.Client, clusterRef, talosVersion string) error {
+	ns := tenantNS(clusterRef)
+	tcor := &seamcorev1alpha1.InfrastructureTalosClusterOperationResult{}
+	if err := c.Get(ctx, types.NamespacedName{Name: clusterRef, Namespace: ns}, tcor); err == nil {
+		return nil
+	} else if !apierrors.IsNotFound(err) {
+		return fmt.Errorf("ensureTCOR: get TCOR %s/%s: %w", ns, clusterRef, err)
+	}
+	tcor = &seamcorev1alpha1.InfrastructureTalosClusterOperationResult{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      clusterRef,
+			Namespace: ns,
+			Labels:    map[string]string{"platform.ontai.dev/cluster": clusterRef},
+		},
+		Spec: seamcorev1alpha1.InfrastructureTalosClusterOperationResultSpec{
+			ClusterRef:   clusterRef,
+			TalosVersion: talosVersion,
+			Revision:     1,
+		},
+	}
+	if err := c.Create(ctx, tcor); err != nil && !apierrors.IsAlreadyExists(err) {
+		return fmt.Errorf("ensureTCOR: create TCOR %s/%s: %w", ns, clusterRef, err)
+	}
+	return nil
+}
+
+// bumpTCORRevision archives the current revision of the cluster TCOR to the
+// GraphQuery DB stub, then advances to a new revision for the given talosVersion.
+// Called by UpgradePolicyReconciler after a successful talosVersion upgrade.
+func bumpTCORRevision(ctx context.Context, c client.Client, clusterRef, newTalosVersion string) error {
+	ns := tenantNS(clusterRef)
+	tcor := &seamcorev1alpha1.InfrastructureTalosClusterOperationResult{}
+	if err := c.Get(ctx, types.NamespacedName{Name: clusterRef, Namespace: ns}, tcor); err != nil {
+		if apierrors.IsNotFound(err) {
+			return ensureTCOR(ctx, c, clusterRef, newTalosVersion)
+		}
+		return fmt.Errorf("bumpTCORRevision: get TCOR %s/%s: %w", ns, clusterRef, err)
+	}
+	if tcor.Spec.TalosVersion == newTalosVersion {
+		return nil
+	}
+	stubDumpTCORRevisionToGraphQueryDB(ctx, clusterRef, tcor.Spec.Revision, tcor.Spec.TalosVersion, tcor.Spec.Operations)
+	patch := client.MergeFrom(tcor.DeepCopy())
+	tcor.Spec.Revision++
+	tcor.Spec.TalosVersion = newTalosVersion
+	tcor.Spec.Operations = nil
+	return c.Patch(ctx, tcor, patch)
 }
 
 // jobSpecWithExclusions builds a Conductor executor Job spec and applies NotIn
 // NodeAffinity constraints to prevent the Job pod from landing on the listed nodes.
 // Used for all day-2 self-operation Jobs to avoid scheduling on maintenance targets
 // or the operator leader node. conductor-schema.md §13.
-func jobSpecWithExclusions(jobName, namespace, clusterName, capability string, nodeExclusions []string) *batchv1.Job {
-	job := jobSpec(jobName, namespace, clusterName, capability)
+func jobSpecWithExclusions(jobName, namespace, clusterName, capability string, nodeExclusions []string, runnerImage string) *batchv1.Job {
+	job := jobSpec(jobName, namespace, clusterName, capability, runnerImage)
 	if len(nodeExclusions) == 0 {
 		return job
 	}
@@ -163,10 +257,11 @@ func jobSpecWithExclusions(jobName, namespace, clusterName, capability string, n
 
 // resolveOperatorLeaderNode reads the platform-leader Lease from seam-system,
 // resolves the holder pod, and returns the pod's node name. Returns an empty
-// string (not an error) when the Lease is absent or the holder pod is not found —
-// this allows reconcilers to proceed without exclusions rather than failing.
+// string (not an error) when the Lease is absent or the holder pod is not found.
+// apiReader must be an uncached reader (mgr.GetAPIReader()) to avoid establishing
+// a cluster-scope Pod informer that the platform SA lacks permission to populate.
 // conductor-schema.md §13, CP-INV-007.
-func resolveOperatorLeaderNode(ctx context.Context, c client.Client) (string, error) {
+func resolveOperatorLeaderNode(ctx context.Context, c client.Client, apiReader client.Reader) (string, error) {
 	lease := &coordinationv1.Lease{}
 	if err := c.Get(ctx, types.NamespacedName{
 		Name:      "platform-leader",
@@ -187,9 +282,16 @@ func resolveOperatorLeaderNode(ctx context.Context, c client.Client) (string, er
 	if idx := strings.Index(holderIdentity, "_"); idx != -1 {
 		podName = holderIdentity[:idx]
 	}
+	// Use the uncached API reader to avoid triggering a cluster-scope Pod informer.
+	// Treat Forbidden the same as NotFound: skip leader exclusion rather than failing.
+	// apiReader may be nil in unit tests — fall back to the cached client in that case.
+	reader := client.Reader(c)
+	if apiReader != nil {
+		reader = apiReader
+	}
 	pod := &corev1.Pod{}
-	if err := c.Get(ctx, types.NamespacedName{Name: podName, Namespace: "seam-system"}, pod); err != nil {
-		if apierrors.IsNotFound(err) {
+	if err := reader.Get(ctx, types.NamespacedName{Name: podName, Namespace: "seam-system"}, pod); err != nil {
+		if apierrors.IsNotFound(err) || apierrors.IsForbidden(err) {
 			return "", nil
 		}
 		return "", fmt.Errorf("get leader pod %s/seam-system: %w", podName, err)

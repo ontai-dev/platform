@@ -38,9 +38,10 @@ const (
 
 // NodeMaintenanceReconciler reconciles NodeMaintenance objects.
 type NodeMaintenanceReconciler struct {
-	Client   client.Client
-	Scheme   *runtime.Scheme
-	Recorder clientevents.EventRecorder
+	Client    client.Client
+	APIReader client.Reader
+	Scheme    *runtime.Scheme
+	Recorder  clientevents.EventRecorder
 }
 
 // +kubebuilder:rbac:groups=platform.ontai.dev,resources=nodemaintenances,verbs=get;list;watch;create;update;patch;delete
@@ -149,13 +150,13 @@ func (r *NodeMaintenanceReconciler) Reconcile(ctx context.Context, req ctrl.Requ
 	}
 
 	if existingJob == nil {
-		leaderNode, lErr := resolveOperatorLeaderNode(ctx, r.Client)
+		leaderNode, lErr := resolveOperatorLeaderNode(ctx, r.Client, r.APIReader)
 		if lErr != nil {
 			return ctrl.Result{}, fmt.Errorf("NodeMaintenanceReconciler: resolve leader node: %w", lErr)
 		}
 		nodeExclusions := buildNodeExclusions(nm.Spec.TargetNodes, leaderNode)
 
-		job := jobSpecWithExclusions(jobName, nm.Namespace, nm.Spec.ClusterRef.Name, capability, nodeExclusions)
+		job := jobSpecWithExclusions(jobName, nm.Namespace, nm.Spec.ClusterRef.Name, capability, nodeExclusions, clusterRC.Spec.RunnerImage)
 		if err := controllerutil.SetControllerReference(nm, job, r.Scheme); err != nil {
 			return ctrl.Result{}, fmt.Errorf("NodeMaintenanceReconciler: set owner reference: %w", err)
 		}
@@ -179,7 +180,7 @@ func (r *NodeMaintenanceReconciler) Reconcile(ctx context.Context, req ctrl.Requ
 	}
 
 	// Job exists — check OperationResult ConfigMap.
-	complete, failed, result := readOperationalResult(ctx, r.Client, nm.Namespace, jobName)
+	complete, failed, result := readOperationRecord(ctx, r.Client, nm.Spec.ClusterRef.Name, jobName)
 	if failed {
 		nm.Status.OperationResult = result
 		platformv1alpha1.SetCondition(

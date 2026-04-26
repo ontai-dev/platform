@@ -43,9 +43,10 @@ const (
 
 // NodeOperationReconciler reconciles NodeOperation objects.
 type NodeOperationReconciler struct {
-	Client   client.Client
-	Scheme   *runtime.Scheme
-	Recorder clientevents.EventRecorder
+	Client    client.Client
+	APIReader client.Reader
+	Scheme    *runtime.Scheme
+	Recorder  clientevents.EventRecorder
 }
 
 // +kubebuilder:rbac:groups=platform.ontai.dev,resources=nodeoperations,verbs=get;list;watch;create;update;patch;delete
@@ -309,13 +310,13 @@ func (r *NodeOperationReconciler) reconcileDirectNodeOp(ctx context.Context, nop
 	}
 
 	if existingJob == nil {
-		leaderNode, lErr := resolveOperatorLeaderNode(ctx, r.Client)
+		leaderNode, lErr := resolveOperatorLeaderNode(ctx, r.Client, r.APIReader)
 		if lErr != nil {
 			return ctrl.Result{}, fmt.Errorf("NodeOperationReconciler: resolve leader node: %w", lErr)
 		}
 		nodeExclusions := buildNodeExclusions(nop.Spec.TargetNodes, leaderNode)
 
-		job := jobSpecWithExclusions(jobName, nop.Namespace, nop.Spec.ClusterRef.Name, capability, nodeExclusions)
+		job := jobSpecWithExclusions(jobName, nop.Namespace, nop.Spec.ClusterRef.Name, capability, nodeExclusions, clusterRC.Spec.RunnerImage)
 		if err := controllerutil.SetControllerReference(nop, job, r.Scheme); err != nil {
 			return ctrl.Result{}, fmt.Errorf("NodeOperationReconciler: set owner reference: %w", err)
 		}
@@ -339,7 +340,7 @@ func (r *NodeOperationReconciler) reconcileDirectNodeOp(ctx context.Context, nop
 	}
 
 	// Job exists — check OperationResult ConfigMap.
-	complete, failed, result := readOperationalResult(ctx, r.Client, nop.Namespace, jobName)
+	complete, failed, result := readOperationRecord(ctx, r.Client, nop.Spec.ClusterRef.Name, jobName)
 	if failed {
 		nop.Status.OperationResult = result
 		platformv1alpha1.SetCondition(
@@ -389,7 +390,7 @@ func (r *NodeOperationReconciler) nodeOpCAPIEnabled(ctx context.Context, nop *pl
 		}
 		return false, fmt.Errorf("get TalosCluster %s/%s: %w", ns, nop.Spec.ClusterRef.Name, err)
 	}
-	return tc.Spec.CAPIEnabled(), nil
+	return tc.Spec.CAPI != nil && tc.Spec.CAPI.Enabled, nil
 }
 
 // nodeOpCapability maps a NodeOperationType to the Conductor capability name.

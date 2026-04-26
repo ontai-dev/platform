@@ -71,12 +71,15 @@ type TalosClusterReconciler struct {
 // +kubebuilder:rbac:groups=platform.ontai.dev,resources=talosclusters,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=platform.ontai.dev,resources=talosclusters/status,verbs=get;update;patch
 // +kubebuilder:rbac:groups=platform.ontai.dev,resources=talosclusters/finalizers,verbs=update
+// +kubebuilder:rbac:groups=platform.ontai.dev,resources=upgradepolicies,verbs=get;list;watch;create
+// +kubebuilder:rbac:groups=infrastructure.ontai.dev,resources=infrastructuretalosclusters,verbs=get;list;watch;update;patch
+// +kubebuilder:rbac:groups=infrastructure.ontai.dev,resources=infrastructuretalosclusters/status,verbs=get;update;patch
 // +kubebuilder:rbac:groups="",resources=events,verbs=create;patch
 // +kubebuilder:rbac:groups="",resources=namespaces,verbs=get;list;watch;create;update;patch
 // +kubebuilder:rbac:groups="",resources=secrets,verbs=get;list;watch
 // +kubebuilder:rbac:groups=batch,resources=jobs,verbs=get;list;watch;create;update;patch;delete
-// +kubebuilder:rbac:groups="",resources=configmaps,verbs=get;list;watch
-// +kubebuilder:rbac:groups=runner.ontai.dev,resources=runnerconfigs,verbs=get;list;watch;create;delete
+// +kubebuilder:rbac:groups=infrastructure.ontai.dev,resources=infrastructurerunnerconfigs,verbs=get;list;watch;create;delete
+// +kubebuilder:rbac:groups=infrastructure.ontai.dev,resources=infrastructuretalosclusteroperationresults,verbs=get;list;watch
 // +kubebuilder:rbac:groups=infrastructure.cluster.x-k8s.io,resources=seaminfrastructuremachines,verbs=get;list;watch
 func (r *TalosClusterReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
 	logger := log.FromContext(ctx)
@@ -149,6 +152,23 @@ func (r *TalosClusterReconciler) Reconcile(ctx context.Context, req ctrl.Request
 		)
 	}
 
+	// Step C3 — Version regression guard. If spec.talosVersion would downgrade the
+	// cluster below status.observedTalosVersion, block and set condition. The cluster
+	// stays at its current running version until spec is corrected.
+	if checkVersionRegression(tc) {
+		return ctrl.Result{}, nil
+	}
+
+	// Step C4 — spec.versionUpgrade gate. If set on a Ready cluster, auto-create an
+	// UpgradePolicy CR and track completion. Only applicable to cluster-wide Talos
+	// upgrades, not to individual node ops, etcd maintenance, or other day-2 ops.
+	readyCond := platformv1alpha1.FindCondition(tc.Status.Conditions, platformv1alpha1.ConditionTypeReady)
+	if tc.Spec.VersionUpgrade && readyCond != nil && readyCond.Status == metav1.ConditionTrue {
+		if done, result, err := r.reconcileVersionUpgrade(ctx, tc); done {
+			return result, err
+		}
+	}
+
 	// Step D — Check for reserved infrastructure provider paths before routing.
 	// Screen is a future operator (INV-021). Surface the reservation condition and
 	// halt without reconciling the screen path.
@@ -167,7 +187,7 @@ func (r *TalosClusterReconciler) Reconcile(ctx context.Context, req ctrl.Request
 	}
 
 	// Step E — Route to the appropriate reconciliation path.
-	if !tc.Spec.CAPIEnabled() {
+	if tc.Spec.CAPI == nil || !tc.Spec.CAPI.Enabled {
 		return r.reconcileDirectBootstrap(ctx, tc)
 	}
 	return r.reconcileCAPIPath(ctx, tc)
@@ -252,7 +272,7 @@ func (r *TalosClusterReconciler) reconcileDirectBootstrap(ctx context.Context, t
 			}
 		} else {
 			// WS2: register the management cluster in the platform RBAC policy.
-			if err := r.ensureManagementOnboarding(ctx); err != nil {
+			if err := r.ensureManagementOnboarding(ctx, tc); err != nil {
 				return ctrl.Result{}, fmt.Errorf("reconcileDirectBootstrap: management onboarding (import): %w", err)
 			}
 		}
@@ -312,7 +332,7 @@ func (r *TalosClusterReconciler) reconcileDirectBootstrap(ctx context.Context, t
 				tc.Generation,
 			)
 			// WS2: register management cluster in the platform RBAC policy.
-			if err := r.ensureManagementOnboarding(ctx); err != nil {
+			if err := r.ensureManagementOnboarding(ctx, tc); err != nil {
 				return ctrl.Result{}, fmt.Errorf("reconcileDirectBootstrap: management onboarding (pre-existing): %w", err)
 			}
 			logger.Info("management cluster pre-existing — transitioning to Ready without bootstrap Job",
@@ -347,7 +367,7 @@ func (r *TalosClusterReconciler) reconcileDirectBootstrap(ctx context.Context, t
 	}
 
 	// Bootstrap Job exists — check for OperationResult.
-	complete, failed, result := r.readOperationResult(ctx, tc.Namespace, jobName)
+	complete, failed, result := r.readOperationResult(ctx, tc.Name, jobName)
 	if failed {
 		platformv1alpha1.SetCondition(
 			&tc.Status.Conditions,
@@ -391,7 +411,7 @@ func (r *TalosClusterReconciler) reconcileDirectBootstrap(ctx context.Context, t
 		tc.Generation,
 	)
 	// WS2: register management cluster in the platform RBAC policy.
-	if err := r.ensureManagementOnboarding(ctx); err != nil {
+	if err := r.ensureManagementOnboarding(ctx, tc); err != nil {
 		return ctrl.Result{}, fmt.Errorf("reconcileDirectBootstrap: management onboarding (bootstrap complete): %w", err)
 	}
 	logger.Info("management cluster bootstrap complete, cluster Ready",
