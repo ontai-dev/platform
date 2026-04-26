@@ -510,10 +510,14 @@ these Secrets when node configuration changes -- for example when a HardeningPro
 updated or a machineconfig patch is applied via NodeMaintenance.
 
 **Namespace authority:**
-Platform creates `seam-tenant-{cluster-name}` for ALL cluster modes and roles. CP-INV-004.
-For mode=import: the Compiler does not emit a namespace manifest; Platform creates the namespace
-when the TalosCluster CR is admitted. For mode=bootstrap: Platform creates the namespace as the first
-step in the reconcile path (already the case for the CAPI path; same authority for native bootstrap).
+CP-INV-004: Platform is the sole namespace creation authority for `seam-tenant-{cluster-name}`
+for bootstrap and CAPI-managed cluster modes. For mode=import, the Compiler bootstrap bundle
+includes a `seam-tenant-namespace.yaml` manifest so the admin can apply the namespace (and
+Secrets that live in it) before the TalosCluster CR in a single `kubectl apply -f` run.
+Platform's `ensureTenantNamespace` call in the import reconcile path is idempotent -- it
+creates the namespace if absent (handles re-reconcile or manual deletion) but does not race
+with the bootstrap bundle application. For mode=bootstrap and CAPI: Platform creates the
+namespace in the reconcile path with no bootstrap bundle assist needed.
 
 **Design rationale:**
 This mirrors the CAPI bootstrap provider secret pattern intentionally. The CAPI path
@@ -703,9 +707,10 @@ delivery sequence.
 
 *2026-04-26 - Section 9 corrected: mode-specific machineconfig provisioning contract*
 *  added. mode=import: Platform captures machineconfigs from running cluster via Talos*
-*  COSI API after kubeconfig generation; Compiler emits only TalosCluster CR and*
-*  talosconfig Secret. mode=bootstrap: Platform generates machineconfigs from*
-*  InfrastructureTalosCluster spec; Compiler emits only TalosCluster CR (pending*
-*  schema amendment PLATFORM-BL-HARDENINGPROFILE-MERGE for node topology fields).*
-*  Namespace authority clarified: Platform creates seam-tenant-{cluster} for ALL*
-*  modes; Compiler no longer emits seam-tenant-namespace.yaml. CP-INV-004.*
+*  COSI API after kubeconfig generation (PLATFORM-BL-MACHINECONFIG-IMPORT-CAPTURE).*
+*  mode=bootstrap: Platform generates machineconfigs from InfrastructureTalosCluster*
+*  spec (pending schema amendment PLATFORM-BL-HARDENINGPROFILE-MERGE for node topology).*
+*  Namespace authority corrected: CP-INV-004 applies to bootstrap/CAPI modes.*
+*  For mode=import, Compiler bootstrap bundle includes seam-tenant-namespace.yaml so*
+*  the admin can apply Secrets and TalosCluster CR in a single kubectl apply run.*
+*  ensureTenantNamespace in the import reconcile path is idempotent safety net only.*

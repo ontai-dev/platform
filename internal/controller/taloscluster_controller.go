@@ -253,15 +253,11 @@ func (r *TalosClusterReconciler) reconcileDirectBootstrap(ctx context.Context, t
 	if tc.Spec.Mode == platformv1alpha1.TalosClusterModeImport {
 		tc.Status.Origin = platformv1alpha1.TalosClusterOriginImported
 
-		// Role=tenant: create seam-tenant-{cluster} namespace before reading any
-		// Secrets that live there. For role=management the namespace already exists
-		// (compiler enable bundle creates seam-tenant-{mgmt-cluster}). CP-INV-004.
-		if tc.Spec.Role == platformv1alpha1.TalosClusterRoleTenant {
-			if err := r.ensureTenantNamespace(ctx, tc); err != nil {
-				return ctrl.Result{}, fmt.Errorf("reconcileDirectBootstrap: ensure tenant namespace for role=tenant: %w", err)
-			}
-		}
-
+		// Read talosconfig Secret from seam-tenant-{cluster} and generate the kubeconfig.
+		// The bootstrap bundle includes a seam-tenant-namespace.yaml so the admin can
+		// apply it (and the Secrets) before the TalosCluster CR in a single apply run.
+		// For mode=import the namespace is always pre-existing when this reconcile fires.
+		// platform-schema.md §9.
 		if result, err := r.ensureKubeconfigSecret(ctx, tc); err != nil {
 			return ctrl.Result{}, fmt.Errorf("reconcileDirectBootstrap: import kubeconfig: %w", err)
 		} else if result.RequeueAfter > 0 {
@@ -269,7 +265,15 @@ func (r *TalosClusterReconciler) reconcileDirectBootstrap(ctx context.Context, t
 			return result, nil
 		}
 
+		// Role=tenant on the direct path: create the seam-tenant namespace and copy
+		// the kubeconfig Secret there so operators can locate it alongside other
+		// tenant-scoped resources. CP-INV-004: Platform is the sole namespace creation
+		// authority for bootstrap/CAPI clusters; for import clusters the bootstrap
+		// bundle's namespace manifest handles initial creation. WS5.
 		if tc.Spec.Role == platformv1alpha1.TalosClusterRoleTenant {
+			if err := r.ensureTenantNamespace(ctx, tc); err != nil {
+				return ctrl.Result{}, fmt.Errorf("reconcileDirectBootstrap: ensure tenant namespace for role=tenant: %w", err)
+			}
 			if err := r.ensureTenantKubeconfigCopy(ctx, tc); err != nil {
 				return ctrl.Result{}, fmt.Errorf("reconcileDirectBootstrap: copy kubeconfig to tenant namespace: %w", err)
 			}
