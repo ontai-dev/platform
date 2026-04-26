@@ -29,7 +29,8 @@ func buildClusterRC(ctx context.Context, t *testing.T, clusterName string, capab
 			Namespace: "ont-system",
 		},
 		Spec: controller.OperationalRunnerConfigSpec{
-			ClusterRef: clusterName,
+			ClusterRef:  clusterName,
+			RunnerImage: "ghcr.io/ontai-dev/conductor-execute:dev",
 		},
 	}
 	if err := testClient.Create(ctx, rc); err != nil {
