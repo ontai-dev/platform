@@ -17,6 +17,7 @@ import (
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/client-go/dynamic"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/tools/clientcmd"
 	ctrl "sigs.k8s.io/controller-runtime"
@@ -799,17 +800,35 @@ func (r *TalosClusterReconciler) EnsureConductorDeploymentOnTargetCluster(
 	if err != nil {
 		return false, fmt.Errorf("ensureConductorDeployment: build remote client for %s: %w", tc.Name, err)
 	}
+	dynClient, err := dynamic.NewForConfig(restConfig)
+	if err != nil {
+		return false, fmt.Errorf("ensureConductorDeployment: build dynamic client for %s: %w", tc.Name, err)
+	}
 
-	// For import clusters, ensure ont-system namespace and conductor ServiceAccount exist
-	// before attempting Deployment creation. CAPI clusters have ont-system pre-existing.
-	// platform-schema.md §12 steps 3-4.
-	if tc.Spec.Mode == platformv1alpha1.TalosClusterModeImport {
+	// Bootstrap the conductor's runtime environment on the tenant cluster: namespace,
+	// ServiceAccount, bootstrap-window RBAC, and InfrastructureTalosCluster CR copy.
+	// Applies to role=tenant only. Both mode=import and mode=bootstrap clusters are
+	// tenant clusters; mode=bootstrap with role=management identifies the management
+	// cluster itself, which must not receive remote conductor bootstrap (its conductor
+	// is installed via the enable bundle and its ont-system is not a target namespace).
+	// The reconciler dispatch already exits management clusters before reaching this
+	// function; this guard is an explicit second layer of defense.
+	// platform-schema.md §12 steps 3-6. INV-020. Decision H.
+	if tc.Spec.Role == platformv1alpha1.TalosClusterRoleTenant {
 		if err := ensureRemoteNamespace(ctx, remoteK8s, conductorAgentNamespace); err != nil {
 			return false, fmt.Errorf("ensureConductorDeployment: ensure namespace %s on %s: %w",
 				conductorAgentNamespace, tc.Name, err)
 		}
 		if err := ensureRemoteConductorServiceAccount(ctx, remoteK8s); err != nil {
 			return false, fmt.Errorf("ensureConductorDeployment: ensure conductor SA on %s: %w",
+				tc.Name, err)
+		}
+		if err := EnsureRemoteConductorRBAC(ctx, remoteK8s); err != nil {
+			return false, fmt.Errorf("ensureConductorDeployment: ensure conductor RBAC on %s: %w",
+				tc.Name, err)
+		}
+		if err := EnsureRemoteTalosClusterCopy(ctx, dynClient, tc); err != nil {
+			return false, fmt.Errorf("ensureConductorDeployment: ensure TalosCluster copy on %s: %w",
 				tc.Name, err)
 		}
 	}
@@ -850,6 +869,12 @@ func (r *TalosClusterReconciler) EnsureConductorDeploymentOnTargetCluster(
 	return false, nil
 }
 
+// conductorTenantClusterRoleName is the ClusterRole and ClusterRoleBinding name for the
+// conductor agent on all tenant clusters (mode=import and mode=bootstrap). Applied during
+// the bootstrap window before guardian becomes operational on the tenant cluster.
+// INV-020. platform-schema.md §12.
+const conductorTenantClusterRoleName = "conductor-agent-tenant"
+
 // ensureRemoteNamespace creates the given namespace on the remote cluster if it does not
 // already exist. Idempotent. Used to create ont-system on import-mode tenant clusters
 // before Conductor Deployment creation. platform-schema.md §12 step 3.
@@ -873,6 +898,145 @@ func ensureRemoteConductorServiceAccount(ctx context.Context, k8s kubernetes.Int
 	}
 	if _, err := k8s.CoreV1().ServiceAccounts(conductorAgentNamespace).Create(ctx, sa, metav1.CreateOptions{}); err != nil && !apierrors.IsAlreadyExists(err) {
 		return fmt.Errorf("create conductor ServiceAccount in %s: %w", conductorAgentNamespace, err)
+	}
+	return nil
+}
+
+// EnsureRemoteConductorRBAC creates the ClusterRole and ClusterRoleBinding for the
+// conductor agent on the remote tenant cluster. Conductor role=tenant needs cluster-scoped
+// read access to all Seam governance CRs to drive drift detection, and write access to
+// create events. Applied during the bootstrap window before guardian becomes operational
+// on the tenant cluster (INV-020). Idempotent. platform-schema.md §12 step 5.
+func EnsureRemoteConductorRBAC(ctx context.Context, k8s kubernetes.Interface) error {
+	cr := &rbacv1.ClusterRole{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: conductorTenantClusterRoleName,
+			Labels: map[string]string{
+				"runner.ontai.dev/component":  "conductor",
+				"runner.ontai.dev/managed-by": "platform",
+			},
+		},
+		Rules: []rbacv1.PolicyRule{
+			{
+				APIGroups: []string{"infrastructure.ontai.dev"},
+				Resources: []string{"*"},
+				Verbs:     []string{"get", "list", "watch", "update", "patch"},
+			},
+			{
+				APIGroups: []string{"security.ontai.dev"},
+				Resources: []string{"*"},
+				Verbs:     []string{"get", "list", "watch"},
+			},
+			{
+				APIGroups: []string{""},
+				Resources: []string{"secrets", "namespaces", "nodes", "pods"},
+				Verbs:     []string{"get", "list", "watch"},
+			},
+			{
+				APIGroups: []string{""},
+				Resources: []string{"events"},
+				Verbs:     []string{"create", "patch"},
+			},
+			{
+				APIGroups: []string{"apps"},
+				Resources: []string{"deployments", "replicasets", "daemonsets", "statefulsets"},
+				Verbs:     []string{"get", "list", "watch"},
+			},
+			{
+				APIGroups: []string{"events.k8s.io"},
+				Resources: []string{"events"},
+				Verbs:     []string{"create", "patch"},
+			},
+		},
+	}
+	if _, err := k8s.RbacV1().ClusterRoles().Create(ctx, cr, metav1.CreateOptions{}); err != nil && !apierrors.IsAlreadyExists(err) {
+		return fmt.Errorf("create ClusterRole %s: %w", conductorTenantClusterRoleName, err)
+	}
+
+	crb := &rbacv1.ClusterRoleBinding{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: conductorTenantClusterRoleName,
+			Labels: map[string]string{
+				"runner.ontai.dev/component":  "conductor",
+				"runner.ontai.dev/managed-by": "platform",
+			},
+		},
+		RoleRef: rbacv1.RoleRef{
+			APIGroup: "rbac.authorization.k8s.io",
+			Kind:     "ClusterRole",
+			Name:     conductorTenantClusterRoleName,
+		},
+		Subjects: []rbacv1.Subject{
+			{
+				Kind:      "ServiceAccount",
+				Name:      "conductor",
+				Namespace: conductorAgentNamespace,
+			},
+		},
+	}
+	if _, err := k8s.RbacV1().ClusterRoleBindings().Create(ctx, crb, metav1.CreateOptions{}); err != nil && !apierrors.IsAlreadyExists(err) {
+		return fmt.Errorf("create ClusterRoleBinding %s: %w", conductorTenantClusterRoleName, err)
+	}
+	return nil
+}
+
+// EnsureRemoteTalosClusterCopy creates an InfrastructureTalosCluster CR in ont-system
+// on the tenant cluster that mirrors the spec declared on the management cluster.
+// Conductor role=tenant watches this CR to detect drift between declared state and
+// actual cluster state. Decision H: conductor is the reconciliation authority for its
+// cluster's governance state. Idempotent. platform-schema.md §12 step 6.
+//
+// If the InfrastructureTalosCluster CRD is not yet installed on the tenant cluster
+// (seam-core enable bundle not yet applied), the function returns nil and defers.
+// SC-INV-003: seam-core CRDs are installed before all operators.
+func EnsureRemoteTalosClusterCopy(ctx context.Context, dynClient dynamic.Interface, tc *platformv1alpha1.TalosCluster) error {
+	gvr := schema.GroupVersionResource{
+		Group:    "infrastructure.ontai.dev",
+		Version:  "v1alpha1",
+		Resource: "infrastructuretalosclusters",
+	}
+
+	// Idempotency: skip if the CR already exists.
+	_, err := dynClient.Resource(gvr).Namespace(conductorAgentNamespace).Get(ctx, tc.Name, metav1.GetOptions{})
+	if err == nil {
+		return nil
+	}
+	if !apierrors.IsNotFound(err) {
+		return fmt.Errorf("ensureRemoteTalosClusterCopy: check existing CR on %s: %w", tc.Name, err)
+	}
+
+	obj := &unstructured.Unstructured{
+		Object: map[string]interface{}{
+			"apiVersion": "infrastructure.ontai.dev/v1alpha1",
+			"kind":       "InfrastructureTalosCluster",
+			"metadata": map[string]interface{}{
+				"name":      tc.Name,
+				"namespace": conductorAgentNamespace,
+				"labels": map[string]interface{}{
+					"ontai.dev/managed-by":    "platform",
+					"ontai.dev/cluster-source": "management",
+				},
+			},
+			"spec": map[string]interface{}{
+				"mode":              string(tc.Spec.Mode),
+				"role":              string(tc.Spec.Role),
+				"talosVersion":      tc.Spec.TalosVersion,
+				"kubernetesVersion": tc.Spec.KubernetesVersion,
+				"clusterEndpoint":   tc.Spec.ClusterEndpoint,
+			},
+		},
+	}
+
+	if _, err := dynClient.Resource(gvr).Namespace(conductorAgentNamespace).Create(ctx, obj, metav1.CreateOptions{}); err != nil {
+		if apierrors.IsAlreadyExists(err) {
+			return nil
+		}
+		// CRD not yet installed on the tenant cluster -- seam-core enable bundle has not
+		// been applied yet. Return nil and defer; next reconcile will retry. SC-INV-003.
+		if apierrors.IsNotFound(err) {
+			return nil
+		}
+		return fmt.Errorf("ensureRemoteTalosClusterCopy: create InfrastructureTalosCluster on %s: %w", tc.Name, err)
 	}
 	return nil
 }
