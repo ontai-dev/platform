@@ -264,17 +264,21 @@ func (r *TalosClusterReconciler) reconcileDirectBootstrap(ctx context.Context, t
 			return result, nil
 		}
 
-		// Role=tenant on the direct path: create the seam-tenant namespace and copy
-		// the kubeconfig Secret there so operators can locate it alongside other
-		// tenant-scoped resources. CP-INV-004: Platform is the sole namespace creation
-		// authority for bootstrap/CAPI clusters; for import clusters the bootstrap
-		// bundle's namespace manifest handles initial creation. WS5.
+		// Copy the generated kubeconfig to target-cluster-kubeconfig in
+		// seam-tenant-{cluster} for all import clusters regardless of role.
+		// conductor-execute Jobs for both management-cluster and tenant-cluster
+		// PackExecutions mount this Secret — the same name, the same namespace,
+		// no role-specific divergence. platform-schema.md §9.
+		if err := r.ensureTenantKubeconfigCopy(ctx, tc); err != nil {
+			return ctrl.Result{}, fmt.Errorf("reconcileDirectBootstrap: copy kubeconfig to tenant namespace: %w", err)
+		}
+
+		// Role=tenant on the direct path: create the seam-tenant namespace and
+		// register the cluster for RBAC and pack delivery. CP-INV-004: Platform is
+		// the sole namespace creation authority. WS5.
 		if tc.Spec.Role == platformv1alpha1.TalosClusterRoleTenant {
 			if err := r.ensureTenantNamespace(ctx, tc); err != nil {
 				return ctrl.Result{}, fmt.Errorf("reconcileDirectBootstrap: ensure tenant namespace for role=tenant: %w", err)
-			}
-			if err := r.ensureTenantKubeconfigCopy(ctx, tc); err != nil {
-				return ctrl.Result{}, fmt.Errorf("reconcileDirectBootstrap: copy kubeconfig to tenant namespace: %w", err)
 			}
 			// WS1: register the tenant cluster in guardian RBAC policy/profiles and
 			// create the Kueue LocalQueue so pack deployments can be admitted.
