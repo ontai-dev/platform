@@ -873,6 +873,11 @@ func EnsureRemoteConductorRBAC(ctx context.Context, k8s kubernetes.Interface) er
 				Verbs:     []string{"get", "list", "watch", "update", "patch"},
 			},
 			{
+				APIGroups: []string{"infrastructure.ontai.dev"},
+				Resources: []string{"infrastructuretalosclusters/status"},
+				Verbs:     []string{"update", "patch"},
+			},
+			{
 				APIGroups: []string{"security.ontai.dev"},
 				Resources: []string{"*"},
 				Verbs:     []string{"get", "list", "watch"},
