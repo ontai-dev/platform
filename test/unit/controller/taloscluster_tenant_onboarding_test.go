@@ -63,6 +63,8 @@ func TestEnsureRemoteConductorRBAC_CreatesClusterRoleAndBinding(t *testing.T) {
 	// Must include infrastructure.ontai.dev for governance CR drift detection.
 	hasInfra := false
 	hasSecurity := false
+	hasCoordination := false
+	hasRBAC := false
 	for _, rule := range cr.Rules {
 		for _, group := range rule.APIGroups {
 			if group == "infrastructure.ontai.dev" {
@@ -71,6 +73,12 @@ func TestEnsureRemoteConductorRBAC_CreatesClusterRoleAndBinding(t *testing.T) {
 			if group == "security.ontai.dev" {
 				hasSecurity = true
 			}
+			if group == "coordination.k8s.io" {
+				hasCoordination = true
+			}
+			if group == "rbac.authorization.k8s.io" {
+				hasRBAC = true
+			}
 		}
 	}
 	if !hasInfra {
@@ -78,6 +86,12 @@ func TestEnsureRemoteConductorRBAC_CreatesClusterRoleAndBinding(t *testing.T) {
 	}
 	if !hasSecurity {
 		t.Error("ClusterRole missing security.ontai.dev API group rule")
+	}
+	if !hasCoordination {
+		t.Error("ClusterRole missing coordination.k8s.io API group rule (required for leader election leases)")
+	}
+	if !hasRBAC {
+		t.Error("ClusterRole missing rbac.authorization.k8s.io API group rule (required for drift detection sweep)")
 	}
 
 	// Verify ClusterRoleBinding exists and references the conductor ServiceAccount.

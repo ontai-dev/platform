@@ -86,8 +86,8 @@ const (
 	ReasonDegraded                       = conditions.ReasonDegraded
 	ReasonControlPlaneNodeUnreachable    = conditions.ReasonControlPlaneNodeUnreachable
 	ReasonWorkerNodeUnreachable          = conditions.ReasonWorkerNodeUnreachable
-	ReasonConductorDeploymentAvailable   = conditions.ReasonConductorDeploymentAvailable
-	ReasonConductorDeploymentUnavailable = conditions.ReasonConductorDeploymentUnavailable
+	ReasonConductorBootstrapComplete = conditions.ReasonConductorBootstrapComplete
+	ReasonConductorBootstrapPending  = conditions.ReasonConductorBootstrapPending
 	ReasonScreenNotImplemented           = conditions.ReasonScreenNotImplemented
 	ReasonTalosVersionRequired           = conditions.ReasonTalosVersionRequired
 	ReasonTalosConfigSecretAbsent        = conditions.ReasonTalosConfigSecretAbsent

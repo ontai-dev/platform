@@ -449,7 +449,7 @@ func TestTalosClusterReconcile_CAPI_CiliumPendingClearedWhenPackInstanceReady(t 
 		Client:   c,
 		Scheme:   scheme,
 		Recorder: clientevents.NewFakeRecorder(32),
-		RemoteConductorAvailableFn: func(_ context.Context, _ string) (bool, error) {
+		RemoteConductorBootstrapDoneFn: func(_ context.Context, _ string) (bool, error) {
 			return true, nil
 		},
 	}

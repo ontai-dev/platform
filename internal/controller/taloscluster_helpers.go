@@ -8,7 +8,6 @@ import (
 	"os"
 	"time"
 
-	appsv1 "k8s.io/api/apps/v1"
 	batchv1 "k8s.io/api/batch/v1"
 	corev1 "k8s.io/api/core/v1"
 	rbacv1 "k8s.io/api/rbac/v1"
@@ -45,10 +44,6 @@ const (
 
 	// clusterNamespaceLabel is the namespace label applied to identify the cluster.
 	clusterNamespaceLabel = "ontai.dev/cluster"
-
-	// conductorImageName is the base image name for the Conductor agent binary
-	// (distroless, deployed to clusters via ont-system). conductor-schema.md §3.
-	conductorImageName = "conductor"
 
 	// conductorExecuteImageName is the base image name for the Conductor executor
 	// binary (debian-slim, used for executor Jobs). conductor-schema.md §3, Decision 12.
@@ -715,46 +710,33 @@ func (r *TalosClusterReconciler) isCiliumPackInstanceReady(ctx context.Context, 
 	return false, nil
 }
 
-// conductorDeploymentName is the canonical name for the Conductor agent Deployment
-// on any cluster. Matches the name stamped by compiler enable on the management cluster.
-const conductorDeploymentName = "conductor-agent"
-
 // conductorAgentNamespace is the namespace where Conductor runs on every cluster.
 // Locked namespace model: CONTEXT.md §4.
 const conductorAgentNamespace = "ont-system"
 
-// conductorRoleEnvVar is the env var carrying the role stamp. conductor-schema.md §15.
-// The role field is a first-class spec field — it is in the container spec, not
-// in metadata. It is never modified after Deployment creation.
-const conductorRoleEnvVar = "CONDUCTOR_ROLE"
-
-// EnsureConductorDeploymentOnTargetCluster creates the Conductor agent Deployment
-// in ont-system on the target cluster if it does not already exist, then checks
-// whether the Deployment has reached Available=True.
+// EnsureRemoteConductorBootstrap sets up the bootstrap window infrastructure for
+// conductor on the tenant cluster: ont-system namespace, conductor ServiceAccount,
+// ClusterRole + ClusterRoleBinding (INV-020), and the InfrastructureTalosCluster
+// CR copy in ont-system (Decision H). Platform never deploys the conductor
+// Deployment — that is admin-controlled via the enable bundle.
 //
-// Returns (true, nil) when the Deployment is Available.
-// Returns (false, nil) when the kubeconfig is not yet available, or when the
-// Deployment was just created and is not yet Available — the caller should requeue.
+// Returns (true, nil) when all bootstrap items are established.
+// Returns (false, nil) when the kubeconfig is not yet available — caller requeues.
 // Returns (false, err) only for unexpected API errors.
 //
-// Platform is the sole authority for deploying Conductor to tenant clusters.
-// The Deployment is stamped with CONDUCTOR_ROLE=tenant. platform-schema.md §12.
-// conductor-schema.md §15 Role Declaration Contract. Gap 27.
+// Applies to role=tenant only. Management clusters are excluded by the caller.
+// platform-schema.md §12 steps 3-6. INV-020. Decision H.
 //
-// If RemoteConductorAvailableFn is set on the reconciler (unit test override), it
-// is called instead of the real remote cluster interaction.
-//
-// Kubeconfig resolution: CAPI generates a Secret named {cluster-name}-kubeconfig
-// in seam-tenant-{cluster-name} after the cluster reaches Running state. Platform
-// reads this Secret to connect to the target cluster.
-func (r *TalosClusterReconciler) EnsureConductorDeploymentOnTargetCluster(
+// If RemoteConductorBootstrapDoneFn is set on the reconciler (unit test override),
+// it is called instead of the real remote cluster interaction.
+func (r *TalosClusterReconciler) EnsureRemoteConductorBootstrap(
 	ctx context.Context,
 	tc *platformv1alpha1.TalosCluster,
 ) (bool, error) {
-	// Unit test override — injected via RemoteConductorAvailableFn to avoid
+	// Unit test override — injected via RemoteConductorBootstrapDoneFn to avoid
 	// requiring a live target cluster kubeconfig in tests.
-	if r.RemoteConductorAvailableFn != nil {
-		return r.RemoteConductorAvailableFn(ctx, tc.Name)
+	if r.RemoteConductorBootstrapDoneFn != nil {
+		return r.RemoteConductorBootstrapDoneFn(ctx, tc.Name)
 	}
 
 	tenantNS := "seam-tenant-" + tc.Name
@@ -833,40 +815,8 @@ func (r *TalosClusterReconciler) EnsureConductorDeploymentOnTargetCluster(
 		}
 	}
 
-	// Check whether the Conductor Deployment already exists.
-	dep, err := remoteK8s.AppsV1().Deployments(conductorAgentNamespace).Get(
-		ctx, conductorDeploymentName, metav1.GetOptions{})
-	if err != nil {
-		if !apierrors.IsNotFound(err) {
-			return false, fmt.Errorf("ensureConductorDeployment: check deployment %s/%s on %s: %w",
-				conductorAgentNamespace, conductorDeploymentName, tc.Name, err)
-		}
-		// Deployment does not exist — create it.
-		// Derive agent image: conductor (distroless) with tag from tc.Spec.TalosVersion.
-		// Dev: conductor:dev. Production: conductor:{talosVersion}. conductor-schema.md §3.
-		agentRegistry := os.Getenv(conductorRegistryEnv)
-		if agentRegistry == "" {
-			agentRegistry = conductorRegistryDefault
-		}
-		agentImage := fmt.Sprintf("%s/%s:%s", agentRegistry, conductorImageName, executorImageTag(tc.Spec.TalosVersion))
-		newDep := BuildConductorAgentDeployment(tc.Name, agentImage)
-		if _, createErr := remoteK8s.AppsV1().Deployments(conductorAgentNamespace).Create(
-			ctx, newDep, metav1.CreateOptions{}); createErr != nil && !apierrors.IsAlreadyExists(createErr) {
-			return false, fmt.Errorf("ensureConductorDeployment: create deployment on %s: %w", tc.Name, createErr)
-		}
-		// Just created — not yet Available.
-		return false, nil
-	}
-
-	// Deployment exists — check the Available condition.
-	// Available=True means all desired replicas are up and healthy.
-	for _, cond := range dep.Status.Conditions {
-		if cond.Type == appsv1.DeploymentAvailable && cond.Status == corev1.ConditionTrue {
-			return true, nil
-		}
-	}
-	// Deployment exists but not yet Available.
-	return false, nil
+	// All bootstrap window items complete.
+	return true, nil
 }
 
 // conductorTenantClusterRoleName is the ClusterRole and ClusterRoleBinding name for the
@@ -876,8 +826,8 @@ func (r *TalosClusterReconciler) EnsureConductorDeploymentOnTargetCluster(
 const conductorTenantClusterRoleName = "conductor-agent-tenant"
 
 // ensureRemoteNamespace creates the given namespace on the remote cluster if it does not
-// already exist. Idempotent. Used to create ont-system on import-mode tenant clusters
-// before Conductor Deployment creation. platform-schema.md §12 step 3.
+// already exist. Idempotent. Used to create ont-system on tenant clusters as part of
+// the conductor bootstrap window. platform-schema.md §12 step 3.
 func ensureRemoteNamespace(ctx context.Context, k8s kubernetes.Interface, name string) error {
 	ns := &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: name}}
 	if _, err := k8s.CoreV1().Namespaces().Create(ctx, ns, metav1.CreateOptions{}); err != nil && !apierrors.IsAlreadyExists(err) {
@@ -946,6 +896,16 @@ func EnsureRemoteConductorRBAC(ctx context.Context, k8s kubernetes.Interface) er
 				APIGroups: []string{"events.k8s.io"},
 				Resources: []string{"events"},
 				Verbs:     []string{"create", "patch"},
+			},
+			{
+				APIGroups: []string{"coordination.k8s.io"},
+				Resources: []string{"leases"},
+				Verbs:     []string{"get", "list", "watch", "create", "update", "patch", "delete"},
+			},
+			{
+				APIGroups: []string{"rbac.authorization.k8s.io"},
+				Resources: []string{"roles", "rolebindings", "clusterroles", "clusterrolebindings"},
+				Verbs:     []string{"get", "list", "watch", "update", "patch"},
 			},
 		},
 	}
@@ -1039,75 +999,6 @@ func EnsureRemoteTalosClusterCopy(ctx context.Context, dynClient dynamic.Interfa
 		return fmt.Errorf("ensureRemoteTalosClusterCopy: create InfrastructureTalosCluster on %s: %w", tc.Name, err)
 	}
 	return nil
-}
-
-// BuildConductorAgentDeployment builds the Conductor agent Deployment spec for a
-// tenant cluster. CLUSTER_REF and CONDUCTOR_ROLE are injected via downward API
-// fieldRef from pod template annotations so the pod reads its own identity without
-// hard-coding values. Annotations must be on the pod template, not the Deployment
-// metadata: fieldRef metadata.annotations resolves from the pod's own annotations.
-// runnerImage is the fully qualified image ref derived from RunnerConfig.Spec.RunnerImage.
-// conductor-schema.md §15. platform-schema.md §12.
-func BuildConductorAgentDeployment(clusterName, runnerImage string) *appsv1.Deployment {
-	replicas := int32(1)
-	return &appsv1.Deployment{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      conductorDeploymentName,
-			Namespace: conductorAgentNamespace,
-			Labels: map[string]string{
-				"runner.ontai.dev/component": "conductor",
-				"runner.ontai.dev/cluster":   clusterName,
-			},
-		},
-		Spec: appsv1.DeploymentSpec{
-			Replicas: &replicas,
-			Selector: &metav1.LabelSelector{
-				MatchLabels: map[string]string{
-					"runner.ontai.dev/component": "conductor",
-				},
-			},
-			Template: corev1.PodTemplateSpec{
-				ObjectMeta: metav1.ObjectMeta{
-					Labels: map[string]string{
-						"runner.ontai.dev/component": "conductor",
-						"runner.ontai.dev/cluster":   clusterName,
-					},
-					Annotations: map[string]string{
-						"platform.ontai.dev/cluster-ref": clusterName,
-						"platform.ontai.dev/role":        "tenant",
-					},
-				},
-				Spec: corev1.PodSpec{
-					ServiceAccountName: "conductor",
-					Containers: []corev1.Container{
-						{
-							Name:  "conductor",
-							Image: runnerImage,
-							Args:  []string{"agent"},
-							Env: []corev1.EnvVar{
-								{
-									Name: conductorRoleEnvVar,
-									ValueFrom: &corev1.EnvVarSource{
-										FieldRef: &corev1.ObjectFieldSelector{
-											FieldPath: "metadata.annotations['platform.ontai.dev/role']",
-										},
-									},
-								},
-								{
-									Name: "CLUSTER_REF",
-									ValueFrom: &corev1.EnvVarSource{
-										FieldRef: &corev1.ObjectFieldSelector{
-											FieldPath: "metadata.annotations['platform.ontai.dev/cluster-ref']",
-										},
-									},
-								},
-							},
-						},
-					},
-				},
-			},
-		},
-	}
 }
 
 // boolPtr returns a pointer to a bool value.

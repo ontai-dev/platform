@@ -53,11 +53,10 @@ type TalosClusterReconciler struct {
 	// Recorder is the Kubernetes event recorder for emitting Warning and Normal events.
 	Recorder clientevents.EventRecorder
 
-	// RemoteConductorAvailableFn, if non-nil, replaces the real remote Conductor
-	// Deployment availability check in EnsureConductorDeploymentOnTargetCluster.
-	// Used exclusively in unit tests to inject a controlled availability response
-	// without a live target cluster kubeconfig.
-	RemoteConductorAvailableFn func(ctx context.Context, clusterName string) (bool, error)
+	// RemoteConductorBootstrapDoneFn, if non-nil, replaces the real remote bootstrap
+	// window setup in EnsureRemoteConductorBootstrap. Used exclusively in unit tests
+	// to inject a controlled response without a live target cluster kubeconfig.
+	RemoteConductorBootstrapDoneFn func(ctx context.Context, clusterName string) (bool, error)
 
 	// KubeconfigGeneratorFn, if non-nil, replaces the real talos goclient call in
 	// ensureKubeconfigSecret. The function receives the cluster name and endpoint and
@@ -590,40 +589,39 @@ func (r *TalosClusterReconciler) ensureConductorReadyAndTransition(
 ) (ctrl.Result, error) {
 	logger := log.FromContext(ctx)
 
-	available, err := r.EnsureConductorDeploymentOnTargetCluster(ctx, tc)
+	done, err := r.EnsureRemoteConductorBootstrap(ctx, tc)
 	if err != nil {
-		logger.Error(err, "failed to ensure Conductor Deployment on target cluster",
+		logger.Error(err, "failed to complete conductor bootstrap window on target cluster",
 			"cluster", tc.Name)
 		return ctrl.Result{RequeueAfter: capiPollInterval},
 			fmt.Errorf("ensureConductorReadyAndTransition: %w", err)
 	}
 
-	if !available {
-		// Conductor Deployment not yet Available — set ConductorReady=False and requeue.
+	if !done {
+		// Bootstrap window items not yet complete — kubeconfig pending or items in progress.
 		platformv1alpha1.SetCondition(
 			&tc.Status.Conditions,
 			platformv1alpha1.ConditionTypeConductorReady,
 			metav1.ConditionFalse,
-			platformv1alpha1.ReasonConductorDeploymentUnavailable,
-			"Conductor Deployment has been created on the target cluster but has not yet reached Available=True. Requeuing.",
+			platformv1alpha1.ReasonConductorBootstrapPending,
+			"Conductor bootstrap window setup in progress (namespace, RBAC, InfrastructureTalosCluster copy). Requeuing.",
 			tc.Generation,
 		)
-		logger.Info("Conductor Deployment not yet Available — requeueing",
-			"cluster", tc.Name)
+		logger.Info("conductor bootstrap window pending — requeueing", "cluster", tc.Name)
 		return ctrl.Result{RequeueAfter: capiPollInterval}, nil
 	}
 
-	// Conductor is Available — set ConductorReady=True, then transition to cluster Ready.
+	// Bootstrap window complete — set ConductorReady=True, then transition cluster to Ready.
 	platformv1alpha1.SetCondition(
 		&tc.Status.Conditions,
 		platformv1alpha1.ConditionTypeConductorReady,
 		metav1.ConditionTrue,
-		platformv1alpha1.ReasonConductorDeploymentAvailable,
-		"Conductor Deployment is Available on the target cluster.",
+		platformv1alpha1.ReasonConductorBootstrapComplete,
+		"Conductor bootstrap window complete: ont-system namespace, RBAC, and InfrastructureTalosCluster copy established on the target cluster.",
 		tc.Generation,
 	)
 	r.transitionToReady(tc)
-	logger.Info("TalosCluster Ready — CAPI Running, Cilium Ready, Conductor Available",
+	logger.Info("TalosCluster Ready — conductor bootstrap window complete",
 		"name", tc.Name)
 	return ctrl.Result{}, nil
 }

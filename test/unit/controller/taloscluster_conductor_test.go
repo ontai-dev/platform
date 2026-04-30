@@ -1,13 +1,12 @@
-// Package controller_test tests the TalosCluster Conductor Deployment functions.
-// Tests cover the conductorAgentDeployment builder and the kubeconfig-absent
-// branch of ensureConductorDeploymentOnTargetCluster.
+// Package controller_test tests the TalosCluster conductor bootstrap window functions.
+// Tests cover the kubeconfig-absent branch of EnsureRemoteConductorBootstrap and
+// the ConductorReady condition lifecycle driven by RemoteConductorBootstrapDoneFn.
 //
 // Testing the full remote-cluster path (building a real client from a kubeconfig
-// and creating a Deployment on a target cluster) requires a live cluster and is
+// and executing bootstrap steps on a target cluster) requires a live cluster and is
 // covered by integration tests, not unit tests.
 //
-// platform-schema.md §12 Conductor Deployment Contract.
-// conductor-schema.md §15 Role Declaration Contract.
+// platform-schema.md §12 Conductor Bootstrap Window Contract. INV-020.
 package controller_test
 
 import (
@@ -27,82 +26,11 @@ import (
 	"github.com/ontai-dev/platform/internal/controller"
 )
 
-// TestConductorAgentDeployment_RoleStamp verifies that BuildConductorAgentDeployment
-// stamps CONDUCTOR_ROLE and CLUSTER_REF as downward API fieldRefs sourced from
-// Deployment annotations, and that the annotations are set correctly.
-// conductor-schema.md §15. platform-schema.md §12.
-func TestConductorAgentDeployment_RoleStamp(t *testing.T) {
-	dep := controller.BuildConductorAgentDeployment("test-cluster", "10.20.0.1:5000/ontai-dev/conductor:v1.9.3-dev")
-
-	if dep.Name != "conductor-agent" {
-		t.Errorf("Deployment name = %q, want %q", dep.Name, "conductor-agent")
-	}
-	if dep.Namespace != "ont-system" {
-		t.Errorf("Deployment namespace = %q, want %q", dep.Namespace, "ont-system")
-	}
-
-	// Pod template annotations must carry cluster-ref and role for downward API injection.
-	// fieldRef metadata.annotations resolves from the pod's own annotations, not the
-	// Deployment's ObjectMeta annotations.
-	podAnnotations := dep.Spec.Template.ObjectMeta.Annotations
-	if podAnnotations["platform.ontai.dev/cluster-ref"] != "test-cluster" {
-		t.Errorf("pod annotation cluster-ref = %q, want %q",
-			podAnnotations["platform.ontai.dev/cluster-ref"], "test-cluster")
-	}
-	if podAnnotations["platform.ontai.dev/role"] != "tenant" {
-		t.Errorf("pod annotation role = %q, want %q",
-			podAnnotations["platform.ontai.dev/role"], "tenant")
-	}
-
-	containers := dep.Spec.Template.Spec.Containers
-	if len(containers) == 0 {
-		t.Fatal("no containers in Deployment spec")
-	}
-
-	var roleFieldPath, clusterRefFieldPath string
-	for _, env := range containers[0].Env {
-		if env.ValueFrom == nil || env.ValueFrom.FieldRef == nil {
-			continue
-		}
-		switch env.Name {
-		case "CONDUCTOR_ROLE":
-			roleFieldPath = env.ValueFrom.FieldRef.FieldPath
-		case "CLUSTER_REF":
-			clusterRefFieldPath = env.ValueFrom.FieldRef.FieldPath
-		}
-	}
-
-	wantRoleField := "metadata.annotations['platform.ontai.dev/role']"
-	if roleFieldPath != wantRoleField {
-		t.Errorf("CONDUCTOR_ROLE fieldPath = %q, want %q", roleFieldPath, wantRoleField)
-	}
-
-	wantClusterRefField := "metadata.annotations['platform.ontai.dev/cluster-ref']"
-	if clusterRefFieldPath != wantClusterRefField {
-		t.Errorf("CLUSTER_REF fieldPath = %q, want %q", clusterRefFieldPath, wantClusterRefField)
-	}
-}
-
-// TestConductorAgentDeployment_ClusterLabel verifies the cluster label is set.
-func TestConductorAgentDeployment_ClusterLabel(t *testing.T) {
-	dep := controller.BuildConductorAgentDeployment("my-cluster", "10.20.0.1:5000/ontai-dev/conductor:v1.9.3-dev")
-
-	if dep.Labels["runner.ontai.dev/cluster"] != "my-cluster" {
-		t.Errorf("cluster label = %q, want %q",
-			dep.Labels["runner.ontai.dev/cluster"], "my-cluster")
-	}
-	podLabels := dep.Spec.Template.ObjectMeta.Labels
-	if podLabels["runner.ontai.dev/cluster"] != "my-cluster" {
-		t.Errorf("pod cluster label = %q, want %q",
-			podLabels["runner.ontai.dev/cluster"], "my-cluster")
-	}
-}
-
-// TestEnsureConductorDeployment_KubeconfigAbsentIsGraceful verifies that when
-// the CAPI kubeconfig Secret does not yet exist, ensureConductorDeployment
-// returns nil (not fatal) so the reconciler can requeue. This is the window
+// TestEnsureRemoteConductorBootstrap_KubeconfigAbsentIsGraceful verifies that when
+// the kubeconfig Secret does not yet exist, EnsureRemoteConductorBootstrap returns
+// (false, nil) so the reconciler can requeue without error. This is the window
 // between CAPI cluster Running and CAPI writing the kubeconfig Secret.
-func TestEnsureConductorDeployment_KubeconfigAbsentIsGraceful(t *testing.T) {
+func TestEnsureRemoteConductorBootstrap_KubeconfigAbsentIsGraceful(t *testing.T) {
 	scheme := buildDay2Scheme(t)
 	tc := &platformv1alpha1.TalosCluster{
 		ObjectMeta: metav1.ObjectMeta{Name: "test-cluster", Namespace: "seam-system", Generation: 1},
@@ -118,12 +46,12 @@ func TestEnsureConductorDeployment_KubeconfigAbsentIsGraceful(t *testing.T) {
 		Recorder: clientevents.NewFakeRecorder(32),
 	}
 
-	available, err := r.EnsureConductorDeploymentOnTargetCluster(context.Background(), tc)
+	done, err := r.EnsureRemoteConductorBootstrap(context.Background(), tc)
 	if err != nil {
 		t.Errorf("expected nil error when kubeconfig absent, got: %v", err)
 	}
-	if available {
-		t.Error("expected available=false when kubeconfig absent")
+	if done {
+		t.Error("expected done=false when kubeconfig absent")
 	}
 }
 
@@ -328,7 +256,7 @@ func buildFakeCAPIClusterRunning(name, tenantNamespace string) *unstructured.Uns
 }
 
 // TestConductorReady_Available_TransitionsClusterToReady verifies that when the
-// RemoteConductorAvailableFn returns (true, nil), the reconciler sets
+// RemoteConductorBootstrapDoneFn returns (true, nil), the reconciler sets
 // ConductorReady=True and transitions the TalosCluster to Ready=True.
 // This is the complete happy path for Gap 27.
 func TestConductorReady_Available_TransitionsClusterToReady(t *testing.T) {
@@ -358,7 +286,7 @@ func TestConductorReady_Available_TransitionsClusterToReady(t *testing.T) {
 		Scheme:   scheme,
 		Recorder: clientevents.NewFakeRecorder(32),
 		// Inject availability=true to simulate a healthy Conductor Deployment.
-		RemoteConductorAvailableFn: func(_ context.Context, _ string) (bool, error) {
+		RemoteConductorBootstrapDoneFn: func(_ context.Context, _ string) (bool, error) {
 			return true, nil
 		},
 	}
@@ -387,9 +315,9 @@ func TestConductorReady_Available_TransitionsClusterToReady(t *testing.T) {
 	if crCond.Status != metav1.ConditionTrue {
 		t.Errorf("ConductorReady = %s, want True", crCond.Status)
 	}
-	if crCond.Reason != platformv1alpha1.ReasonConductorDeploymentAvailable {
+	if crCond.Reason != platformv1alpha1.ReasonConductorBootstrapComplete {
 		t.Errorf("ConductorReady reason = %s, want %s",
-			crCond.Reason, platformv1alpha1.ReasonConductorDeploymentAvailable)
+			crCond.Reason, platformv1alpha1.ReasonConductorBootstrapComplete)
 	}
 
 	// TalosCluster must be Ready=True.
@@ -403,7 +331,7 @@ func TestConductorReady_Available_TransitionsClusterToReady(t *testing.T) {
 }
 
 // TestConductorReady_Unavailable_Requeues verifies that when the
-// RemoteConductorAvailableFn returns (false, nil), the reconciler sets
+// RemoteConductorBootstrapDoneFn returns (false, nil), the reconciler sets
 // ConductorReady=False and requeues without marking the cluster Ready.
 func TestConductorReady_Unavailable_Requeues(t *testing.T) {
 	scheme := buildDay2Scheme(t)
@@ -430,7 +358,7 @@ func TestConductorReady_Unavailable_Requeues(t *testing.T) {
 		Scheme:   scheme,
 		Recorder: clientevents.NewFakeRecorder(32),
 		// Inject availability=false to simulate a not-yet-ready Conductor Deployment.
-		RemoteConductorAvailableFn: func(_ context.Context, _ string) (bool, error) {
+		RemoteConductorBootstrapDoneFn: func(_ context.Context, _ string) (bool, error) {
 			return false, nil
 		},
 	}
@@ -459,9 +387,9 @@ func TestConductorReady_Unavailable_Requeues(t *testing.T) {
 	if crCond.Status != metav1.ConditionFalse {
 		t.Errorf("ConductorReady = %s, want False", crCond.Status)
 	}
-	if crCond.Reason != platformv1alpha1.ReasonConductorDeploymentUnavailable {
+	if crCond.Reason != platformv1alpha1.ReasonConductorBootstrapPending {
 		t.Errorf("ConductorReady reason = %s, want %s",
-			crCond.Reason, platformv1alpha1.ReasonConductorDeploymentUnavailable)
+			crCond.Reason, platformv1alpha1.ReasonConductorBootstrapPending)
 	}
 
 	// Ready must NOT be True.
@@ -501,7 +429,7 @@ func TestConductorReady_ConditionTransition(t *testing.T) {
 		Client:   c,
 		Scheme:   scheme,
 		Recorder: clientevents.NewFakeRecorder(32),
-		RemoteConductorAvailableFn: func(_ context.Context, _ string) (bool, error) {
+		RemoteConductorBootstrapDoneFn: func(_ context.Context, _ string) (bool, error) {
 			return available, nil
 		},
 	}
@@ -564,7 +492,7 @@ func buildTenantImportTalosCluster(name, namespace string) *platformv1alpha1.Tal
 
 // TestTenantImport_ConductorPending_RequeuesWhenNotAvailable verifies that a role=tenant
 // import reconcile sets ConductorReady=False and requeues (RequeueAfter>0) when
-// RemoteConductorAvailableFn reports the Conductor Deployment is not yet Available.
+// RemoteConductorBootstrapDoneFn reports the Conductor Deployment is not yet Available.
 // Platform must not set Ready=True until ConductorReady=True. guardian-schema.md §20.
 func TestTenantImport_ConductorPending_RequeuesWhenNotAvailable(t *testing.T) {
 	scheme := buildDay2Scheme(t)
@@ -581,7 +509,7 @@ func TestTenantImport_ConductorPending_RequeuesWhenNotAvailable(t *testing.T) {
 		Scheme:                scheme,
 		Recorder:              clientevents.NewFakeRecorder(32),
 		KubeconfigGeneratorFn: fakeKubeconfigGenerator,
-		RemoteConductorAvailableFn: func(_ context.Context, _ string) (bool, error) {
+		RemoteConductorBootstrapDoneFn: func(_ context.Context, _ string) (bool, error) {
 			return false, nil // Deployment created but not yet Available.
 		},
 	}
@@ -618,7 +546,7 @@ func TestTenantImport_ConductorPending_RequeuesWhenNotAvailable(t *testing.T) {
 }
 
 // TestTenantImport_ConductorReady_TransitionsToReady verifies that once
-// RemoteConductorAvailableFn returns true, the reconciler sets ConductorReady=True
+// RemoteConductorBootstrapDoneFn returns true, the reconciler sets ConductorReady=True
 // and Ready=True on the TalosCluster. This is the final state for a tenant import.
 // guardian-schema.md §20.
 func TestTenantImport_ConductorReady_TransitionsToReady(t *testing.T) {
@@ -636,7 +564,7 @@ func TestTenantImport_ConductorReady_TransitionsToReady(t *testing.T) {
 		Scheme:                scheme,
 		Recorder:              clientevents.NewFakeRecorder(32),
 		KubeconfigGeneratorFn: fakeKubeconfigGenerator,
-		RemoteConductorAvailableFn: func(_ context.Context, _ string) (bool, error) {
+		RemoteConductorBootstrapDoneFn: func(_ context.Context, _ string) (bool, error) {
 			return true, nil // Conductor Deployment is Available.
 		},
 	}
@@ -688,7 +616,7 @@ func TestTenantImport_ManagementImportStillImmediatelyReady(t *testing.T) {
 		Scheme:                scheme,
 		Recorder:              clientevents.NewFakeRecorder(32),
 		KubeconfigGeneratorFn: fakeKubeconfigGenerator,
-		// No RemoteConductorAvailableFn -- must not be called for management import.
+		// No RemoteConductorBootstrapDoneFn -- must not be called for management import.
 	}
 
 	result, err := r.Reconcile(context.Background(), ctrl.Request{
