@@ -1276,6 +1276,15 @@ func (r *TalosClusterReconciler) ensureTenantOnboarding(ctx context.Context, tc 
 		return fmt.Errorf("ensureTenantOnboarding: tenant executor resources: %w", err)
 	}
 
+	// Step 5 — wrapper-runner SA/Role/RoleBinding/ClusterRoleBinding for pack-deploy Jobs.
+	// The wrapper submits pack-deploy Kueue Jobs in seam-tenant-{clusterName}. The
+	// wrapper-runner SA is the Job identity. ClusterRole wrapper-runner-cluster-scoped
+	// is created by the management cluster enable bundle and is shared; Platform creates
+	// the per-tenant ClusterRoleBinding only.
+	if err := r.ensureWrapperRunnerResources(ctx, tc); err != nil {
+		return fmt.Errorf("ensureTenantOnboarding: wrapper runner resources: %w", err)
+	}
+
 	return nil
 }
 
@@ -1440,5 +1449,117 @@ func (r *TalosClusterReconciler) ensureTenantExecutorResources(ctx context.Conte
 	if err := ensureTCOR(ctx, r.Client, tc.Name, talosVersion); err != nil {
 		return fmt.Errorf("ensureTenantExecutorResources: %w", err)
 	}
+	return nil
+}
+
+// ensureWrapperRunnerResources creates the wrapper-runner SA, Role, RoleBinding,
+// and ClusterRoleBinding in seam-tenant-{clusterName} so that pack-deploy Kueue
+// Jobs submitted by Wrapper can run in that namespace. The shared ClusterRole
+// wrapper-runner-cluster-scoped is created by the management cluster enable bundle;
+// Platform only creates the per-tenant ClusterRoleBinding.
+// wrapper-schema.md §4 §9, INV-004.
+func (r *TalosClusterReconciler) ensureWrapperRunnerResources(ctx context.Context, tc *platformv1alpha1.TalosCluster) error {
+	tenantNS := "seam-tenant-" + tc.Name
+	clusterLabel := map[string]string{"platform.ontai.dev/cluster": tc.Name}
+
+	// ServiceAccount.
+	sa := &corev1.ServiceAccount{}
+	if err := r.Client.Get(ctx, types.NamespacedName{Name: "wrapper-runner", Namespace: tenantNS}, sa); err != nil {
+		if !apierrors.IsNotFound(err) {
+			return fmt.Errorf("ensureWrapperRunnerResources: get SA: %w", err)
+		}
+		sa = &corev1.ServiceAccount{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      "wrapper-runner",
+				Namespace: tenantNS,
+				Labels:    clusterLabel,
+				Annotations: map[string]string{
+					"ontai.dev/rbac-owner": "guardian",
+				},
+			},
+		}
+		if err := r.Client.Create(ctx, sa); err != nil && !apierrors.IsAlreadyExists(err) {
+			return fmt.Errorf("ensureWrapperRunnerResources: create SA: %w", err)
+		}
+	}
+
+	// Role.
+	role := &rbacv1.Role{}
+	if err := r.Client.Get(ctx, types.NamespacedName{Name: "wrapper-runner", Namespace: tenantNS}, role); err != nil {
+		if !apierrors.IsNotFound(err) {
+			return fmt.Errorf("ensureWrapperRunnerResources: get Role: %w", err)
+		}
+		role = &rbacv1.Role{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      "wrapper-runner",
+				Namespace: tenantNS,
+				Labels:    clusterLabel,
+				Annotations: map[string]string{
+					"ontai.dev/rbac-owner": "guardian",
+				},
+			},
+			Rules: []rbacv1.PolicyRule{
+				{APIGroups: []string{""}, Resources: []string{"configmaps", "secrets", "serviceaccounts", "services", "persistentvolumeclaims", "endpoints", "pods"}, Verbs: []string{"get", "list", "watch", "create", "update", "patch", "delete"}},
+				{APIGroups: []string{"apps"}, Resources: []string{"deployments", "daemonsets", "statefulsets", "replicasets"}, Verbs: []string{"get", "list", "watch", "create", "update", "patch", "delete"}},
+				{APIGroups: []string{"networking.k8s.io"}, Resources: []string{"ingresses", "ingressclasses"}, Verbs: []string{"get", "list", "watch", "create", "update", "patch", "delete"}},
+				{APIGroups: []string{"batch"}, Resources: []string{"jobs", "cronjobs"}, Verbs: []string{"get", "list", "watch", "create", "update", "patch", "delete"}},
+				{APIGroups: []string{"autoscaling"}, Resources: []string{"horizontalpodautoscalers"}, Verbs: []string{"get", "list", "watch", "create", "update", "patch", "delete"}},
+				{APIGroups: []string{"infrastructure.ontai.dev"}, Resources: []string{"infrastructurepackexecutions", "infrastructureclusterpacks", "infrastructurepackinstances"}, Verbs: []string{"get", "list", "watch"}},
+				{APIGroups: []string{"infrastructure.ontai.dev"}, Resources: []string{"infrastructurerunnerconfigs"}, Verbs: []string{"get", "list", "watch", "patch", "update"}},
+				{APIGroups: []string{"security.ontai.dev"}, Resources: []string{"rbacprofiles"}, Verbs: []string{"get", "list", "watch"}},
+				{APIGroups: []string{"infrastructure.ontai.dev"}, Resources: []string{"packoperationresults"}, Verbs: []string{"get", "list", "watch", "create", "update", "patch", "delete"}},
+			},
+		}
+		if err := r.Client.Create(ctx, role); err != nil && !apierrors.IsAlreadyExists(err) {
+			return fmt.Errorf("ensureWrapperRunnerResources: create Role: %w", err)
+		}
+	}
+
+	// RoleBinding.
+	rb := &rbacv1.RoleBinding{}
+	if err := r.Client.Get(ctx, types.NamespacedName{Name: "wrapper-runner", Namespace: tenantNS}, rb); err != nil {
+		if !apierrors.IsNotFound(err) {
+			return fmt.Errorf("ensureWrapperRunnerResources: get RoleBinding: %w", err)
+		}
+		rb = &rbacv1.RoleBinding{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      "wrapper-runner",
+				Namespace: tenantNS,
+				Labels:    clusterLabel,
+				Annotations: map[string]string{
+					"ontai.dev/rbac-owner": "guardian",
+				},
+			},
+			RoleRef:  rbacv1.RoleRef{APIGroup: "rbac.authorization.k8s.io", Kind: "Role", Name: "wrapper-runner"},
+			Subjects: []rbacv1.Subject{{Kind: "ServiceAccount", Name: "wrapper-runner", Namespace: tenantNS}},
+		}
+		if err := r.Client.Create(ctx, rb); err != nil && !apierrors.IsAlreadyExists(err) {
+			return fmt.Errorf("ensureWrapperRunnerResources: create RoleBinding: %w", err)
+		}
+	}
+
+	// ClusterRoleBinding — binds the shared ClusterRole to this tenant's SA.
+	crbName := "wrapper-runner-cluster-scoped-" + tc.Name
+	crb := &rbacv1.ClusterRoleBinding{}
+	if err := r.Client.Get(ctx, types.NamespacedName{Name: crbName}, crb); err != nil {
+		if !apierrors.IsNotFound(err) {
+			return fmt.Errorf("ensureWrapperRunnerResources: get ClusterRoleBinding: %w", err)
+		}
+		crb = &rbacv1.ClusterRoleBinding{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:   crbName,
+				Labels: clusterLabel,
+				Annotations: map[string]string{
+					"ontai.dev/rbac-owner": "guardian",
+				},
+			},
+			RoleRef:  rbacv1.RoleRef{APIGroup: "rbac.authorization.k8s.io", Kind: "ClusterRole", Name: "wrapper-runner-cluster-scoped"},
+			Subjects: []rbacv1.Subject{{Kind: "ServiceAccount", Name: "wrapper-runner", Namespace: tenantNS}},
+		}
+		if err := r.Client.Create(ctx, crb); err != nil && !apierrors.IsAlreadyExists(err) {
+			return fmt.Errorf("ensureWrapperRunnerResources: create ClusterRoleBinding: %w", err)
+		}
+	}
+
 	return nil
 }
