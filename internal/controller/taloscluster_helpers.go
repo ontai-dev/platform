@@ -870,7 +870,7 @@ func EnsureRemoteConductorRBAC(ctx context.Context, k8s kubernetes.Interface) er
 			{
 				APIGroups: []string{"infrastructure.ontai.dev"},
 				Resources: []string{"*"},
-				Verbs:     []string{"get", "list", "watch", "update", "patch"},
+				Verbs:     []string{"get", "list", "watch", "create", "update", "patch"},
 			},
 			{
 				APIGroups: []string{"infrastructure.ontai.dev"},
@@ -884,7 +884,7 @@ func EnsureRemoteConductorRBAC(ctx context.Context, k8s kubernetes.Interface) er
 			},
 			{
 				APIGroups: []string{""},
-				Resources: []string{"secrets", "namespaces", "nodes", "pods"},
+				Resources: []string{"*"},
 				Verbs:     []string{"get", "list", "watch"},
 			},
 			{
@@ -894,7 +894,17 @@ func EnsureRemoteConductorRBAC(ctx context.Context, k8s kubernetes.Interface) er
 			},
 			{
 				APIGroups: []string{"apps"},
-				Resources: []string{"deployments", "replicasets", "daemonsets", "statefulsets"},
+				Resources: []string{"*"},
+				Verbs:     []string{"get", "list", "watch"},
+			},
+			{
+				APIGroups: []string{"networking.k8s.io"},
+				Resources: []string{"*"},
+				Verbs:     []string{"get", "list", "watch"},
+			},
+			{
+				APIGroups: []string{"batch"},
+				Resources: []string{"*"},
 				Verbs:     []string{"get", "list", "watch"},
 			},
 			{
