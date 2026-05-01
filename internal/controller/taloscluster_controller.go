@@ -128,14 +128,25 @@ func (r *TalosClusterReconciler) Reconcile(ctx context.Context, req ctrl.Request
 		}
 	}()
 
-	// Step C — Advance ObservedGeneration.
-	tc.Status.ObservedGeneration = tc.Generation
+	// Step C0 — Ensure metadata-only finalizers before any status is written to tc.
+	// Finalizer adds call r.Client.Update(ctx, tc). The controller-runtime fake client
+	// with WithStatusSubresource strips tc.Status in-place on Update, so all finalizer
+	// Updates must precede any tc.Status assignments.
 
-	// Step C1 — Ensure RunnerConfig cleanup finalizer is present when the compiler
-	// annotation ontai.dev/owns-runnerconfig=true is set. Idempotent. Bug 3.
+	// RunnerConfig cleanup finalizer (annotation-gated). Bug 3.
 	if err := r.ensureRunnerConfigCleanupFinalizer(ctx, tc); err != nil {
 		return ctrl.Result{}, fmt.Errorf("reconcile: ensure runnerconfig-cleanup finalizer: %w", err)
 	}
+	// Wrapper-runner CRB cleanup finalizer (role=tenant only). Cluster-scoped CRB
+	// cannot be removed by namespace deletion. PLATFORM-BL-WRAPPER-RUNNER-RBAC-LIFECYCLE.
+	if err := r.ensureWrapperRunnerCRBCleanupFinalizer(ctx, tc); err != nil {
+		return ctrl.Result{}, fmt.Errorf("reconcile: ensure wrapper-runner-crb finalizer: %w", err)
+	}
+
+	// Step C — Advance ObservedGeneration.
+	tc.Status.ObservedGeneration = tc.Generation
+
+	// Step C1 is now handled in Step C0 above.
 
 	// Step C2 — Initialize LineageSynced on first observation (one-time write).
 	// InfrastructureLineageController takes ownership when deployed.

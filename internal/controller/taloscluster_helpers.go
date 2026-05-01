@@ -100,6 +100,12 @@ const finalizerRunnerConfigCleanup = "platform.ontai.dev/runnerconfig-cleanup"
 // Kubernetes GC controller; a finalizer is required. PLATFORM-BL-TENANT-GC.
 const finalizerTenantNamespaceCleanup = "platform.ontai.dev/tenant-namespace-cleanup"
 
+// finalizerWrapperRunnerCRBCleanup is placed on role=tenant TalosCluster objects
+// that had wrapper-runner resources provisioned. The ClusterRoleBinding is
+// cluster-scoped and cannot be removed by namespace deletion.
+// PLATFORM-BL-WRAPPER-RUNNER-RBAC-LIFECYCLE.
+const finalizerWrapperRunnerCRBCleanup = "platform.ontai.dev/wrapper-runner-crb-cleanup"
+
 // bootstrapRunnerConfigName returns the name of the RunnerConfig for a management
 // cluster bootstrap. The name is the cluster name exactly — Conductor resolves the
 // RunnerConfig by the value of its --cluster flag, which equals TalosCluster.Name.
@@ -1061,15 +1067,39 @@ func (r *TalosClusterReconciler) ensureTenantNamespaceCleanupFinalizer(
 	return nil
 }
 
+// ensureWrapperRunnerCRBCleanupFinalizer adds finalizerWrapperRunnerCRBCleanup to
+// role=tenant TalosCluster objects so the cluster-scoped ClusterRoleBinding is
+// deleted on TalosCluster deletion. The binding is created by ensureWrapperRunnerResources
+// and cannot be removed via namespace deletion. PLATFORM-BL-WRAPPER-RUNNER-RBAC-LIFECYCLE.
+func (r *TalosClusterReconciler) ensureWrapperRunnerCRBCleanupFinalizer(
+	ctx context.Context,
+	tc *platformv1alpha1.TalosCluster,
+) error {
+	if tc.Spec.Role != platformv1alpha1.TalosClusterRoleTenant {
+		return nil
+	}
+	if controllerutil.ContainsFinalizer(tc, finalizerWrapperRunnerCRBCleanup) {
+		return nil
+	}
+	controllerutil.AddFinalizer(tc, finalizerWrapperRunnerCRBCleanup)
+	if err := r.Client.Update(ctx, tc); err != nil {
+		return fmt.Errorf("ensureWrapperRunnerCRBCleanupFinalizer: add finalizer: %w", err)
+	}
+	return nil
+}
+
 // handleTalosClusterDeletion is called when tc.DeletionTimestamp is set. Handles
-// two finalizers:
+// three finalizers:
 //  1. finalizerRunnerConfigCleanup (annotation-gated): deletes the RunnerConfig in
 //     ont-system and cluster Secrets from seam-system. Bug 3.
 //  2. finalizerTenantNamespaceCleanup (CAPI-enabled only): deletes the
 //     seam-tenant-{name} namespace. PLATFORM-BL-TENANT-GC.
+//  3. finalizerWrapperRunnerCRBCleanup (role=tenant only): deletes the
+//     cluster-scoped wrapper-runner-cluster-scoped-{name} ClusterRoleBinding.
+//     PLATFORM-BL-WRAPPER-RUNNER-RBAC-LIFECYCLE.
 //
-// Both steps are idempotent on NotFound. Finalizers are removed once their cleanup
-// is complete and both must be absent before the TalosCluster is released.
+// All steps are idempotent on NotFound. Finalizers are removed once their cleanup
+// is complete and all must be absent before the TalosCluster is released.
 func (r *TalosClusterReconciler) handleTalosClusterDeletion(
 	ctx context.Context,
 	tc *platformv1alpha1.TalosCluster,
@@ -1135,6 +1165,28 @@ func (r *TalosClusterReconciler) handleTalosClusterDeletion(
 		controllerutil.RemoveFinalizer(tc, finalizerTenantNamespaceCleanup)
 		if err := r.Client.Update(ctx, tc); err != nil {
 			return ctrl.Result{}, fmt.Errorf("handleTalosClusterDeletion: remove tenant-namespace finalizer: %w", err)
+		}
+	}
+
+	// Step 3 — Wrapper-runner ClusterRoleBinding cleanup (role=tenant only).
+	// The ClusterRoleBinding is cluster-scoped and not deleted by namespace deletion.
+	// PLATFORM-BL-WRAPPER-RUNNER-RBAC-LIFECYCLE.
+	if controllerutil.ContainsFinalizer(tc, finalizerWrapperRunnerCRBCleanup) {
+		crbName := "wrapper-runner-cluster-scoped-" + tc.Name
+		crb := &rbacv1.ClusterRoleBinding{}
+		err := r.Client.Get(ctx, types.NamespacedName{Name: crbName}, crb)
+		if err != nil && !apierrors.IsNotFound(err) {
+			return ctrl.Result{}, fmt.Errorf("handleTalosClusterDeletion: get ClusterRoleBinding %s: %w", crbName, err)
+		}
+		if err == nil {
+			if delErr := r.Client.Delete(ctx, crb); delErr != nil && !apierrors.IsNotFound(delErr) {
+				return ctrl.Result{}, fmt.Errorf("handleTalosClusterDeletion: delete ClusterRoleBinding %s: %w", crbName, delErr)
+			}
+		}
+
+		controllerutil.RemoveFinalizer(tc, finalizerWrapperRunnerCRBCleanup)
+		if err := r.Client.Update(ctx, tc); err != nil {
+			return ctrl.Result{}, fmt.Errorf("handleTalosClusterDeletion: remove wrapper-runner-crb finalizer: %w", err)
 		}
 	}
 
