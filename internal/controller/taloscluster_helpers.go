@@ -870,7 +870,7 @@ func EnsureRemoteConductorRBAC(ctx context.Context, k8s kubernetes.Interface) er
 			{
 				APIGroups: []string{"infrastructure.ontai.dev"},
 				Resources: []string{"*"},
-				Verbs:     []string{"get", "list", "watch", "create", "update", "patch"},
+				Verbs:     []string{"get", "list", "watch", "create", "update", "patch", "delete"},
 			},
 			{
 				APIGroups: []string{"infrastructure.ontai.dev"},
@@ -883,29 +883,27 @@ func EnsureRemoteConductorRBAC(ctx context.Context, k8s kubernetes.Interface) er
 				Verbs:     []string{"get", "list", "watch"},
 			},
 			{
+				// Full write access to core resources: conductor orphan teardown deletes
+				// deployed workload resources (ServiceAccounts, ConfigMaps, Services, etc.)
+				// when their governing ClusterPack is removed. Decision H.
 				APIGroups: []string{""},
 				Resources: []string{"*"},
-				Verbs:     []string{"get", "list", "watch"},
-			},
-			{
-				APIGroups: []string{""},
-				Resources: []string{"events"},
-				Verbs:     []string{"create", "patch"},
+				Verbs:     []string{"get", "list", "watch", "create", "update", "patch", "delete"},
 			},
 			{
 				APIGroups: []string{"apps"},
 				Resources: []string{"*"},
-				Verbs:     []string{"get", "list", "watch"},
+				Verbs:     []string{"get", "list", "watch", "create", "update", "patch", "delete"},
 			},
 			{
 				APIGroups: []string{"networking.k8s.io"},
 				Resources: []string{"*"},
-				Verbs:     []string{"get", "list", "watch"},
+				Verbs:     []string{"get", "list", "watch", "create", "update", "patch", "delete"},
 			},
 			{
 				APIGroups: []string{"batch"},
 				Resources: []string{"*"},
-				Verbs:     []string{"get", "list", "watch"},
+				Verbs:     []string{"get", "list", "watch", "create", "update", "patch", "delete"},
 			},
 			{
 				APIGroups: []string{"events.k8s.io"},
@@ -919,8 +917,8 @@ func EnsureRemoteConductorRBAC(ctx context.Context, k8s kubernetes.Interface) er
 			},
 			{
 				APIGroups: []string{"rbac.authorization.k8s.io"},
-				Resources: []string{"roles", "rolebindings", "clusterroles", "clusterrolebindings"},
-				Verbs:     []string{"get", "list", "watch", "update", "patch"},
+				Resources: []string{"*"},
+				Verbs:     []string{"get", "list", "watch", "create", "update", "patch", "delete"},
 			},
 		},
 	}
