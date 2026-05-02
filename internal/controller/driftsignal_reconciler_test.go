@@ -59,8 +59,47 @@ func fakeTalosClusterForDrift(name string) *platformv1alpha1.TalosCluster {
 			ResourceVersion: "1",
 		},
 		Spec: platformv1alpha1.TalosClusterSpec{
-			Role: platformv1alpha1.TalosClusterRoleTenant,
-			Mode: platformv1alpha1.TalosClusterModeImport,
+			Role:         platformv1alpha1.TalosClusterRoleTenant,
+			Mode:         platformv1alpha1.TalosClusterModeImport,
+			TalosVersion: "v1.7.0",
+		},
+	}
+}
+
+// fakeTCOR builds a minimal InfrastructureTalosClusterOperationResult for DriftSignal tests.
+func fakeTCOR(clusterName, talosVersion string) *seamcorev1alpha1.InfrastructureTalosClusterOperationResult {
+	return &seamcorev1alpha1.InfrastructureTalosClusterOperationResult{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:            clusterName,
+			Namespace:       tenantNS(clusterName),
+			ResourceVersion: "1",
+		},
+		Spec: seamcorev1alpha1.InfrastructureTalosClusterOperationResultSpec{
+			ClusterRef:   clusterName,
+			TalosVersion: talosVersion,
+			Revision:     1,
+		},
+	}
+}
+
+// fakeDriftSignalWithVersion builds a DriftSignal for InfrastructureTalosCluster version drift.
+func fakeDriftSignalWithVersion(name, ns, specVersion, observedVersion string) *seamcorev1alpha1.DriftSignal {
+	return &seamcorev1alpha1.DriftSignal{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:            name,
+			Namespace:       ns,
+			ResourceVersion: "1",
+		},
+		Spec: seamcorev1alpha1.DriftSignalSpec{
+			State:         seamcorev1alpha1.DriftSignalStatePending,
+			CorrelationID: "test-version-correlation-id",
+			ObservedAt:    metav1.Now(),
+			AffectedCRRef: seamcorev1alpha1.DriftAffectedCRRef{
+				Group: "infrastructure.ontai.dev",
+				Kind:  "InfrastructureTalosCluster",
+				Name:  "ccs-dev",
+			},
+			DriftReason: "talos version drift: spec=" + specVersion + " observed=" + observedVersion,
 		},
 	}
 }
@@ -199,5 +238,127 @@ func TestDriftSignalReconciler_NotFound_NoOp(t *testing.T) {
 	}
 	if result.Requeue || result.RequeueAfter != 0 {
 		t.Errorf("unexpected requeue: %+v", result)
+	}
+}
+
+// TestDriftSignalReconciler_TalosVersionDrift_PatchesObservedVersionAndBumpsTCOR verifies
+// that a pending InfrastructureTalosCluster DriftSignal causes:
+//   - TalosCluster.status.observedTalosVersion to be patched to the observed version
+//   - An out-of-band record written to the TCOR
+//   - The TCOR revision bumped to the observed version
+//   - The DriftSignal advanced to queued
+func TestDriftSignalReconciler_TalosVersionDrift_PatchesObservedVersionAndBumpsTCOR(t *testing.T) {
+	scheme := buildDriftSignalTestScheme(t)
+	if err := seamcorev1alpha1.AddToScheme(scheme); err != nil {
+		t.Fatalf("add seamcore scheme: %v", err)
+	}
+
+	clusterName := "ccs-dev"
+	tenantNSName := tenantNS(clusterName)
+	specVersion := "v1.7.0"
+	observedVersion := "v1.7.4"
+	signalName := "drift-version-" + clusterName
+
+	ds := fakeDriftSignalWithVersion(signalName, tenantNSName, specVersion, observedVersion)
+	tc := fakeTalosClusterForDrift(clusterName)
+	tcor := fakeTCOR(clusterName, specVersion)
+
+	c := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithObjects(ds, tc, tcor).
+		WithStatusSubresource(&seamcorev1alpha1.DriftSignal{}, &platformv1alpha1.TalosCluster{}).
+		Build()
+
+	r := &DriftSignalReconciler{Client: c}
+
+	_, err := r.Reconcile(context.Background(), ctrl.Request{
+		NamespacedName: types.NamespacedName{Name: signalName, Namespace: tenantNSName},
+	})
+	if err != nil {
+		t.Fatalf("Reconcile: %v", err)
+	}
+
+	// observedTalosVersion must be updated on TalosCluster status.
+	gotTC := &platformv1alpha1.TalosCluster{}
+	if err := c.Get(context.Background(), types.NamespacedName{Name: clusterName, Namespace: rbacProfileNamespace}, gotTC); err != nil {
+		t.Fatalf("get TalosCluster: %v", err)
+	}
+	if gotTC.Status.ObservedTalosVersion != observedVersion {
+		t.Errorf("TalosCluster.Status.ObservedTalosVersion = %q, want %q",
+			gotTC.Status.ObservedTalosVersion, observedVersion)
+	}
+
+	// TCOR must have been bumped to the observed version.
+	gotTCOR := &seamcorev1alpha1.InfrastructureTalosClusterOperationResult{}
+	if err := c.Get(context.Background(), types.NamespacedName{Name: clusterName, Namespace: tenantNSName}, gotTCOR); err != nil {
+		t.Fatalf("get TCOR: %v", err)
+	}
+	if gotTCOR.Spec.TalosVersion != observedVersion {
+		t.Errorf("TCOR.Spec.TalosVersion = %q, want %q (should be bumped to observed version)",
+			gotTCOR.Spec.TalosVersion, observedVersion)
+	}
+	if gotTCOR.Spec.Revision != 2 {
+		t.Errorf("TCOR.Spec.Revision = %d, want 2 (bump increments revision)", gotTCOR.Spec.Revision)
+	}
+
+	// DriftSignal must be advanced to queued.
+	gotDS := &seamcorev1alpha1.DriftSignal{}
+	if err := c.Get(context.Background(), types.NamespacedName{Name: signalName, Namespace: tenantNSName}, gotDS); err != nil {
+		t.Fatalf("get DriftSignal: %v", err)
+	}
+	if gotDS.Spec.State != seamcorev1alpha1.DriftSignalStateQueued {
+		t.Errorf("DriftSignal.Spec.State = %q, want queued", gotDS.Spec.State)
+	}
+}
+
+// TestDriftSignalReconciler_TalosVersionDrift_NoParsableVersion_AdvancesToQueued verifies
+// that a version drift signal without a parseable observed version is still advanced to queued
+// (does not retry indefinitely).
+func TestDriftSignalReconciler_TalosVersionDrift_NoParsableVersion_AdvancesToQueued(t *testing.T) {
+	scheme := buildDriftSignalTestScheme(t)
+	clusterName := "ccs-dev"
+	tenantNSName := tenantNS(clusterName)
+	signalName := "drift-version-" + clusterName
+
+	ds := &seamcorev1alpha1.DriftSignal{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: signalName, Namespace: tenantNSName, ResourceVersion: "1",
+		},
+		Spec: seamcorev1alpha1.DriftSignalSpec{
+			State:         seamcorev1alpha1.DriftSignalStatePending,
+			CorrelationID: "test-no-version",
+			ObservedAt:    metav1.Now(),
+			AffectedCRRef: seamcorev1alpha1.DriftAffectedCRRef{
+				Group: "infrastructure.ontai.dev",
+				Kind:  "InfrastructureTalosCluster",
+				Name:  clusterName,
+			},
+			DriftReason: "talos version drift: no version info",
+		},
+	}
+	tc := fakeTalosClusterForDrift(clusterName)
+
+	c := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithObjects(ds, tc).
+		WithStatusSubresource(&seamcorev1alpha1.DriftSignal{}).
+		Build()
+
+	r := &DriftSignalReconciler{Client: c}
+
+	_, err := r.Reconcile(context.Background(), ctrl.Request{
+		NamespacedName: types.NamespacedName{Name: signalName, Namespace: tenantNSName},
+	})
+	if err != nil {
+		t.Fatalf("Reconcile: %v", err)
+	}
+
+	// Signal must still be advanced to queued to avoid retry storms.
+	gotDS := &seamcorev1alpha1.DriftSignal{}
+	if err := c.Get(context.Background(), types.NamespacedName{Name: signalName, Namespace: tenantNSName}, gotDS); err != nil {
+		t.Fatalf("get DriftSignal: %v", err)
+	}
+	if gotDS.Spec.State != seamcorev1alpha1.DriftSignalStateQueued {
+		t.Errorf("DriftSignal.Spec.State = %q, want queued", gotDS.Spec.State)
 	}
 }
