@@ -23,18 +23,18 @@ import (
 
 var _ = Describe("port 50000 backoff behaviour", func() {
 	It("SeamInfrastructureMachine ApplyAttempts increments on each port 50000 delivery failure", func() {
-		Skip("lab cluster not yet provisioned")
+		Skip("requires bootstrapped cluster with a node reachable but not listening on port 50000 — PLATFORM-BL-PORT50000-E2E")
 	})
 
 	It("control plane node with ApplyAttempts >= 3 sets ControlPlaneUnreachable=True", func() {
-		Skip("lab cluster not yet provisioned")
+		Skip("requires bootstrapped cluster with a node reachable but not listening on port 50000 — PLATFORM-BL-PORT50000-E2E")
 	})
 
 	It("worker node with ApplyAttempts >= 3 sets PartialWorkerAvailability=True and continues", func() {
-		Skip("lab cluster not yet provisioned")
+		Skip("requires bootstrapped cluster with a node reachable but not listening on port 50000 — PLATFORM-BL-PORT50000-E2E")
 	})
 
 	It("backoff duration grows exponentially from 10s base up to 5min cap", func() {
-		Skip("lab cluster not yet provisioned")
+		Skip("requires bootstrapped cluster with a node reachable but not listening on port 50000 — PLATFORM-BL-PORT50000-E2E")
 	})
 })

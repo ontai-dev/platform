@@ -192,11 +192,10 @@ func (r *TalosClusterReconciler) ensureKubeconfigSecret(ctx context.Context, tc 
 // Operators look for this name when routing target cluster API access. WS5.
 const tenantKubeconfigSecretName = "target-cluster-kubeconfig"
 
-// ensureTenantKubeconfigCopy copies the kubeconfig Secret from seam-tenant-{clusterName} into the
-// seam-tenant-{clusterName} namespace as "target-cluster-kubeconfig". This makes the
-// kubeconfig available alongside other tenant-scoped resources for operators that look
-// in seam-tenant-* namespaces. Only called for role=tenant clusters on the direct path.
-// Idempotent — returns nil if the copy already exists. WS5.
+// ensureTenantKubeconfigCopy copies the generated kubeconfig Secret into
+// seam-tenant-{clusterName} as "target-cluster-kubeconfig". Called for all import
+// clusters regardless of role. conductor-execute Jobs for both management-cluster and
+// tenant-cluster PackExecutions mount this Secret by name. Idempotent. WS5.
 func (r *TalosClusterReconciler) ensureTenantKubeconfigCopy(ctx context.Context, tc *platformv1alpha1.TalosCluster) error {
 	tenantNS := "seam-tenant-" + tc.Name
 

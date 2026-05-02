@@ -8,7 +8,6 @@ import (
 	"os"
 	"time"
 
-	appsv1 "k8s.io/api/apps/v1"
 	batchv1 "k8s.io/api/batch/v1"
 	corev1 "k8s.io/api/core/v1"
 	rbacv1 "k8s.io/api/rbac/v1"
@@ -17,6 +16,7 @@ import (
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/client-go/dynamic"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/tools/clientcmd"
 	ctrl "sigs.k8s.io/controller-runtime"
@@ -44,10 +44,6 @@ const (
 
 	// clusterNamespaceLabel is the namespace label applied to identify the cluster.
 	clusterNamespaceLabel = "ontai.dev/cluster"
-
-	// conductorImageName is the base image name for the Conductor agent binary
-	// (distroless, deployed to clusters via ont-system). conductor-schema.md §3.
-	conductorImageName = "conductor"
 
 	// conductorExecuteImageName is the base image name for the Conductor executor
 	// binary (debian-slim, used for executor Jobs). conductor-schema.md §3, Decision 12.
@@ -103,6 +99,12 @@ const finalizerRunnerConfigCleanup = "platform.ontai.dev/runnerconfig-cleanup"
 // garbage-collected. Cross-namespace ownerReferences are not supported by the
 // Kubernetes GC controller; a finalizer is required. PLATFORM-BL-TENANT-GC.
 const finalizerTenantNamespaceCleanup = "platform.ontai.dev/tenant-namespace-cleanup"
+
+// finalizerWrapperRunnerCRBCleanup is placed on role=tenant TalosCluster objects
+// that had wrapper-runner resources provisioned. The ClusterRoleBinding is
+// cluster-scoped and cannot be removed by namespace deletion.
+// PLATFORM-BL-WRAPPER-RUNNER-RBAC-LIFECYCLE.
+const finalizerWrapperRunnerCRBCleanup = "platform.ontai.dev/wrapper-runner-crb-cleanup"
 
 // bootstrapRunnerConfigName returns the name of the RunnerConfig for a management
 // cluster bootstrap. The name is the cluster name exactly — Conductor resolves the
@@ -714,46 +716,33 @@ func (r *TalosClusterReconciler) isCiliumPackInstanceReady(ctx context.Context, 
 	return false, nil
 }
 
-// conductorDeploymentName is the canonical name for the Conductor agent Deployment
-// on any cluster. Matches the name stamped by compiler enable on the management cluster.
-const conductorDeploymentName = "conductor-agent"
-
 // conductorAgentNamespace is the namespace where Conductor runs on every cluster.
 // Locked namespace model: CONTEXT.md §4.
 const conductorAgentNamespace = "ont-system"
 
-// conductorRoleEnvVar is the env var carrying the role stamp. conductor-schema.md §15.
-// The role field is a first-class spec field — it is in the container spec, not
-// in metadata. It is never modified after Deployment creation.
-const conductorRoleEnvVar = "CONDUCTOR_ROLE"
-
-// EnsureConductorDeploymentOnTargetCluster creates the Conductor agent Deployment
-// in ont-system on the target cluster if it does not already exist, then checks
-// whether the Deployment has reached Available=True.
+// EnsureRemoteConductorBootstrap sets up the bootstrap window infrastructure for
+// conductor on the tenant cluster: ont-system namespace, conductor ServiceAccount,
+// ClusterRole + ClusterRoleBinding (INV-020), and the InfrastructureTalosCluster
+// CR copy in ont-system (Decision H). Platform never deploys the conductor
+// Deployment — that is admin-controlled via the enable bundle.
 //
-// Returns (true, nil) when the Deployment is Available.
-// Returns (false, nil) when the kubeconfig is not yet available, or when the
-// Deployment was just created and is not yet Available — the caller should requeue.
+// Returns (true, nil) when all bootstrap items are established.
+// Returns (false, nil) when the kubeconfig is not yet available — caller requeues.
 // Returns (false, err) only for unexpected API errors.
 //
-// Platform is the sole authority for deploying Conductor to tenant clusters.
-// The Deployment is stamped with CONDUCTOR_ROLE=tenant. platform-schema.md §12.
-// conductor-schema.md §15 Role Declaration Contract. Gap 27.
+// Applies to role=tenant only. Management clusters are excluded by the caller.
+// platform-schema.md §12 steps 3-6. INV-020. Decision H.
 //
-// If RemoteConductorAvailableFn is set on the reconciler (unit test override), it
-// is called instead of the real remote cluster interaction.
-//
-// Kubeconfig resolution: CAPI generates a Secret named {cluster-name}-kubeconfig
-// in seam-tenant-{cluster-name} after the cluster reaches Running state. Platform
-// reads this Secret to connect to the target cluster.
-func (r *TalosClusterReconciler) EnsureConductorDeploymentOnTargetCluster(
+// If RemoteConductorBootstrapDoneFn is set on the reconciler (unit test override),
+// it is called instead of the real remote cluster interaction.
+func (r *TalosClusterReconciler) EnsureRemoteConductorBootstrap(
 	ctx context.Context,
 	tc *platformv1alpha1.TalosCluster,
 ) (bool, error) {
-	// Unit test override — injected via RemoteConductorAvailableFn to avoid
+	// Unit test override — injected via RemoteConductorBootstrapDoneFn to avoid
 	// requiring a live target cluster kubeconfig in tests.
-	if r.RemoteConductorAvailableFn != nil {
-		return r.RemoteConductorAvailableFn(ctx, tc.Name)
+	if r.RemoteConductorBootstrapDoneFn != nil {
+		return r.RemoteConductorBootstrapDoneFn(ctx, tc.Name)
 	}
 
 	tenantNS := "seam-tenant-" + tc.Name
@@ -799,11 +788,21 @@ func (r *TalosClusterReconciler) EnsureConductorDeploymentOnTargetCluster(
 	if err != nil {
 		return false, fmt.Errorf("ensureConductorDeployment: build remote client for %s: %w", tc.Name, err)
 	}
+	dynClient, err := dynamic.NewForConfig(restConfig)
+	if err != nil {
+		return false, fmt.Errorf("ensureConductorDeployment: build dynamic client for %s: %w", tc.Name, err)
+	}
 
-	// For import clusters, ensure ont-system namespace and conductor ServiceAccount exist
-	// before attempting Deployment creation. CAPI clusters have ont-system pre-existing.
-	// platform-schema.md §12 steps 3-4.
-	if tc.Spec.Mode == platformv1alpha1.TalosClusterModeImport {
+	// Bootstrap the conductor's runtime environment on the tenant cluster: namespace,
+	// ServiceAccount, bootstrap-window RBAC, and InfrastructureTalosCluster CR copy.
+	// Applies to role=tenant only. Both mode=import and mode=bootstrap clusters are
+	// tenant clusters; mode=bootstrap with role=management identifies the management
+	// cluster itself, which must not receive remote conductor bootstrap (its conductor
+	// is installed via the enable bundle and its ont-system is not a target namespace).
+	// The reconciler dispatch already exits management clusters before reaching this
+	// function; this guard is an explicit second layer of defense.
+	// platform-schema.md §12 steps 3-6. INV-020. Decision H.
+	if tc.Spec.Role == platformv1alpha1.TalosClusterRoleTenant {
 		if err := ensureRemoteNamespace(ctx, remoteK8s, conductorAgentNamespace); err != nil {
 			return false, fmt.Errorf("ensureConductorDeployment: ensure namespace %s on %s: %w",
 				conductorAgentNamespace, tc.Name, err)
@@ -812,47 +811,29 @@ func (r *TalosClusterReconciler) EnsureConductorDeploymentOnTargetCluster(
 			return false, fmt.Errorf("ensureConductorDeployment: ensure conductor SA on %s: %w",
 				tc.Name, err)
 		}
+		if err := EnsureRemoteConductorRBAC(ctx, remoteK8s); err != nil {
+			return false, fmt.Errorf("ensureConductorDeployment: ensure conductor RBAC on %s: %w",
+				tc.Name, err)
+		}
+		if err := EnsureRemoteTalosClusterCopy(ctx, dynClient, tc); err != nil {
+			return false, fmt.Errorf("ensureConductorDeployment: ensure TalosCluster copy on %s: %w",
+				tc.Name, err)
+		}
 	}
 
-	// Check whether the Conductor Deployment already exists.
-	dep, err := remoteK8s.AppsV1().Deployments(conductorAgentNamespace).Get(
-		ctx, conductorDeploymentName, metav1.GetOptions{})
-	if err != nil {
-		if !apierrors.IsNotFound(err) {
-			return false, fmt.Errorf("ensureConductorDeployment: check deployment %s/%s on %s: %w",
-				conductorAgentNamespace, conductorDeploymentName, tc.Name, err)
-		}
-		// Deployment does not exist — create it.
-		// Derive agent image: conductor (distroless) with tag from tc.Spec.TalosVersion.
-		// Dev: conductor:dev. Production: conductor:{talosVersion}. conductor-schema.md §3.
-		agentRegistry := os.Getenv(conductorRegistryEnv)
-		if agentRegistry == "" {
-			agentRegistry = conductorRegistryDefault
-		}
-		agentImage := fmt.Sprintf("%s/%s:%s", agentRegistry, conductorImageName, executorImageTag(tc.Spec.TalosVersion))
-		newDep := BuildConductorAgentDeployment(tc.Name, agentImage)
-		if _, createErr := remoteK8s.AppsV1().Deployments(conductorAgentNamespace).Create(
-			ctx, newDep, metav1.CreateOptions{}); createErr != nil && !apierrors.IsAlreadyExists(createErr) {
-			return false, fmt.Errorf("ensureConductorDeployment: create deployment on %s: %w", tc.Name, createErr)
-		}
-		// Just created — not yet Available.
-		return false, nil
-	}
-
-	// Deployment exists — check the Available condition.
-	// Available=True means all desired replicas are up and healthy.
-	for _, cond := range dep.Status.Conditions {
-		if cond.Type == appsv1.DeploymentAvailable && cond.Status == corev1.ConditionTrue {
-			return true, nil
-		}
-	}
-	// Deployment exists but not yet Available.
-	return false, nil
+	// All bootstrap window items complete.
+	return true, nil
 }
 
+// conductorTenantClusterRoleName is the ClusterRole and ClusterRoleBinding name for the
+// conductor agent on all tenant clusters (mode=import and mode=bootstrap). Applied during
+// the bootstrap window before guardian becomes operational on the tenant cluster.
+// INV-020. platform-schema.md §12.
+const conductorTenantClusterRoleName = "conductor-agent-tenant"
+
 // ensureRemoteNamespace creates the given namespace on the remote cluster if it does not
-// already exist. Idempotent. Used to create ont-system on import-mode tenant clusters
-// before Conductor Deployment creation. platform-schema.md §12 step 3.
+// already exist. Idempotent. Used to create ont-system on tenant clusters as part of
+// the conductor bootstrap window. platform-schema.md §12 step 3.
 func ensureRemoteNamespace(ctx context.Context, k8s kubernetes.Interface, name string) error {
 	ns := &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: name}}
 	if _, err := k8s.CoreV1().Namespaces().Create(ctx, ns, metav1.CreateOptions{}); err != nil && !apierrors.IsAlreadyExists(err) {
@@ -877,73 +858,168 @@ func ensureRemoteConductorServiceAccount(ctx context.Context, k8s kubernetes.Int
 	return nil
 }
 
-// BuildConductorAgentDeployment builds the Conductor agent Deployment spec for a
-// tenant cluster. CLUSTER_REF and CONDUCTOR_ROLE are injected via downward API
-// fieldRef from pod template annotations so the pod reads its own identity without
-// hard-coding values. Annotations must be on the pod template, not the Deployment
-// metadata: fieldRef metadata.annotations resolves from the pod's own annotations.
-// runnerImage is the fully qualified image ref derived from RunnerConfig.Spec.RunnerImage.
-// conductor-schema.md §15. platform-schema.md §12.
-func BuildConductorAgentDeployment(clusterName, runnerImage string) *appsv1.Deployment {
-	replicas := int32(1)
-	return &appsv1.Deployment{
+// EnsureRemoteConductorRBAC creates the ClusterRole and ClusterRoleBinding for the
+// conductor agent on the remote tenant cluster. Conductor role=tenant needs cluster-scoped
+// read access to all Seam governance CRs to drive drift detection, and write access to
+// create events. Applied during the bootstrap window before guardian becomes operational
+// on the tenant cluster (INV-020). Idempotent. platform-schema.md §12 step 5.
+func EnsureRemoteConductorRBAC(ctx context.Context, k8s kubernetes.Interface) error {
+	cr := &rbacv1.ClusterRole{
 		ObjectMeta: metav1.ObjectMeta{
-			Name:      conductorDeploymentName,
-			Namespace: conductorAgentNamespace,
+			Name: conductorTenantClusterRoleName,
 			Labels: map[string]string{
-				"runner.ontai.dev/component": "conductor",
-				"runner.ontai.dev/cluster":   clusterName,
+				"runner.ontai.dev/component":  "conductor",
+				"runner.ontai.dev/managed-by": "platform",
 			},
 		},
-		Spec: appsv1.DeploymentSpec{
-			Replicas: &replicas,
-			Selector: &metav1.LabelSelector{
-				MatchLabels: map[string]string{
-					"runner.ontai.dev/component": "conductor",
-				},
+		Rules: []rbacv1.PolicyRule{
+			{
+				APIGroups: []string{"infrastructure.ontai.dev"},
+				Resources: []string{"*"},
+				Verbs:     []string{"get", "list", "watch", "create", "update", "patch", "delete"},
 			},
-			Template: corev1.PodTemplateSpec{
-				ObjectMeta: metav1.ObjectMeta{
-					Labels: map[string]string{
-						"runner.ontai.dev/component": "conductor",
-						"runner.ontai.dev/cluster":   clusterName,
-					},
-					Annotations: map[string]string{
-						"platform.ontai.dev/cluster-ref": clusterName,
-						"platform.ontai.dev/role":        "tenant",
-					},
-				},
-				Spec: corev1.PodSpec{
-					ServiceAccountName: "conductor",
-					Containers: []corev1.Container{
-						{
-							Name:  "conductor",
-							Image: runnerImage,
-							Args:  []string{"agent"},
-							Env: []corev1.EnvVar{
-								{
-									Name: conductorRoleEnvVar,
-									ValueFrom: &corev1.EnvVarSource{
-										FieldRef: &corev1.ObjectFieldSelector{
-											FieldPath: "metadata.annotations['platform.ontai.dev/role']",
-										},
-									},
-								},
-								{
-									Name: "CLUSTER_REF",
-									ValueFrom: &corev1.EnvVarSource{
-										FieldRef: &corev1.ObjectFieldSelector{
-											FieldPath: "metadata.annotations['platform.ontai.dev/cluster-ref']",
-										},
-									},
-								},
-							},
-						},
-					},
-				},
+			{
+				APIGroups: []string{"infrastructure.ontai.dev"},
+				Resources: []string{"infrastructuretalosclusters/status"},
+				Verbs:     []string{"update", "patch"},
+			},
+			{
+				// RBACProfilePullLoop and RBACPolicyPullLoop SSA-patch security.ontai.dev
+				// resources into ont-system. Needs create/update/patch in addition to read.
+				APIGroups: []string{"security.ontai.dev"},
+				Resources: []string{"*"},
+				Verbs:     []string{"get", "list", "watch", "create", "update", "patch"},
+			},
+			{
+				// Full write access to core resources: conductor orphan teardown deletes
+				// deployed workload resources (ServiceAccounts, ConfigMaps, Services, etc.)
+				// when their governing ClusterPack is removed. Decision H.
+				APIGroups: []string{""},
+				Resources: []string{"*"},
+				Verbs:     []string{"get", "list", "watch", "create", "update", "patch", "delete"},
+			},
+			{
+				APIGroups: []string{"apps"},
+				Resources: []string{"*"},
+				Verbs:     []string{"get", "list", "watch", "create", "update", "patch", "delete"},
+			},
+			{
+				APIGroups: []string{"networking.k8s.io"},
+				Resources: []string{"*"},
+				Verbs:     []string{"get", "list", "watch", "create", "update", "patch", "delete"},
+			},
+			{
+				APIGroups: []string{"batch"},
+				Resources: []string{"*"},
+				Verbs:     []string{"get", "list", "watch", "create", "update", "patch", "delete"},
+			},
+			{
+				APIGroups: []string{"events.k8s.io"},
+				Resources: []string{"events"},
+				Verbs:     []string{"create", "patch"},
+			},
+			{
+				APIGroups: []string{"coordination.k8s.io"},
+				Resources: []string{"leases"},
+				Verbs:     []string{"get", "list", "watch", "create", "update", "patch", "delete"},
+			},
+			{
+				APIGroups: []string{"rbac.authorization.k8s.io"},
+				Resources: []string{"*"},
+				Verbs:     []string{"get", "list", "watch", "create", "update", "patch", "delete"},
 			},
 		},
 	}
+	if _, err := k8s.RbacV1().ClusterRoles().Create(ctx, cr, metav1.CreateOptions{}); err != nil && !apierrors.IsAlreadyExists(err) {
+		return fmt.Errorf("create ClusterRole %s: %w", conductorTenantClusterRoleName, err)
+	}
+
+	crb := &rbacv1.ClusterRoleBinding{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: conductorTenantClusterRoleName,
+			Labels: map[string]string{
+				"runner.ontai.dev/component":  "conductor",
+				"runner.ontai.dev/managed-by": "platform",
+			},
+		},
+		RoleRef: rbacv1.RoleRef{
+			APIGroup: "rbac.authorization.k8s.io",
+			Kind:     "ClusterRole",
+			Name:     conductorTenantClusterRoleName,
+		},
+		Subjects: []rbacv1.Subject{
+			{
+				Kind:      "ServiceAccount",
+				Name:      "conductor",
+				Namespace: conductorAgentNamespace,
+			},
+		},
+	}
+	if _, err := k8s.RbacV1().ClusterRoleBindings().Create(ctx, crb, metav1.CreateOptions{}); err != nil && !apierrors.IsAlreadyExists(err) {
+		return fmt.Errorf("create ClusterRoleBinding %s: %w", conductorTenantClusterRoleName, err)
+	}
+	return nil
+}
+
+// EnsureRemoteTalosClusterCopy creates an InfrastructureTalosCluster CR in ont-system
+// on the tenant cluster that mirrors the spec declared on the management cluster.
+// Conductor role=tenant watches this CR to detect drift between declared state and
+// actual cluster state. Decision H: conductor is the reconciliation authority for its
+// cluster's governance state. Idempotent. platform-schema.md §12 step 6.
+//
+// If the InfrastructureTalosCluster CRD is not yet installed on the tenant cluster
+// (seam-core enable bundle not yet applied), the function returns nil and defers.
+// SC-INV-003: seam-core CRDs are installed before all operators.
+func EnsureRemoteTalosClusterCopy(ctx context.Context, dynClient dynamic.Interface, tc *platformv1alpha1.TalosCluster) error {
+	gvr := schema.GroupVersionResource{
+		Group:    "infrastructure.ontai.dev",
+		Version:  "v1alpha1",
+		Resource: "infrastructuretalosclusters",
+	}
+
+	// Idempotency: skip if the CR already exists.
+	_, err := dynClient.Resource(gvr).Namespace(conductorAgentNamespace).Get(ctx, tc.Name, metav1.GetOptions{})
+	if err == nil {
+		return nil
+	}
+	if !apierrors.IsNotFound(err) {
+		return fmt.Errorf("ensureRemoteTalosClusterCopy: check existing CR on %s: %w", tc.Name, err)
+	}
+
+	obj := &unstructured.Unstructured{
+		Object: map[string]interface{}{
+			"apiVersion": "infrastructure.ontai.dev/v1alpha1",
+			"kind":       "InfrastructureTalosCluster",
+			"metadata": map[string]interface{}{
+				"name":      tc.Name,
+				"namespace": conductorAgentNamespace,
+				"labels": map[string]interface{}{
+					"ontai.dev/managed-by":    "platform",
+					"ontai.dev/cluster-source": "management",
+				},
+			},
+			"spec": map[string]interface{}{
+				"mode":              string(tc.Spec.Mode),
+				"role":              string(tc.Spec.Role),
+				"talosVersion":      tc.Spec.TalosVersion,
+				"kubernetesVersion": tc.Spec.KubernetesVersion,
+				"clusterEndpoint":   tc.Spec.ClusterEndpoint,
+			},
+		},
+	}
+
+	if _, err := dynClient.Resource(gvr).Namespace(conductorAgentNamespace).Create(ctx, obj, metav1.CreateOptions{}); err != nil {
+		if apierrors.IsAlreadyExists(err) {
+			return nil
+		}
+		// CRD not yet installed on the tenant cluster -- seam-core enable bundle has not
+		// been applied yet. Return nil and defer; next reconcile will retry. SC-INV-003.
+		if apierrors.IsNotFound(err) {
+			return nil
+		}
+		return fmt.Errorf("ensureRemoteTalosClusterCopy: create InfrastructureTalosCluster on %s: %w", tc.Name, err)
+	}
+	return nil
 }
 
 // boolPtr returns a pointer to a bool value.
@@ -993,15 +1069,39 @@ func (r *TalosClusterReconciler) ensureTenantNamespaceCleanupFinalizer(
 	return nil
 }
 
+// ensureWrapperRunnerCRBCleanupFinalizer adds finalizerWrapperRunnerCRBCleanup to
+// role=tenant TalosCluster objects so the cluster-scoped ClusterRoleBinding is
+// deleted on TalosCluster deletion. The binding is created by ensureWrapperRunnerResources
+// and cannot be removed via namespace deletion. PLATFORM-BL-WRAPPER-RUNNER-RBAC-LIFECYCLE.
+func (r *TalosClusterReconciler) ensureWrapperRunnerCRBCleanupFinalizer(
+	ctx context.Context,
+	tc *platformv1alpha1.TalosCluster,
+) error {
+	if tc.Spec.Role != platformv1alpha1.TalosClusterRoleTenant {
+		return nil
+	}
+	if controllerutil.ContainsFinalizer(tc, finalizerWrapperRunnerCRBCleanup) {
+		return nil
+	}
+	controllerutil.AddFinalizer(tc, finalizerWrapperRunnerCRBCleanup)
+	if err := r.Client.Update(ctx, tc); err != nil {
+		return fmt.Errorf("ensureWrapperRunnerCRBCleanupFinalizer: add finalizer: %w", err)
+	}
+	return nil
+}
+
 // handleTalosClusterDeletion is called when tc.DeletionTimestamp is set. Handles
-// two finalizers:
+// three finalizers:
 //  1. finalizerRunnerConfigCleanup (annotation-gated): deletes the RunnerConfig in
 //     ont-system and cluster Secrets from seam-system. Bug 3.
 //  2. finalizerTenantNamespaceCleanup (CAPI-enabled only): deletes the
 //     seam-tenant-{name} namespace. PLATFORM-BL-TENANT-GC.
+//  3. finalizerWrapperRunnerCRBCleanup (role=tenant only): deletes the
+//     cluster-scoped wrapper-runner-cluster-scoped-{name} ClusterRoleBinding.
+//     PLATFORM-BL-WRAPPER-RUNNER-RBAC-LIFECYCLE.
 //
-// Both steps are idempotent on NotFound. Finalizers are removed once their cleanup
-// is complete and both must be absent before the TalosCluster is released.
+// All steps are idempotent on NotFound. Finalizers are removed once their cleanup
+// is complete and all must be absent before the TalosCluster is released.
 func (r *TalosClusterReconciler) handleTalosClusterDeletion(
 	ctx context.Context,
 	tc *platformv1alpha1.TalosCluster,
@@ -1067,6 +1167,28 @@ func (r *TalosClusterReconciler) handleTalosClusterDeletion(
 		controllerutil.RemoveFinalizer(tc, finalizerTenantNamespaceCleanup)
 		if err := r.Client.Update(ctx, tc); err != nil {
 			return ctrl.Result{}, fmt.Errorf("handleTalosClusterDeletion: remove tenant-namespace finalizer: %w", err)
+		}
+	}
+
+	// Step 3 — Wrapper-runner ClusterRoleBinding cleanup (role=tenant only).
+	// The ClusterRoleBinding is cluster-scoped and not deleted by namespace deletion.
+	// PLATFORM-BL-WRAPPER-RUNNER-RBAC-LIFECYCLE.
+	if controllerutil.ContainsFinalizer(tc, finalizerWrapperRunnerCRBCleanup) {
+		crbName := "wrapper-runner-cluster-scoped-" + tc.Name
+		crb := &rbacv1.ClusterRoleBinding{}
+		err := r.Client.Get(ctx, types.NamespacedName{Name: crbName}, crb)
+		if err != nil && !apierrors.IsNotFound(err) {
+			return ctrl.Result{}, fmt.Errorf("handleTalosClusterDeletion: get ClusterRoleBinding %s: %w", crbName, err)
+		}
+		if err == nil {
+			if delErr := r.Client.Delete(ctx, crb); delErr != nil && !apierrors.IsNotFound(delErr) {
+				return ctrl.Result{}, fmt.Errorf("handleTalosClusterDeletion: delete ClusterRoleBinding %s: %w", crbName, delErr)
+			}
+		}
+
+		controllerutil.RemoveFinalizer(tc, finalizerWrapperRunnerCRBCleanup)
+		if err := r.Client.Update(ctx, tc); err != nil {
+			return ctrl.Result{}, fmt.Errorf("handleTalosClusterDeletion: remove wrapper-runner-crb finalizer: %w", err)
 		}
 	}
 
@@ -1214,6 +1336,15 @@ func (r *TalosClusterReconciler) ensureTenantOnboarding(ctx context.Context, tc 
 	}
 	if err := r.ensureTenantExecutorResources(ctx, tc); err != nil {
 		return fmt.Errorf("ensureTenantOnboarding: tenant executor resources: %w", err)
+	}
+
+	// Step 5 — wrapper-runner SA/Role/RoleBinding/ClusterRoleBinding for pack-deploy Jobs.
+	// The wrapper submits pack-deploy Kueue Jobs in seam-tenant-{clusterName}. The
+	// wrapper-runner SA is the Job identity. ClusterRole wrapper-runner-cluster-scoped
+	// is created by the management cluster enable bundle and is shared; Platform creates
+	// the per-tenant ClusterRoleBinding only.
+	if err := r.ensureWrapperRunnerResources(ctx, tc); err != nil {
+		return fmt.Errorf("ensureTenantOnboarding: wrapper runner resources: %w", err)
 	}
 
 	return nil
@@ -1380,5 +1511,117 @@ func (r *TalosClusterReconciler) ensureTenantExecutorResources(ctx context.Conte
 	if err := ensureTCOR(ctx, r.Client, tc.Name, talosVersion); err != nil {
 		return fmt.Errorf("ensureTenantExecutorResources: %w", err)
 	}
+	return nil
+}
+
+// ensureWrapperRunnerResources creates the wrapper-runner SA, Role, RoleBinding,
+// and ClusterRoleBinding in seam-tenant-{clusterName} so that pack-deploy Kueue
+// Jobs submitted by Wrapper can run in that namespace. The shared ClusterRole
+// wrapper-runner-cluster-scoped is created by the management cluster enable bundle;
+// Platform only creates the per-tenant ClusterRoleBinding.
+// wrapper-schema.md §4 §9, INV-004.
+func (r *TalosClusterReconciler) ensureWrapperRunnerResources(ctx context.Context, tc *platformv1alpha1.TalosCluster) error {
+	tenantNS := "seam-tenant-" + tc.Name
+	clusterLabel := map[string]string{"platform.ontai.dev/cluster": tc.Name}
+
+	// ServiceAccount.
+	sa := &corev1.ServiceAccount{}
+	if err := r.Client.Get(ctx, types.NamespacedName{Name: "wrapper-runner", Namespace: tenantNS}, sa); err != nil {
+		if !apierrors.IsNotFound(err) {
+			return fmt.Errorf("ensureWrapperRunnerResources: get SA: %w", err)
+		}
+		sa = &corev1.ServiceAccount{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      "wrapper-runner",
+				Namespace: tenantNS,
+				Labels:    clusterLabel,
+				Annotations: map[string]string{
+					"ontai.dev/rbac-owner": "guardian",
+				},
+			},
+		}
+		if err := r.Client.Create(ctx, sa); err != nil && !apierrors.IsAlreadyExists(err) {
+			return fmt.Errorf("ensureWrapperRunnerResources: create SA: %w", err)
+		}
+	}
+
+	// Role.
+	role := &rbacv1.Role{}
+	if err := r.Client.Get(ctx, types.NamespacedName{Name: "wrapper-runner", Namespace: tenantNS}, role); err != nil {
+		if !apierrors.IsNotFound(err) {
+			return fmt.Errorf("ensureWrapperRunnerResources: get Role: %w", err)
+		}
+		role = &rbacv1.Role{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      "wrapper-runner",
+				Namespace: tenantNS,
+				Labels:    clusterLabel,
+				Annotations: map[string]string{
+					"ontai.dev/rbac-owner": "guardian",
+				},
+			},
+			Rules: []rbacv1.PolicyRule{
+				{APIGroups: []string{""}, Resources: []string{"configmaps", "secrets", "serviceaccounts", "services", "persistentvolumeclaims", "endpoints", "pods"}, Verbs: []string{"get", "list", "watch", "create", "update", "patch", "delete"}},
+				{APIGroups: []string{"apps"}, Resources: []string{"deployments", "daemonsets", "statefulsets", "replicasets"}, Verbs: []string{"get", "list", "watch", "create", "update", "patch", "delete"}},
+				{APIGroups: []string{"networking.k8s.io"}, Resources: []string{"ingresses", "ingressclasses"}, Verbs: []string{"get", "list", "watch", "create", "update", "patch", "delete"}},
+				{APIGroups: []string{"batch"}, Resources: []string{"jobs", "cronjobs"}, Verbs: []string{"get", "list", "watch", "create", "update", "patch", "delete"}},
+				{APIGroups: []string{"autoscaling"}, Resources: []string{"horizontalpodautoscalers"}, Verbs: []string{"get", "list", "watch", "create", "update", "patch", "delete"}},
+				{APIGroups: []string{"infrastructure.ontai.dev"}, Resources: []string{"infrastructurepackexecutions", "infrastructureclusterpacks", "infrastructurepackinstances"}, Verbs: []string{"get", "list", "watch"}},
+				{APIGroups: []string{"infrastructure.ontai.dev"}, Resources: []string{"infrastructurerunnerconfigs"}, Verbs: []string{"get", "list", "watch", "patch", "update"}},
+				{APIGroups: []string{"security.ontai.dev"}, Resources: []string{"rbacprofiles"}, Verbs: []string{"get", "list", "watch"}},
+				{APIGroups: []string{"infrastructure.ontai.dev"}, Resources: []string{"packoperationresults"}, Verbs: []string{"get", "list", "watch", "create", "update", "patch", "delete"}},
+			},
+		}
+		if err := r.Client.Create(ctx, role); err != nil && !apierrors.IsAlreadyExists(err) {
+			return fmt.Errorf("ensureWrapperRunnerResources: create Role: %w", err)
+		}
+	}
+
+	// RoleBinding.
+	rb := &rbacv1.RoleBinding{}
+	if err := r.Client.Get(ctx, types.NamespacedName{Name: "wrapper-runner", Namespace: tenantNS}, rb); err != nil {
+		if !apierrors.IsNotFound(err) {
+			return fmt.Errorf("ensureWrapperRunnerResources: get RoleBinding: %w", err)
+		}
+		rb = &rbacv1.RoleBinding{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      "wrapper-runner",
+				Namespace: tenantNS,
+				Labels:    clusterLabel,
+				Annotations: map[string]string{
+					"ontai.dev/rbac-owner": "guardian",
+				},
+			},
+			RoleRef:  rbacv1.RoleRef{APIGroup: "rbac.authorization.k8s.io", Kind: "Role", Name: "wrapper-runner"},
+			Subjects: []rbacv1.Subject{{Kind: "ServiceAccount", Name: "wrapper-runner", Namespace: tenantNS}},
+		}
+		if err := r.Client.Create(ctx, rb); err != nil && !apierrors.IsAlreadyExists(err) {
+			return fmt.Errorf("ensureWrapperRunnerResources: create RoleBinding: %w", err)
+		}
+	}
+
+	// ClusterRoleBinding — binds the shared ClusterRole to this tenant's SA.
+	crbName := "wrapper-runner-cluster-scoped-" + tc.Name
+	crb := &rbacv1.ClusterRoleBinding{}
+	if err := r.Client.Get(ctx, types.NamespacedName{Name: crbName}, crb); err != nil {
+		if !apierrors.IsNotFound(err) {
+			return fmt.Errorf("ensureWrapperRunnerResources: get ClusterRoleBinding: %w", err)
+		}
+		crb = &rbacv1.ClusterRoleBinding{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:   crbName,
+				Labels: clusterLabel,
+				Annotations: map[string]string{
+					"ontai.dev/rbac-owner": "guardian",
+				},
+			},
+			RoleRef:  rbacv1.RoleRef{APIGroup: "rbac.authorization.k8s.io", Kind: "ClusterRole", Name: "wrapper-runner-cluster-scoped"},
+			Subjects: []rbacv1.Subject{{Kind: "ServiceAccount", Name: "wrapper-runner", Namespace: tenantNS}},
+		}
+		if err := r.Client.Create(ctx, crb); err != nil && !apierrors.IsAlreadyExists(err) {
+			return fmt.Errorf("ensureWrapperRunnerResources: create ClusterRoleBinding: %w", err)
+		}
+	}
+
 	return nil
 }

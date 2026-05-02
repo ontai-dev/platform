@@ -223,6 +223,7 @@ func bumpTCORRevision(ctx context.Context, c client.Client, clusterRef, newTalos
 	tcor.Spec.Revision++
 	tcor.Spec.TalosVersion = newTalosVersion
 	tcor.Spec.Operations = nil
+	tcor.Spec.OperationCount = 0
 	return c.Patch(ctx, tcor, patch)
 }
 

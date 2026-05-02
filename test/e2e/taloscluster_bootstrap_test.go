@@ -25,22 +25,22 @@ import (
 
 var _ = Describe("TalosCluster bootstrap direct path", func() {
 	It("TalosCluster CR creation spawns CAPI objects in seam-tenant-ccs-test", func() {
-		Skip("lab cluster not yet provisioned")
+		Skip("requires bootstrapped tenant cluster (mode=bootstrap, not mode=import) and 5 VMs in Talos maintenance mode — PLATFORM-BL-BOOTSTRAP-E2E")
 	})
 
 	It("SeamInfrastructureProvider delivers machineconfig to control plane nodes on port 50000", func() {
-		Skip("lab cluster not yet provisioned")
+		Skip("requires bootstrapped tenant cluster (mode=bootstrap, not mode=import) and 5 VMs in Talos maintenance mode — PLATFORM-BL-BOOTSTRAP-E2E")
 	})
 
 	It("CAPI Cluster ccs-test reaches Running phase", func() {
-		Skip("lab cluster not yet provisioned")
+		Skip("requires bootstrapped tenant cluster (mode=bootstrap, not mode=import) and 5 VMs in Talos maintenance mode — PLATFORM-BL-BOOTSTRAP-E2E")
 	})
 
 	It("Conductor Deployment is created in ont-system on ccs-test cluster", func() {
-		Skip("lab cluster not yet provisioned")
+		Skip("requires bootstrapped tenant cluster (mode=bootstrap, not mode=import) and 5 VMs in Talos maintenance mode — PLATFORM-BL-BOOTSTRAP-E2E")
 	})
 
 	It("TalosCluster ConductorReady condition transitions to True after Conductor is Available", func() {
-		Skip("lab cluster not yet provisioned")
+		Skip("requires bootstrapped tenant cluster (mode=bootstrap, not mode=import) and 5 VMs in Talos maintenance mode — PLATFORM-BL-BOOTSTRAP-E2E")
 	})
 })

@@ -53,11 +53,10 @@ type TalosClusterReconciler struct {
 	// Recorder is the Kubernetes event recorder for emitting Warning and Normal events.
 	Recorder clientevents.EventRecorder
 
-	// RemoteConductorAvailableFn, if non-nil, replaces the real remote Conductor
-	// Deployment availability check in EnsureConductorDeploymentOnTargetCluster.
-	// Used exclusively in unit tests to inject a controlled availability response
-	// without a live target cluster kubeconfig.
-	RemoteConductorAvailableFn func(ctx context.Context, clusterName string) (bool, error)
+	// RemoteConductorBootstrapDoneFn, if non-nil, replaces the real remote bootstrap
+	// window setup in EnsureRemoteConductorBootstrap. Used exclusively in unit tests
+	// to inject a controlled response without a live target cluster kubeconfig.
+	RemoteConductorBootstrapDoneFn func(ctx context.Context, clusterName string) (bool, error)
 
 	// KubeconfigGeneratorFn, if non-nil, replaces the real talos goclient call in
 	// ensureKubeconfigSecret. The function receives the cluster name and endpoint and
@@ -129,14 +128,25 @@ func (r *TalosClusterReconciler) Reconcile(ctx context.Context, req ctrl.Request
 		}
 	}()
 
-	// Step C — Advance ObservedGeneration.
-	tc.Status.ObservedGeneration = tc.Generation
+	// Step C0 — Ensure metadata-only finalizers before any status is written to tc.
+	// Finalizer adds call r.Client.Update(ctx, tc). The controller-runtime fake client
+	// with WithStatusSubresource strips tc.Status in-place on Update, so all finalizer
+	// Updates must precede any tc.Status assignments.
 
-	// Step C1 — Ensure RunnerConfig cleanup finalizer is present when the compiler
-	// annotation ontai.dev/owns-runnerconfig=true is set. Idempotent. Bug 3.
+	// RunnerConfig cleanup finalizer (annotation-gated). Bug 3.
 	if err := r.ensureRunnerConfigCleanupFinalizer(ctx, tc); err != nil {
 		return ctrl.Result{}, fmt.Errorf("reconcile: ensure runnerconfig-cleanup finalizer: %w", err)
 	}
+	// Wrapper-runner CRB cleanup finalizer (role=tenant only). Cluster-scoped CRB
+	// cannot be removed by namespace deletion. PLATFORM-BL-WRAPPER-RUNNER-RBAC-LIFECYCLE.
+	if err := r.ensureWrapperRunnerCRBCleanupFinalizer(ctx, tc); err != nil {
+		return ctrl.Result{}, fmt.Errorf("reconcile: ensure wrapper-runner-crb finalizer: %w", err)
+	}
+
+	// Step C — Advance ObservedGeneration.
+	tc.Status.ObservedGeneration = tc.Generation
+
+	// Step C1 is now handled in Step C0 above.
 
 	// Step C2 — Initialize LineageSynced on first observation (one-time write).
 	// InfrastructureLineageController takes ownership when deployed.
@@ -240,13 +250,24 @@ func (r *TalosClusterReconciler) reconcileDirectBootstrap(ctx context.Context, t
 	// Import mode — the cluster already exists and is being brought under Seam
 	// governance. Never submit a bootstrap Job. RunnerConfig is ensured above so
 	// Conductor can attach to the cluster.
-	// Before transitioning to Ready, generate the kubeconfig Secret from the
-	// talosconfig Secret so downstream consumers have API access. If the talosconfig
-	// Secret is absent, ensureKubeconfigSecret sets KubeconfigUnavailable and requeues.
+	//
+	// Namespace-first ordering: for role=tenant clusters, seam-tenant-{cluster} does
+	// not pre-exist (compiler no longer emits it; CP-INV-004). Create it before
+	// reading the talosconfig Secret so the admin can apply secrets to the namespace
+	// after the TalosCluster CR is admitted. platform-schema.md §9.
+	//
+	// Admin apply order for import clusters: TalosCluster CR first; once the
+	// seam-tenant-{cluster} namespace appears, apply the talosconfig Secret there.
+	// Platform requeues with KubeconfigUnavailable until the talosconfig is present.
 	// platform-schema.md §5 TalosClusterModeImport.
 	if tc.Spec.Mode == platformv1alpha1.TalosClusterModeImport {
 		tc.Status.Origin = platformv1alpha1.TalosClusterOriginImported
 
+		// Read talosconfig Secret from seam-tenant-{cluster} and generate the kubeconfig.
+		// The bootstrap bundle includes a seam-tenant-namespace.yaml so the admin can
+		// apply it (and the Secrets) before the TalosCluster CR in a single apply run.
+		// For mode=import the namespace is always pre-existing when this reconcile fires.
+		// platform-schema.md §9.
 		if result, err := r.ensureKubeconfigSecret(ctx, tc); err != nil {
 			return ctrl.Result{}, fmt.Errorf("reconcileDirectBootstrap: import kubeconfig: %w", err)
 		} else if result.RequeueAfter > 0 {
@@ -254,16 +275,21 @@ func (r *TalosClusterReconciler) reconcileDirectBootstrap(ctx context.Context, t
 			return result, nil
 		}
 
-		// Role=tenant on the direct path: create the seam-tenant namespace and copy
-		// the kubeconfig Secret there so operators can locate it alongside other
-		// tenant-scoped resources. CP-INV-004: Platform is the sole namespace creation
-		// authority. WS5.
+		// Copy the generated kubeconfig to target-cluster-kubeconfig in
+		// seam-tenant-{cluster} for all import clusters regardless of role.
+		// conductor-execute Jobs for both management-cluster and tenant-cluster
+		// PackExecutions mount this Secret — the same name, the same namespace,
+		// no role-specific divergence. platform-schema.md §9.
+		if err := r.ensureTenantKubeconfigCopy(ctx, tc); err != nil {
+			return ctrl.Result{}, fmt.Errorf("reconcileDirectBootstrap: copy kubeconfig to tenant namespace: %w", err)
+		}
+
+		// Role=tenant on the direct path: create the seam-tenant namespace and
+		// register the cluster for RBAC and pack delivery. CP-INV-004: Platform is
+		// the sole namespace creation authority. WS5.
 		if tc.Spec.Role == platformv1alpha1.TalosClusterRoleTenant {
 			if err := r.ensureTenantNamespace(ctx, tc); err != nil {
 				return ctrl.Result{}, fmt.Errorf("reconcileDirectBootstrap: ensure tenant namespace for role=tenant: %w", err)
-			}
-			if err := r.ensureTenantKubeconfigCopy(ctx, tc); err != nil {
-				return ctrl.Result{}, fmt.Errorf("reconcileDirectBootstrap: copy kubeconfig to tenant namespace: %w", err)
 			}
 			// WS1: register the tenant cluster in guardian RBAC policy/profiles and
 			// create the Kueue LocalQueue so pack deployments can be admitted.
@@ -578,40 +604,39 @@ func (r *TalosClusterReconciler) ensureConductorReadyAndTransition(
 ) (ctrl.Result, error) {
 	logger := log.FromContext(ctx)
 
-	available, err := r.EnsureConductorDeploymentOnTargetCluster(ctx, tc)
+	done, err := r.EnsureRemoteConductorBootstrap(ctx, tc)
 	if err != nil {
-		logger.Error(err, "failed to ensure Conductor Deployment on target cluster",
+		logger.Error(err, "failed to complete conductor bootstrap window on target cluster",
 			"cluster", tc.Name)
 		return ctrl.Result{RequeueAfter: capiPollInterval},
 			fmt.Errorf("ensureConductorReadyAndTransition: %w", err)
 	}
 
-	if !available {
-		// Conductor Deployment not yet Available — set ConductorReady=False and requeue.
+	if !done {
+		// Bootstrap window items not yet complete — kubeconfig pending or items in progress.
 		platformv1alpha1.SetCondition(
 			&tc.Status.Conditions,
 			platformv1alpha1.ConditionTypeConductorReady,
 			metav1.ConditionFalse,
-			platformv1alpha1.ReasonConductorDeploymentUnavailable,
-			"Conductor Deployment has been created on the target cluster but has not yet reached Available=True. Requeuing.",
+			platformv1alpha1.ReasonConductorBootstrapPending,
+			"Conductor bootstrap window setup in progress (namespace, RBAC, InfrastructureTalosCluster copy). Requeuing.",
 			tc.Generation,
 		)
-		logger.Info("Conductor Deployment not yet Available — requeueing",
-			"cluster", tc.Name)
+		logger.Info("conductor bootstrap window pending — requeueing", "cluster", tc.Name)
 		return ctrl.Result{RequeueAfter: capiPollInterval}, nil
 	}
 
-	// Conductor is Available — set ConductorReady=True, then transition to cluster Ready.
+	// Bootstrap window complete — set ConductorReady=True, then transition cluster to Ready.
 	platformv1alpha1.SetCondition(
 		&tc.Status.Conditions,
 		platformv1alpha1.ConditionTypeConductorReady,
 		metav1.ConditionTrue,
-		platformv1alpha1.ReasonConductorDeploymentAvailable,
-		"Conductor Deployment is Available on the target cluster.",
+		platformv1alpha1.ReasonConductorBootstrapComplete,
+		"Conductor bootstrap window complete: ont-system namespace, RBAC, and InfrastructureTalosCluster copy established on the target cluster.",
 		tc.Generation,
 	)
 	r.transitionToReady(tc)
-	logger.Info("TalosCluster Ready — CAPI Running, Cilium Ready, Conductor Available",
+	logger.Info("TalosCluster Ready — conductor bootstrap window complete",
 		"name", tc.Name)
 	return ctrl.Result{}, nil
 }
