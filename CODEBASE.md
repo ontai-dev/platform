@@ -67,7 +67,7 @@ Talos goclient is permitted ONLY in `SeamInfrastructureClusterReconciler` and `S
 2. L1263: Append cluster to targetClusters for profiles: `rbac-wrapper`, `rbac-conductor`, `rbac-platform`, `rbac-seam-core`.
 3. L1274: Create LocalQueue `pack-deploy-queue` in tenant namespace for Kueue.
 4. L1279: Call `ensureExecutorTalosconfig()` -- copies talosconfig Secret to `ont-system` and `seam-tenant-{cluster}`.
-5. L1283: Call `ensureTenantExecutorResources()` -- creates executor SA/Role/RoleBinding for day-2 Jobs.
+5. L1283: Call `ensureTenantExecutorResources()` -- creates executor SA/Role/RoleBinding for day-2 Jobs. Role permits listing `hardeningprofiles`, `nodemaintenances`, `pkirotations`, `etcdmaintenances`, `nodeoperations` in the tenant namespace (required by conductor-execute capability handlers).
 6. L1292: Call `ensureWrapperRunnerResources()` L1469 -- creates wrapper-runner SA/Role/RoleBinding/ClusterRoleBinding for pack-deploy Jobs.
 
 `ensureManagementOnboarding()` L1303 -- called for management cluster: appends "management" to rbac-policy allowedClusters, copies talosconfig, creates executor resources.
@@ -170,8 +170,6 @@ Cross-namespace S3 credential projection for executor Jobs. Source secret lives 
 
 **T-24 (design session required)**: `handleTalosClusterDeletion()` L1073 only covers RunnerConfig + Secrets + namespace deletion. Decision H order not implemented: wrapper components (PackInstance, PackExecution) must be deleted first, then guardian components (RBACProfile, PermissionSet, RBACPolicy, PermissionSnapshot), then TalosCluster CR last. Mode=import vs mode=bootstrap distinction (divorce vs decommission) also absent.
 
-**PLATFORM-BL-WRAPPER-RUNNER-RBAC-LIFECYCLE**: `ensureWrapperRunnerResources()` L1469 creates `ClusterRoleBinding wrapper-runner-{cluster}` but `handleTalosClusterDeletion()` L1073 does not delete it. Required: delete `ClusterRoleBinding wrapper-runner-{cluster}` on TalosCluster deletion.
-
 ---
 
 ## 6. Test Contract
@@ -182,4 +180,4 @@ Cross-namespace S3 credential projection for executor Jobs. Source secret lives 
 | `test/unit/controller` (s3) | `NormalizeS3SecretData`: required-key validation, camelCase input, AWS SDK env var input, mixed keys, optional endpoint omission |
 | `test/unit/controller` (pki) | `ParsePEMCertExpiry`: single cert, multiple certs (earliest wins), empty input, non-cert PEM. `ParseKubeconfigCertExpiry`: valid embedded cert data, no cert data. `ParseTalosConfigCertExpiry`: valid crt field, missing crt, no active context. |
 | `test/integration/day2` | EtcdMaintenance reconciler (backup with S3, S3-absent condition, etcd defrag, restore path); verifies SSA status patch, Job creation with capability label, S3 projected secret creation via `ensureS3EnvSecret` |
-| `test/e2e` | Stub files; all skip when `MGMT_KUBECONFIG` absent; skip reasons reference backlog item IDs. PKI rotation automation stubs (pki_rotation_automation_test.go): annotation-triggered rotation, synthetic expiry injection, idempotency guard. HardeningProfile live specs (test/e2e/day2/hardeningprofile_e2e_test.go, 6 specs): `MGMT-HP-PROFILE` (Valid condition on ccs-mgmt), `MGMT-HP-CLUSTER` (full-cluster NodeMaintenance on bootstrap cluster), `MGMT-HP-NODE` (single-node ccs-mgmt-w2), `TENANT-HP-PROFILE` (Valid condition on import cluster), `TENANT-HP-CLUSTER` (full-cluster on ccs-dev import mode), `TENANT-HP-NODE` (single-node via TENANT_WORKER_NODE env, skips if unset). Uses safe idempotent machineconfig patches (net.ipv4 sysctls already set on all Kubernetes nodes). |
+| `test/e2e` | Stub files; all skip when `MGMT_KUBECONFIG` absent; skip reasons reference backlog item IDs. PKI rotation automation stubs (pki_rotation_automation_test.go): annotation-triggered rotation, synthetic expiry injection, idempotency guard -- all unconditionally skip pending DAY2-OPS-TENANT closure. HardeningProfile live specs (hardeningprofile_e2e_test.go, 6 specs): `MGMT-HP-PROFILE`, `MGMT-HP-CLUSTER`, `MGMT-HP-NODE`, `TENANT-HP-PROFILE`, `TENANT-HP-CLUSTER`, `TENANT-HP-NODE`. PKI rotation live specs (pkirotation_e2e_test.go, 2 specs): `TENANT-PKI-ROTATE` (PKIRotation CR reaches Ready=True; kubeconfig Secrets refreshed), `TENANT-PKI-CLUSTER-REACH` (post-rotation ClusterPack probe proves cluster reachable). Both sets require `MGMT_KUBECONFIG`. `TENANT-HP-NODE` also requires `TENANT_WORKER_NODE`. Uses safe idempotent machineconfig patches (net.ipv4 sysctls). |

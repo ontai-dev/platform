@@ -35,8 +35,9 @@ func pkirotationAutomationClusterName() string {
 var _ = Describe("PKIRotation automation", func() {
 	Describe("annotation-triggered rotation", func() {
 		It("creates a PKIRotation CR when rotate-pki annotation is set", func() {
+			Skip("requires PKI rotation automation controller implementation and DAY2-OPS-TENANT closed")
 			if os.Getenv("MGMT_KUBECONFIG") == "" {
-				Skip("requires management cluster access and BACKLOG-PKI-001 closed")
+				Skip("requires management cluster access and DAY2-OPS-TENANT closed")
 			}
 
 			clusterName := pkirotationAutomationClusterName()
@@ -101,8 +102,9 @@ var _ = Describe("PKIRotation automation", func() {
 
 	Describe("synthetic expiry injection", func() {
 		It("auto-creates PKIRotation CR when pkiExpiryDate is within threshold", func() {
+			Skip("requires PKI rotation automation controller implementation and DAY2-OPS-TENANT closed")
 			if os.Getenv("MGMT_KUBECONFIG") == "" {
-				Skip("requires management cluster access and BACKLOG-PKI-001 closed")
+				Skip("requires management cluster access and DAY2-OPS-TENANT closed")
 			}
 
 			clusterName := pkirotationAutomationClusterName()

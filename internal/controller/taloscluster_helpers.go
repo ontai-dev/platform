@@ -1460,7 +1460,7 @@ func (r *TalosClusterReconciler) ensureTenantExecutorResources(ctx context.Conte
 				},
 				{
 					APIGroups: []string{"platform.ontai.dev"},
-					Resources: []string{"etcdmaintenances", "nodemaintenances", "nodeoperations", "pkirotations"},
+					Resources: []string{"etcdmaintenances", "hardeningprofiles", "nodemaintenances", "nodeoperations", "pkirotations"},
 					Verbs:     []string{"get", "list", "watch"},
 				},
 				{
