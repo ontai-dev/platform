@@ -8,7 +8,7 @@
 // the S3 resolution hierarchy applies equally for management and tenant clusters.
 //
 // platform-schema.md §5. CP-INV-003, CP-INV-010. conductor-schema.md §17.
-package day2_test
+package day2_integration_test
 
 import (
 	"context"

@@ -7,7 +7,7 @@
 // human approval gate, and operator restart recovery (idempotency).
 //
 // platform-schema.md §5 day-2 CRDs. CP-INV-003, CP-INV-010. INV-006, INV-018.
-package day2_test
+package day2_integration_test
 
 import (
 	"context"

@@ -9,7 +9,7 @@
 // branches rather than the direct RunnerConfig path.
 //
 // platform-schema.md §5 dual-path CRDs. platform-design.md §2.1.
-package day2_test
+package day2_integration_test
 
 import (
 	"context"
