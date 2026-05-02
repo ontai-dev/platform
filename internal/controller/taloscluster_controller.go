@@ -137,6 +137,11 @@ func (r *TalosClusterReconciler) Reconcile(ctx context.Context, req ctrl.Request
 	if err := r.ensureRunnerConfigCleanupFinalizer(ctx, tc); err != nil {
 		return ctrl.Result{}, fmt.Errorf("reconcile: ensure runnerconfig-cleanup finalizer: %w", err)
 	}
+	// Tenant namespace cleanup finalizer (CAPI clusters only). Cross-namespace
+	// ownerReferences are not supported by Kubernetes GC. PLATFORM-BL-TENANT-GC.
+	if err := r.ensureTenantNamespaceCleanupFinalizer(ctx, tc); err != nil {
+		return ctrl.Result{}, fmt.Errorf("reconcile: ensure tenant-namespace-cleanup finalizer: %w", err)
+	}
 	// Wrapper-runner CRB cleanup finalizer (role=tenant only). Cluster-scoped CRB
 	// cannot be removed by namespace deletion. PLATFORM-BL-WRAPPER-RUNNER-RBAC-LIFECYCLE.
 	if err := r.ensureWrapperRunnerCRBCleanupFinalizer(ctx, tc); err != nil {
@@ -461,14 +466,6 @@ func (r *TalosClusterReconciler) reconcileCAPIPath(ctx context.Context, tc *plat
 	logger := log.FromContext(ctx)
 	logger.Info("reconciling TalosCluster via CAPI path",
 		"name", tc.Name, "namespace", tc.Namespace)
-
-	// Step 0 — Ensure the tenant namespace cleanup finalizer is present.
-	// Cross-namespace ownerReferences are not supported by Kubernetes GC, so a
-	// finalizer is used to delete seam-tenant-{name} on TalosCluster deletion.
-	// PLATFORM-BL-TENANT-GC.
-	if err := r.ensureTenantNamespaceCleanupFinalizer(ctx, tc); err != nil {
-		return ctrl.Result{}, fmt.Errorf("reconcileCAPIPath: ensure tenant-namespace-cleanup finalizer: %w", err)
-	}
 
 	// Step 1 — Ensure the tenant namespace exists.
 	// Platform is the sole namespace creation authority. CP-INV-004.

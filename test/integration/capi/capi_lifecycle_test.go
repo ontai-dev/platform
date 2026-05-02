@@ -26,10 +26,11 @@ import (
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
-	"k8s.io/client-go/tools/record"
+	clientevents "k8s.io/client-go/tools/events"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 
+	seamcorev1alpha1 "github.com/ontai-dev/seam-core/api/v1alpha1"
 	infrav1alpha1 "github.com/ontai-dev/platform/api/infrastructure/v1alpha1"
 	platformv1alpha1 "github.com/ontai-dev/platform/api/v1alpha1"
 	"github.com/ontai-dev/platform/internal/controller"
@@ -52,8 +53,8 @@ func buildCAPIScheme(t *testing.T) *runtime.Scheme {
 	if err := infrav1alpha1.AddToScheme(s); err != nil {
 		t.Fatalf("add infrav1alpha1 scheme: %v", err)
 	}
-	if err := controller.AddOperationalRunnerConfigToScheme(s); err != nil {
-		t.Fatalf("add OperationalRunnerConfig scheme: %v", err)
+	if err := seamcorev1alpha1.AddToScheme(s); err != nil {
+		t.Fatalf("add seamcorev1alpha1 scheme: %v", err)
 	}
 	return s
 }
@@ -90,15 +91,6 @@ func buildCAPITalosCluster(name string) *platformv1alpha1.TalosCluster {
 	}
 }
 
-// getUnstructured fetches an unstructured object from the fake client by GVK and name.
-func getUnstructured(t *testing.T, c interface {
-	Get(context.Context, types.NamespacedName, *unstructured.Unstructured) error
-}, gvk schema.GroupVersionKind, ns, name string) *unstructured.Unstructured {
-	t.Helper()
-	obj := &unstructured.Unstructured{}
-	obj.SetGroupVersionKind(gvk)
-	return obj
-}
 
 // ── Scenario 1: CAPI provision ───────────────────────────────────────────────
 
@@ -118,7 +110,7 @@ func TestCAPILifecycle_Provision(t *testing.T) {
 	r := &controller.TalosClusterReconciler{
 		Client:   c,
 		Scheme:   scheme,
-		Recorder: record.NewFakeRecorder(32),
+		Recorder: clientevents.NewFakeRecorder(32),
 	}
 
 	result, err := r.Reconcile(context.Background(), ctrl.Request{
@@ -268,7 +260,7 @@ func TestCAPILifecycle_Provision_Idempotent(t *testing.T) {
 	r := &controller.TalosClusterReconciler{
 		Client:   c,
 		Scheme:   scheme,
-		Recorder: record.NewFakeRecorder(32),
+		Recorder: clientevents.NewFakeRecorder(32),
 	}
 
 	req := ctrl.Request{NamespacedName: types.NamespacedName{Name: "ccs-app", Namespace: "seam-system"}}
@@ -317,7 +309,7 @@ func TestSIMLifecycle_NoCAPIMachine(t *testing.T) {
 	r := &controller.SeamInfrastructureMachineReconciler{
 		Client:   c,
 		Scheme:   s,
-		Recorder: record.NewFakeRecorder(32),
+		Recorder: clientevents.NewFakeRecorder(32),
 		Applier:  &noopApplier{},
 	}
 
@@ -408,7 +400,7 @@ func TestSIMLifecycle_BootstrapDataNotReady(t *testing.T) {
 	r := &controller.SeamInfrastructureMachineReconciler{
 		Client:   c,
 		Scheme:   s,
-		Recorder: record.NewFakeRecorder(32),
+		Recorder: clientevents.NewFakeRecorder(32),
 		Applier:  &noopApplier{},
 	}
 
@@ -486,7 +478,7 @@ func TestCAPILifecycle_Deletion_FinalizerRemovedAndRunnerConfigDeleted(t *testin
 	r := &controller.TalosClusterReconciler{
 		Client:   c,
 		Scheme:   scheme,
-		Recorder: record.NewFakeRecorder(32),
+		Recorder: clientevents.NewFakeRecorder(32),
 	}
 
 	_, err := r.Reconcile(context.Background(), ctrl.Request{

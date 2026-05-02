@@ -9,19 +9,21 @@
 // branches rather than the direct RunnerConfig path.
 //
 // platform-schema.md §5 dual-path CRDs. platform-design.md §2.1.
-package day2_test
+package day2_integration_test
 
 import (
 	"context"
 	"testing"
 	"time"
 
+	batchv1 "k8s.io/api/batch/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
-	"k8s.io/client-go/tools/record"
+	clientevents "k8s.io/client-go/tools/events"
 	ctrl "sigs.k8s.io/controller-runtime"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 
 	platformv1alpha1 "github.com/ontai-dev/platform/api/v1alpha1"
@@ -71,7 +73,7 @@ func TestUpgradePolicyCAPI_DelegationConditionSet(t *testing.T) {
 		WithObjects(tc, up).
 		WithStatusSubresource(up).
 		Build()
-	r := &controller.UpgradePolicyReconciler{Client: c, Scheme: scheme, Recorder: record.NewFakeRecorder(8)}
+	r := &controller.UpgradePolicyReconciler{Client: c, Scheme: scheme, Recorder: clientevents.NewFakeRecorder(8)}
 
 	_, err := r.Reconcile(context.Background(), ctrl.Request{
 		NamespacedName: types.NamespacedName{Name: "upgrade-1", Namespace: ns},
@@ -128,12 +130,13 @@ func TestUpgradePolicyCAPI_NonCAPICluster_UsesDirectPath(t *testing.T) {
 			TargetTalosVersion: "v1.10.0",
 		},
 	}
+	rc := fakeClusterRC("ccs-mgmt", "talos-upgrade")
 	c := fake.NewClientBuilder().
 		WithScheme(scheme).
-		WithObjects(tc, up).
+		WithObjects(tc, up, rc).
 		WithStatusSubresource(up).
 		Build()
-	r := &controller.UpgradePolicyReconciler{Client: c, Scheme: scheme, Recorder: record.NewFakeRecorder(8)}
+	r := &controller.UpgradePolicyReconciler{Client: c, Scheme: scheme, Recorder: clientevents.NewFakeRecorder(8)}
 
 	_, err := r.Reconcile(context.Background(), ctrl.Request{
 		NamespacedName: types.NamespacedName{Name: "upgrade-mgmt", Namespace: ns},
@@ -142,13 +145,13 @@ func TestUpgradePolicyCAPI_NonCAPICluster_UsesDirectPath(t *testing.T) {
 		t.Fatalf("Reconcile: %v", err)
 	}
 
-	// Non-CAPI path submits a RunnerConfig.
-	rcList := &controller.OperationalRunnerConfigList{}
-	if err := c.List(context.Background(), rcList); err != nil {
-		t.Fatalf("list RunnerConfigs: %v", err)
+	// Non-CAPI path submits a Job.
+	jobList := &batchv1.JobList{}
+	if err := c.List(context.Background(), jobList, client.InNamespace(ns)); err != nil {
+		t.Fatalf("list Jobs: %v", err)
 	}
-	if len(rcList.Items) != 1 {
-		t.Errorf("non-CAPI path: expected 1 RunnerConfig, got %d", len(rcList.Items))
+	if len(jobList.Items) != 1 {
+		t.Errorf("non-CAPI path: expected 1 Job, got %d", len(jobList.Items))
 	}
 
 	// CAPIDelegated must NOT be set on the non-CAPI path.
@@ -185,7 +188,7 @@ func TestNodeOperationCAPI_RebootDelegated(t *testing.T) {
 		WithObjects(tc, nop).
 		WithStatusSubresource(nop).
 		Build()
-	r := &controller.NodeOperationReconciler{Client: c, Scheme: scheme, Recorder: record.NewFakeRecorder(8)}
+	r := &controller.NodeOperationReconciler{Client: c, Scheme: scheme, Recorder: clientevents.NewFakeRecorder(8)}
 
 	_, err := r.Reconcile(context.Background(), ctrl.Request{
 		NamespacedName: types.NamespacedName{Name: "reboot-1", Namespace: ns},
@@ -241,12 +244,13 @@ func TestClusterResetCAPI_ApprovedSubmitsRunnerConfig(t *testing.T) {
 			ClusterRef: platformv1alpha1.LocalObjectRef{Name: "ccs-app"},
 		},
 	}
+	rc := fakeClusterRC("ccs-app", "cluster-reset")
 	c := fake.NewClientBuilder().
 		WithScheme(scheme).
-		WithObjects(tc, crst).
+		WithObjects(tc, crst, rc).
 		WithStatusSubresource(crst).
 		Build()
-	r := &controller.ClusterResetReconciler{Client: c, Scheme: scheme, Recorder: record.NewFakeRecorder(8)}
+	r := &controller.ClusterResetReconciler{Client: c, Scheme: scheme, Recorder: clientevents.NewFakeRecorder(8)}
 
 	result, err := r.Reconcile(context.Background(), ctrl.Request{
 		NamespacedName: types.NamespacedName{Name: "reset-capi", Namespace: ns},
@@ -255,18 +259,19 @@ func TestClusterResetCAPI_ApprovedSubmitsRunnerConfig(t *testing.T) {
 		t.Fatalf("Reconcile: %v", err)
 	}
 	if result.RequeueAfter == 0 {
-		t.Error("expected RequeueAfter > 0 after RunnerConfig submission")
+		t.Error("expected RequeueAfter > 0 after Job submission")
 	}
 
-	rcList := &controller.OperationalRunnerConfigList{}
-	if err := c.List(context.Background(), rcList); err != nil {
-		t.Fatalf("list RunnerConfigs: %v", err)
+	jobList := &batchv1.JobList{}
+	if err := c.List(context.Background(), jobList, client.InNamespace(ns)); err != nil {
+		t.Fatalf("list Jobs: %v", err)
 	}
-	if len(rcList.Items) != 1 {
-		t.Fatalf("CAPI ClusterReset: expected 1 RunnerConfig after approval, got %d", len(rcList.Items))
+	if len(jobList.Items) != 1 {
+		t.Fatalf("CAPI ClusterReset: expected 1 Job after approval, got %d", len(jobList.Items))
 	}
-	if rcList.Items[0].Spec.Steps[0].Capability != "cluster-reset" {
-		t.Errorf("capability = %q, want cluster-reset", rcList.Items[0].Spec.Steps[0].Capability)
+	if jobList.Items[0].Labels["platform.ontai.dev/capability"] != "cluster-reset" {
+		t.Errorf("Job capability label = %q, want cluster-reset",
+			jobList.Items[0].Labels["platform.ontai.dev/capability"])
 	}
 }
 
@@ -309,7 +314,7 @@ func TestClusterMaintenanceCAPI_BlockOutsideWindows_NoWindowPausesCluster(t *tes
 	r := &controller.ClusterMaintenanceReconciler{
 		Client:   c,
 		Scheme:   scheme,
-		Recorder: record.NewFakeRecorder(8),
+		Recorder: clientevents.NewFakeRecorder(8),
 		Now:      func() time.Time { return fixedNow },
 	}
 
@@ -368,7 +373,7 @@ func TestClusterMaintenanceCAPI_BlockOutsideWindows_False_NeverPauses(t *testing
 	r := &controller.ClusterMaintenanceReconciler{
 		Client:   c,
 		Scheme:   scheme,
-		Recorder: record.NewFakeRecorder(8),
+		Recorder: clientevents.NewFakeRecorder(8),
 		Now:      func() time.Time { return fixedNow },
 	}
 
