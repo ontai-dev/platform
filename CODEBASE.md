@@ -94,15 +94,22 @@ Talos goclient is permitted ONLY in `SeamInfrastructureClusterReconciler` and `S
 3. Annotates TalosCluster with `ontai.dev/runnerconfig-drift-requeue={timestamp}` to trigger reconciliation.
 4. Advances DriftSignal `spec.state` to `queued` via MergePatch.
 
-**`InfrastructureTalosCluster` case (T-23 Talos version drift, added session/17):**
-1. Parses `observedVersion` from `spec.driftReason` field `observedTalosVersion:{version}`.
-2. Patches `TalosCluster.status.observedTalosVersion` to `observedVersion`.
-3. Appends a synthetic out-of-band TCOR operation record: capability `talos-version-drift`, status Succeeded.
-4. Calls `bumpTCORRevision()` with the observed version (creates a new revision epoch anchored at the observed version).
-5. Calls `ensureCorrectiveUpgradePolicy()` -- creates `drift-version-{cluster}` UpgradePolicy in `seam-tenant-{cluster}` with `upgradeType=talos`, `targetTalosVersion=spec.talosVersion` (the declared desired state to restore).
-6. Advances DriftSignal `spec.state` to `queued`.
+**`InfrastructureTalosCluster` case -- dispatches by `driftReason` prefix:**
 
-`ensureCorrectiveUpgradePolicy()` is idempotent: no-op if UpgradePolicy already exists with the same target version. Registered in `cmd/platform/main.go`.
+- **Talos version drift** (`driftReason` starts with `"talos version drift"`, session/17):
+  1. Parses `observedVersion` from `spec.driftReason` field `observed={version}`.
+  2. Patches `TalosCluster.status.observedTalosVersion` to `observedVersion`.
+  3. Appends a synthetic out-of-band TCOR operation record: capability `talos-version-drift`, status Succeeded.
+  4. Calls `bumpTCORRevision()` with the observed version.
+  5. Creates `drift-version-{cluster}` UpgradePolicy with `upgradeType=talos`, `targetTalosVersion=spec.talosVersion`.
+  6. Advances DriftSignal `spec.state` to `queued`.
+
+- **Kubernetes version drift** (`driftReason` starts with `"kubernetes version drift"`, session/18):
+  1. Parses `observedVersion` from `spec.driftReason` field `observed={version}`.
+  2. Creates `drift-k8s-version-{cluster}` UpgradePolicy in `seam-tenant-{cluster}` with `upgradeType=kubernetes`, `targetKubernetesVersion=tc.Spec.KubernetesVersion` (the declared desired state).
+  3. Advances DriftSignal `spec.state` to `queued`. No TCOR record -- K8s kubelet version changes are not tracked in the TCOR.
+
+Both `ensureCorrectiveUpgradePolicy` and `ensureCorrectiveKubeUpgradePolicy` are idempotent. Registered in `cmd/platform/main.go`.
 
 Other kinds and non-pending states are no-ops. If TalosCluster not found, advances state to queued to avoid retry storms.
 
@@ -200,7 +207,7 @@ Cross-namespace S3 credential projection for executor Jobs. Source secret lives 
 
 | Package | Coverage |
 |---------|----------|
-| `internal/controller` | `taloscluster_helpers_test.go`: Decision H cascade (T-24) -- `TestHandleTalosClusterDeletion_DecisionHCascade_DeletesPackExecutions`, `TestHandleTalosClusterDeletion_DecisionHCascade_RemovesFromAllowedClusters`, `TestHandleTalosClusterDeletion_DecisionHCascade_NotTenant`. `removeFromUnstructuredStringSlice` round-trip. `driftsignal_reconciler_test.go`: `TestDriftSignalReconciler_RunnerConfigKind_RequeuesTalosCluster`, `TestDriftSignalReconciler_NonPending_NoOp`, `TestDriftSignalReconciler_UnknownKind_NoOp`, `TestDriftSignalReconciler_NotFound_NoOp` (T-23 RunnerConfig case); `TestDriftSignalReconciler_TalosVersionDrift_FullFlow` verifies observedTalosVersion patch + out-of-band TCOR record + TCOR revision bump + UpgradePolicy creation + DriftSignal state=queued; `TestDriftSignalReconciler_TalosVersionDrift_AlreadyQueued` no-op guard (T-23 Talos version drift case). |
+| `internal/controller` | `taloscluster_helpers_test.go`: Decision H cascade (T-24) -- `TestHandleTalosClusterDeletion_DecisionHCascade_DeletesPackExecutions`, `TestHandleTalosClusterDeletion_DecisionHCascade_RemovesFromAllowedClusters`, `TestHandleTalosClusterDeletion_DecisionHCascade_NotTenant`. `removeFromUnstructuredStringSlice` round-trip. `driftsignal_reconciler_test.go`: `TestDriftSignalReconciler_RunnerConfigKind_RequeuesTalosCluster`, `TestDriftSignalReconciler_NonPending_NoOp`, `TestDriftSignalReconciler_UnknownKind_NoOp`, `TestDriftSignalReconciler_NotFound_NoOp` (T-23 RunnerConfig case); `TestDriftSignalReconciler_TalosVersionDrift_FullFlow` verifies observedTalosVersion patch + out-of-band TCOR record + TCOR revision bump + UpgradePolicy creation + DriftSignal state=queued; `TestDriftSignalReconciler_TalosVersionDrift_AlreadyQueued` no-op guard (T-23 Talos version drift case). `TestDriftSignalReconciler_K8sVersionDrift_FullFlow` verifies K8s drift dispatch: corrective `drift-k8s-version-{cluster}` UpgradePolicy created with `upgradeType=kubernetes`, `targetKubernetesVersion=spec.kubernetesVersion`; DriftSignal advanced to queued (session/18). |
 | `test/unit/controller` | TalosClusterReconciler (bootstrap, CAPI, import paths), handleTalosClusterDeletion, ensureTenantOnboarding, operational job base (jobSpec, hasCapability) |
 | `test/unit/controller` (s3) | `NormalizeS3SecretData`: required-key validation, camelCase input, AWS SDK env var input, mixed keys, optional endpoint omission |
 | `test/unit/controller` (pki) | `ParsePEMCertExpiry`: single cert, multiple certs (earliest wins), empty input, non-cert PEM. `ParseKubeconfigCertExpiry`: valid embedded cert data, no cert data. `ParseTalosConfigCertExpiry`: valid crt field, missing crt, no active context. |

@@ -66,6 +66,9 @@ func (r *DriftSignalReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 	case "InfrastructureRunnerConfig":
 		return r.handleRunnerConfigDrift(ctx, log, ds, clusterName)
 	case "InfrastructureTalosCluster":
+		if strings.HasPrefix(ds.Spec.DriftReason, "kubernetes version drift") {
+			return r.handleKubernetesVersionDrift(ctx, log, ds, clusterName)
+		}
 		return r.handleTalosVersionDrift(ctx, log, ds, clusterName)
 	default:
 		// Other kinds are handled by conductor DriftSignalHandler (pack drift).
@@ -157,6 +160,40 @@ func (r *DriftSignalReconciler) handleTalosVersionDrift(ctx context.Context, log
 		return ctrl.Result{}, fmt.Errorf("DriftSignalReconciler: ensure corrective UpgradePolicy %s: %w", clusterName, err)
 	}
 	log.Info("corrective UpgradePolicy ensured", "cluster", clusterName, "targetVersion", tc.Spec.TalosVersion)
+
+	return ctrl.Result{}, r.advanceDriftSignalToQueued(ctx, ds)
+}
+
+// handleKubernetesVersionDrift creates a corrective kube-upgrade UpgradePolicy when
+// conductor detects that node kubeletVersion disagrees with spec.kubernetesVersion.
+// Unlike the Talos version drift path, there is no TCOR record and no status patch --
+// the K8s version is corrected by the kubeUpgradeHandler executor Job driven by the
+// UpgradePolicy. Once the upgrade converges, the K8s drift loop confirms the signal.
+func (r *DriftSignalReconciler) handleKubernetesVersionDrift(ctx context.Context, log logr.Logger, ds *seamcorev1alpha1.DriftSignal, clusterName string) (ctrl.Result, error) {
+	observedVersion := extractObservedVersion(ds.Spec.DriftReason)
+	if observedVersion == "" {
+		log.Info("K8s version drift DriftSignal has no parseable observed version -- skipping",
+			"cluster", clusterName, "driftReason", ds.Spec.DriftReason)
+		return ctrl.Result{}, r.advanceDriftSignalToQueued(ctx, ds)
+	}
+
+	log.Info("handling Kubernetes version drift",
+		"cluster", clusterName, "observedVersion", observedVersion, "driftReason", ds.Spec.DriftReason)
+
+	tc, err := r.getTalosCluster(ctx, clusterName)
+	if err != nil {
+		return ctrl.Result{}, err
+	}
+	if tc == nil {
+		log.Info("TalosCluster not found -- marking queued to stop retries", "cluster", clusterName)
+		return ctrl.Result{}, r.advanceDriftSignalToQueued(ctx, ds)
+	}
+
+	if err := r.ensureCorrectiveKubeUpgradePolicy(ctx, clusterName, tc.Spec.KubernetesVersion); err != nil {
+		return ctrl.Result{}, fmt.Errorf("DriftSignalReconciler: ensure corrective kube UpgradePolicy %s: %w", clusterName, err)
+	}
+	log.Info("corrective kube UpgradePolicy ensured",
+		"cluster", clusterName, "targetVersion", tc.Spec.KubernetesVersion)
 
 	return ctrl.Result{}, r.advanceDriftSignalToQueued(ctx, ds)
 }
@@ -260,6 +297,32 @@ func (r *DriftSignalReconciler) ensureCorrectiveUpgradePolicy(ctx context.Contex
 	}
 	if err := r.Client.Create(ctx, up); err != nil && !apierrors.IsAlreadyExists(err) {
 		return fmt.Errorf("create UpgradePolicy drift-version-%s: %w", clusterName, err)
+	}
+	return nil
+}
+
+// ensureCorrectiveKubeUpgradePolicy creates a UpgradePolicy in seam-tenant-{cluster} to
+// bring the cluster Kubernetes version back to specVersion. Idempotent: create is skipped
+// if the UpgradePolicy already exists. The UpgradePolicyReconciler submits a kube-upgrade
+// executor Job that drives the kubelet image patch via kubeUpgradeHandler.
+func (r *DriftSignalReconciler) ensureCorrectiveKubeUpgradePolicy(ctx context.Context, clusterName, specVersion string) error {
+	ns := tenantNS(clusterName)
+	up := &platformv1alpha1.UpgradePolicy{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "drift-k8s-version-" + clusterName,
+			Namespace: ns,
+		},
+		Spec: platformv1alpha1.UpgradePolicySpec{
+			ClusterRef: platformv1alpha1.LocalObjectRef{
+				Name:      clusterName,
+				Namespace: rbacProfileNamespace, // seam-system -- where TalosCluster lives
+			},
+			UpgradeType:             platformv1alpha1.UpgradeTypeKubernetes,
+			TargetKubernetesVersion: specVersion,
+		},
+	}
+	if err := r.Client.Create(ctx, up); err != nil && !apierrors.IsAlreadyExists(err) {
+		return fmt.Errorf("create UpgradePolicy drift-k8s-version-%s: %w", clusterName, err)
 	}
 	return nil
 }
