@@ -43,6 +43,11 @@ func TestEtcdMaintenanceReconcile_S3PlatformDefaultFallback(t *testing.T) {
 	}
 	platformDefault := &corev1.Secret{
 		ObjectMeta: metav1.ObjectMeta{Name: "seam-etcd-backup-config", Namespace: "seam-system"},
+		Data: map[string][]byte{
+			"AWS_ACCESS_KEY_ID":     []byte("testkey"),
+			"AWS_SECRET_ACCESS_KEY": []byte("testsecret"),
+			"S3_REGION":             []byte("us-east-1"),
+		},
 	}
 
 	c := fake.NewClientBuilder().
