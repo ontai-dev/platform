@@ -16,7 +16,7 @@ import (
 
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
-	"k8s.io/client-go/tools/record"
+	clientevents "k8s.io/client-go/tools/events"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 
@@ -45,7 +45,7 @@ func TestTenantEtcdMaintenance_ImportMode_BackupSubmitted(t *testing.T) {
 		WithObjects(em, defaultS3Secret()).
 		WithStatusSubresource(em).
 		Build()
-	r := &controller.EtcdMaintenanceReconciler{Client: c, Scheme: scheme, Recorder: record.NewFakeRecorder(8)}
+	r := &controller.EtcdMaintenanceReconciler{Client: c, Scheme: scheme, Recorder: clientevents.NewFakeRecorder(8)}
 
 	result, err := r.Reconcile(context.Background(), ctrl.Request{
 		NamespacedName: types.NamespacedName{Name: "tenant-backup-1", Namespace: ns},
@@ -112,7 +112,7 @@ func TestTenantEtcdMaintenance_CAPIMode_BackupSubmitted(t *testing.T) {
 		WithObjects(em, defaultS3Secret()).
 		WithStatusSubresource(em).
 		Build()
-	r := &controller.EtcdMaintenanceReconciler{Client: c, Scheme: scheme, Recorder: record.NewFakeRecorder(8)}
+	r := &controller.EtcdMaintenanceReconciler{Client: c, Scheme: scheme, Recorder: clientevents.NewFakeRecorder(8)}
 
 	_, err := r.Reconcile(context.Background(), ctrl.Request{
 		NamespacedName: types.NamespacedName{Name: "capi-tenant-backup-1", Namespace: ns},
@@ -155,7 +155,7 @@ func TestTenantEtcdMaintenance_S3AbsentInTenantNamespace(t *testing.T) {
 		WithObjects(em).
 		WithStatusSubresource(em).
 		Build()
-	r := &controller.EtcdMaintenanceReconciler{Client: c, Scheme: scheme, Recorder: record.NewFakeRecorder(8)}
+	r := &controller.EtcdMaintenanceReconciler{Client: c, Scheme: scheme, Recorder: clientevents.NewFakeRecorder(8)}
 
 	_, err := r.Reconcile(context.Background(), ctrl.Request{
 		NamespacedName: types.NamespacedName{Name: "tenant-backup-absent", Namespace: ns},

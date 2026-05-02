@@ -20,7 +20,7 @@ import (
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
-	"k8s.io/client-go/tools/record"
+	clientevents "k8s.io/client-go/tools/events"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 
@@ -71,7 +71,7 @@ func TestUpgradePolicyCAPI_DelegationConditionSet(t *testing.T) {
 		WithObjects(tc, up).
 		WithStatusSubresource(up).
 		Build()
-	r := &controller.UpgradePolicyReconciler{Client: c, Scheme: scheme, Recorder: record.NewFakeRecorder(8)}
+	r := &controller.UpgradePolicyReconciler{Client: c, Scheme: scheme, Recorder: clientevents.NewFakeRecorder(8)}
 
 	_, err := r.Reconcile(context.Background(), ctrl.Request{
 		NamespacedName: types.NamespacedName{Name: "upgrade-1", Namespace: ns},
@@ -133,7 +133,7 @@ func TestUpgradePolicyCAPI_NonCAPICluster_UsesDirectPath(t *testing.T) {
 		WithObjects(tc, up).
 		WithStatusSubresource(up).
 		Build()
-	r := &controller.UpgradePolicyReconciler{Client: c, Scheme: scheme, Recorder: record.NewFakeRecorder(8)}
+	r := &controller.UpgradePolicyReconciler{Client: c, Scheme: scheme, Recorder: clientevents.NewFakeRecorder(8)}
 
 	_, err := r.Reconcile(context.Background(), ctrl.Request{
 		NamespacedName: types.NamespacedName{Name: "upgrade-mgmt", Namespace: ns},
@@ -185,7 +185,7 @@ func TestNodeOperationCAPI_RebootDelegated(t *testing.T) {
 		WithObjects(tc, nop).
 		WithStatusSubresource(nop).
 		Build()
-	r := &controller.NodeOperationReconciler{Client: c, Scheme: scheme, Recorder: record.NewFakeRecorder(8)}
+	r := &controller.NodeOperationReconciler{Client: c, Scheme: scheme, Recorder: clientevents.NewFakeRecorder(8)}
 
 	_, err := r.Reconcile(context.Background(), ctrl.Request{
 		NamespacedName: types.NamespacedName{Name: "reboot-1", Namespace: ns},
@@ -246,7 +246,7 @@ func TestClusterResetCAPI_ApprovedSubmitsRunnerConfig(t *testing.T) {
 		WithObjects(tc, crst).
 		WithStatusSubresource(crst).
 		Build()
-	r := &controller.ClusterResetReconciler{Client: c, Scheme: scheme, Recorder: record.NewFakeRecorder(8)}
+	r := &controller.ClusterResetReconciler{Client: c, Scheme: scheme, Recorder: clientevents.NewFakeRecorder(8)}
 
 	result, err := r.Reconcile(context.Background(), ctrl.Request{
 		NamespacedName: types.NamespacedName{Name: "reset-capi", Namespace: ns},
@@ -309,7 +309,7 @@ func TestClusterMaintenanceCAPI_BlockOutsideWindows_NoWindowPausesCluster(t *tes
 	r := &controller.ClusterMaintenanceReconciler{
 		Client:   c,
 		Scheme:   scheme,
-		Recorder: record.NewFakeRecorder(8),
+		Recorder: clientevents.NewFakeRecorder(8),
 		Now:      func() time.Time { return fixedNow },
 	}
 
@@ -368,7 +368,7 @@ func TestClusterMaintenanceCAPI_BlockOutsideWindows_False_NeverPauses(t *testing
 	r := &controller.ClusterMaintenanceReconciler{
 		Client:   c,
 		Scheme:   scheme,
-		Recorder: record.NewFakeRecorder(8),
+		Recorder: clientevents.NewFakeRecorder(8),
 		Now:      func() time.Time { return fixedNow },
 	}
 

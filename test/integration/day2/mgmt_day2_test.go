@@ -18,10 +18,11 @@ import (
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
-	"k8s.io/client-go/tools/record"
+	clientevents "k8s.io/client-go/tools/events"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 
+	seamcorev1alpha1 "github.com/ontai-dev/seam-core/api/v1alpha1"
 	platformv1alpha1 "github.com/ontai-dev/platform/api/v1alpha1"
 	"github.com/ontai-dev/platform/internal/controller"
 )
@@ -39,8 +40,8 @@ func buildDay2IntegrationScheme(t *testing.T) *runtime.Scheme {
 	if err := platformv1alpha1.AddToScheme(s); err != nil {
 		t.Fatalf("add platformv1alpha1 scheme: %v", err)
 	}
-	if err := controller.AddOperationalRunnerConfigToScheme(s); err != nil {
-		t.Fatalf("add OperationalRunnerConfig scheme: %v", err)
+	if err := seamcorev1alpha1.AddToScheme(s); err != nil {
+		t.Fatalf("add seamcorev1alpha1 scheme: %v", err)
 	}
 	return s
 }
@@ -79,7 +80,7 @@ func TestEtcdMaintenanceIntegration_S3AbsentSetsCondition(t *testing.T) {
 		},
 	}
 	c := fake.NewClientBuilder().WithScheme(scheme).WithObjects(em).WithStatusSubresource(em).Build()
-	r := &controller.EtcdMaintenanceReconciler{Client: c, Scheme: scheme, Recorder: record.NewFakeRecorder(8)}
+	r := &controller.EtcdMaintenanceReconciler{Client: c, Scheme: scheme, Recorder: clientevents.NewFakeRecorder(8)}
 
 	_, err := r.Reconcile(context.Background(), ctrl.Request{
 		NamespacedName: types.NamespacedName{Name: "backup-absent", Namespace: "seam-system"},
@@ -129,7 +130,7 @@ func TestEtcdMaintenanceIntegration_S3ClusterDefault(t *testing.T) {
 		WithObjects(em, defaultS3Secret()).
 		WithStatusSubresource(em).
 		Build()
-	r := &controller.EtcdMaintenanceReconciler{Client: c, Scheme: scheme, Recorder: record.NewFakeRecorder(8)}
+	r := &controller.EtcdMaintenanceReconciler{Client: c, Scheme: scheme, Recorder: clientevents.NewFakeRecorder(8)}
 
 	_, err := r.Reconcile(context.Background(), ctrl.Request{
 		NamespacedName: types.NamespacedName{Name: "backup-default", Namespace: "seam-system"},
@@ -178,7 +179,7 @@ func TestEtcdMaintenanceIntegration_S3PerOpOverride(t *testing.T) {
 		WithObjects(em, defaultS3Secret(), perOpS3Secret("my-s3-secret", "seam-system")).
 		WithStatusSubresource(em).
 		Build()
-	r := &controller.EtcdMaintenanceReconciler{Client: c, Scheme: scheme, Recorder: record.NewFakeRecorder(8)}
+	r := &controller.EtcdMaintenanceReconciler{Client: c, Scheme: scheme, Recorder: clientevents.NewFakeRecorder(8)}
 
 	_, err := r.Reconcile(context.Background(), ctrl.Request{
 		NamespacedName: types.NamespacedName{Name: "backup-perop", Namespace: "seam-system"},
@@ -218,7 +219,7 @@ func TestEtcdMaintenanceIntegration_DefragNoS3(t *testing.T) {
 		WithObjects(em).
 		WithStatusSubresource(em).
 		Build()
-	r := &controller.EtcdMaintenanceReconciler{Client: c, Scheme: scheme, Recorder: record.NewFakeRecorder(8)}
+	r := &controller.EtcdMaintenanceReconciler{Client: c, Scheme: scheme, Recorder: clientevents.NewFakeRecorder(8)}
 
 	_, err := r.Reconcile(context.Background(), ctrl.Request{
 		NamespacedName: types.NamespacedName{Name: "defrag-1", Namespace: "seam-system"},
@@ -262,7 +263,7 @@ func TestNodeMaintenanceIntegration_CredentialRotateSubmitsRunnerConfig(t *testi
 		WithObjects(nm).
 		WithStatusSubresource(nm).
 		Build()
-	r := &controller.NodeMaintenanceReconciler{Client: c, Scheme: scheme, Recorder: record.NewFakeRecorder(8)}
+	r := &controller.NodeMaintenanceReconciler{Client: c, Scheme: scheme, Recorder: clientevents.NewFakeRecorder(8)}
 
 	result, err := r.Reconcile(context.Background(), ctrl.Request{
 		NamespacedName: types.NamespacedName{Name: "cred-rotate-1", Namespace: "seam-system"},
@@ -317,7 +318,7 @@ func TestPKIRotationIntegration_SubmitsRunnerConfig(t *testing.T) {
 		WithObjects(pkir).
 		WithStatusSubresource(pkir).
 		Build()
-	r := &controller.PKIRotationReconciler{Client: c, Scheme: scheme, Recorder: record.NewFakeRecorder(8)}
+	r := &controller.PKIRotationReconciler{Client: c, Scheme: scheme, Recorder: clientevents.NewFakeRecorder(8)}
 
 	result, err := r.Reconcile(context.Background(), ctrl.Request{
 		NamespacedName: types.NamespacedName{Name: "pki-1", Namespace: "seam-system"},
@@ -359,7 +360,7 @@ func TestClusterResetIntegration_ApprovalGateBlocks(t *testing.T) {
 		WithObjects(crst).
 		WithStatusSubresource(crst).
 		Build()
-	r := &controller.ClusterResetReconciler{Client: c, Scheme: scheme, Recorder: record.NewFakeRecorder(8)}
+	r := &controller.ClusterResetReconciler{Client: c, Scheme: scheme, Recorder: clientevents.NewFakeRecorder(8)}
 
 	_, err := r.Reconcile(context.Background(), ctrl.Request{
 		NamespacedName: types.NamespacedName{Name: "reset-1", Namespace: "seam-system"},
@@ -413,7 +414,7 @@ func TestClusterResetIntegration_ApprovalAnnotationProceed(t *testing.T) {
 		WithObjects(crst).
 		WithStatusSubresource(crst).
 		Build()
-	r := &controller.ClusterResetReconciler{Client: c, Scheme: scheme, Recorder: record.NewFakeRecorder(8)}
+	r := &controller.ClusterResetReconciler{Client: c, Scheme: scheme, Recorder: clientevents.NewFakeRecorder(8)}
 
 	result, err := r.Reconcile(context.Background(), ctrl.Request{
 		NamespacedName: types.NamespacedName{Name: "reset-approved", Namespace: "seam-system"},
@@ -465,7 +466,7 @@ func TestEtcdMaintenanceIntegration_RestartRecovery_NoDuplicateRunnerConfig(t *t
 		WithObjects(em, existingRC, defaultS3Secret()).
 		WithStatusSubresource(em).
 		Build()
-	r := &controller.EtcdMaintenanceReconciler{Client: c, Scheme: scheme, Recorder: record.NewFakeRecorder(8)}
+	r := &controller.EtcdMaintenanceReconciler{Client: c, Scheme: scheme, Recorder: clientevents.NewFakeRecorder(8)}
 
 	_, err := r.Reconcile(context.Background(), ctrl.Request{
 		NamespacedName: types.NamespacedName{Name: "backup-restart", Namespace: "seam-system"},
