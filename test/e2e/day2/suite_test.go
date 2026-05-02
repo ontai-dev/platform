@@ -1,12 +1,14 @@
-// Package day2_e2e_test contains end-to-end test stubs for the platform day-2
+// Package day2_e2e_test contains end-to-end tests for the platform day-2
 // operational CRD reconcilers.
 //
-// Promotion condition for stub specs: requires TENANT-CLUSTER-E2E and AC-1 closed.
-// Management cluster specs run immediately when MGMT_KUBECONFIG is set.
+// Management cluster specs (ccs-mgmt) run immediately when MGMT_KUBECONFIG is set.
+// Tenant cluster specs (ccs-dev) require TENANT_CLUSTER_NAME (default: ccs-dev).
 //
 // Required environment variables:
-//   - MGMT_KUBECONFIG  — path to management cluster kubeconfig
-//   - TENANT_KUBECONFIG — path to tenant cluster kubeconfig
+//   - MGMT_KUBECONFIG       -- path to management cluster kubeconfig (all specs skip if absent)
+//   - TENANT_CLUSTER_NAME   -- import-mode tenant cluster name (default: ccs-dev)
+//   - TENANT_WORKER_NODE    -- worker node name on the tenant cluster (optional)
+//   - REGISTRY_ADDR         -- OCI registry address for test pack push (default: 10.20.0.1:5000)
 //
 // Run with: make e2e
 // Skip condition: MGMT_KUBECONFIG absent -> all specs skip.
@@ -26,11 +28,14 @@ import (
 
 	platformv1alpha1 "github.com/ontai-dev/platform/api/v1alpha1"
 	seamcorev1alpha1 "github.com/ontai-dev/seam-core/api/v1alpha1"
+	e2ehelpers "github.com/ontai-dev/seam-core/pkg/e2e"
 )
 
 var (
-	mgmtClient client.Client
-	mgmtCtx    context.Context
+	mgmtClient   client.Client
+	mgmtCtx      context.Context
+	registry     *e2ehelpers.RegistryClient
+	registryAddr string
 )
 
 func TestDay2E2E(t *testing.T) {
@@ -45,6 +50,12 @@ var _ = BeforeSuite(func() {
 	if kubeconfig == "" {
 		Skip("MGMT_KUBECONFIG not set — tests require a live cluster")
 	}
+
+	registryAddr = os.Getenv("REGISTRY_ADDR")
+	if registryAddr == "" {
+		registryAddr = "10.20.0.1:5000"
+	}
+	registry = e2ehelpers.NewRegistryClient(registryAddr)
 
 	cfg, err := clientcmd.BuildConfigFromFlags("", kubeconfig)
 	Expect(err).NotTo(HaveOccurred(), "build REST config from MGMT_KUBECONFIG")
