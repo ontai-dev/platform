@@ -884,9 +884,11 @@ func EnsureRemoteConductorRBAC(ctx context.Context, k8s kubernetes.Interface) er
 				Verbs:     []string{"update", "patch"},
 			},
 			{
+				// RBACProfilePullLoop and RBACPolicyPullLoop SSA-patch security.ontai.dev
+				// resources into ont-system. Needs create/update/patch in addition to read.
 				APIGroups: []string{"security.ontai.dev"},
 				Resources: []string{"*"},
-				Verbs:     []string{"get", "list", "watch"},
+				Verbs:     []string{"get", "list", "watch", "create", "update", "patch"},
 			},
 			{
 				// Full write access to core resources: conductor orphan teardown deletes

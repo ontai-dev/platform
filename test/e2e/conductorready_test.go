@@ -22,14 +22,14 @@ import (
 
 var _ = Describe("ConductorReady condition gate", func() {
 	It("TalosCluster ConductorReady stays False when Conductor Deployment is Unavailable", func() {
-		Skip("lab cluster not yet provisioned")
+		Skip("requires Conductor Deployment failure injection on a bootstrapped tenant cluster — PLATFORM-BL-CONDUCTORREADY-E2E")
 	})
 
 	It("TalosCluster does not reach Ready while ConductorReady=False", func() {
-		Skip("lab cluster not yet provisioned")
+		Skip("requires Conductor Deployment failure injection on a bootstrapped tenant cluster — PLATFORM-BL-CONDUCTORREADY-E2E")
 	})
 
 	It("ConductorReady transitions to True when Conductor Deployment becomes Available", func() {
-		Skip("lab cluster not yet provisioned")
+		Skip("requires Conductor Deployment failure injection on a bootstrapped tenant cluster — PLATFORM-BL-CONDUCTORREADY-E2E")
 	})
 })
