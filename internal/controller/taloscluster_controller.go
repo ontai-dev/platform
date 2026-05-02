@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"time"
 
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -201,11 +202,65 @@ func (r *TalosClusterReconciler) Reconcile(ctx context.Context, req ctrl.Request
 		return ctrl.Result{}, nil
 	}
 
+	// Capture whether the cluster was already in Ready state before routing.
+	// This distinguishes stable-Ready clusters from clusters that just transitioned
+	// to Ready in this reconcile pass. PKI expiry monitoring is only triggered for
+	// stable-Ready clusters so that first-pass Ready transitions retain the original
+	// clean ctrl.Result{} return. platform-schema.md §13.
+	prevReadyCond := platformv1alpha1.FindCondition(tc.Status.Conditions, platformv1alpha1.ConditionTypeReady)
+	wasAlreadyReady := prevReadyCond != nil && prevReadyCond.Status == metav1.ConditionTrue
+
 	// Step E — Route to the appropriate reconciliation path.
+	var routeResult ctrl.Result
+	var routeErr error
 	if tc.Spec.CAPI == nil || !tc.Spec.CAPI.Enabled {
-		return r.reconcileDirectBootstrap(ctx, tc)
+		routeResult, routeErr = r.reconcileDirectBootstrap(ctx, tc)
+	} else {
+		routeResult, routeErr = r.reconcileCAPIPath(ctx, tc)
 	}
-	return r.reconcileCAPIPath(ctx, tc)
+	if routeErr != nil {
+		return routeResult, routeErr
+	}
+
+	// Step F -- PKI expiry check and annotation-triggered rotation.
+	// Only executed when the cluster was already in Ready state before this
+	// reconcile pass (stable-Ready). Non-fatal: failures are logged and result
+	// in a requeue rather than an error return. platform-schema.md §13.
+	if wasAlreadyReady {
+		// Annotation-based on-demand rotation.
+		if tc.Annotations != nil && tc.Annotations["platform.ontai.dev/rotate-pki"] == "true" {
+			if err := ensureAnnotationRotationPKI(ctx, r.Client, r.Scheme, tc); err != nil {
+				return ctrl.Result{}, fmt.Errorf("ensureAnnotationRotationPKI: %w", err)
+			}
+			// Clear annotation via patch.
+			patch := client.MergeFrom(tc.DeepCopy())
+			delete(tc.Annotations, "platform.ontai.dev/rotate-pki")
+			if pErr := r.Client.Patch(ctx, tc, patch); pErr != nil {
+				return ctrl.Result{}, fmt.Errorf("clear rotate-pki annotation: %w", pErr)
+			}
+		}
+
+		// Expiry detection and auto-rotation.
+		rotationNeeded, pkiErr := syncPKIExpiry(ctx, r.Client, tc)
+		if pkiErr != nil {
+			logger.Error(pkiErr, "PKI expiry detection failed -- non-fatal, will retry")
+			// Requeue for retry in 1h; do not return an error that would reset backoff.
+			return ctrl.Result{RequeueAfter: 1 * time.Hour}, nil
+		}
+		if rotationNeeded {
+			if err := ensureAutoRotationPKI(ctx, r.Client, r.Scheme, tc); err != nil {
+				return ctrl.Result{}, fmt.Errorf("ensureAutoRotationPKI: %w", err)
+			}
+		}
+
+		// Schedule daily expiry monitoring so the reconciler checks PKI expiry
+		// even when no other spec or status changes trigger a reconcile.
+		if routeResult.RequeueAfter == 0 && !routeResult.Requeue {
+			return ctrl.Result{RequeueAfter: 24 * time.Hour}, nil
+		}
+	}
+
+	return routeResult, nil
 }
 
 // reconcileDirectBootstrap handles the management cluster bootstrap path

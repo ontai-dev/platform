@@ -82,6 +82,24 @@ Talos goclient is permitted ONLY in `SeamInfrastructureClusterReconciler` and `S
 
 `port50000RetryBase = 10 * time.Second` (L36). `port50000RetryCap` (L39) -- max retry interval.
 
+#### `pki_cert_helpers.go`
+
+Certificate expiry detection and PKI rotation triggering. platform-schema.md §13.
+
+`ParsePEMCertExpiry(pemData []byte) (*time.Time, error)` -- iterates PEM blocks, returns earliest NotAfter across all CERTIFICATE blocks. Exported for unit tests.
+
+`ParseKubeconfigCertExpiry(kubeconfigYAML []byte) (*time.Time, error)` -- parses kubeconfig via client-go clientcmd, iterates AuthInfos, returns earliest expiry from ClientCertificateData entries.
+
+`ParseTalosConfigCertExpiry(talosConfigYAML []byte) (*time.Time, error)` -- parses talosconfig YAML, reads active context crt field (base64-encoded PEM), returns cert expiry.
+
+`detectClusterPKIExpiry(ctx, c, clusterName)` -- reads both Secrets via readSecretAndParseExpiry, returns earliest expiry across both. Tolerates NotFound gracefully.
+
+`syncPKIExpiry(ctx, c, tc) (bool, error)` -- calls detectClusterPKIExpiry, writes result to tc.Status.PkiExpiryDate, returns rotationNeeded when expiry is within spec.pkiRotationThresholdDays (default 30 days).
+
+`ensureAutoRotationPKI(ctx, c, scheme, tc) error` -- creates PKIRotation CR named `{cluster}-pki-auto-{ts}` with label `pki-trigger=auto`. Idempotent: skips if an in-progress PKIRotation already exists for the cluster.
+
+`ensureAnnotationRotationPKI(ctx, c, scheme, tc) error` -- creates PKIRotation CR named `{cluster}-pki-manual-{ts}` with label `pki-trigger=manual`. Caller removes the annotation.
+
 #### `operational_job_base.go`
 
 `operationalJobBackoffLimit = int32(0)` (L45) -- no retries on gate failures (INV-018). Applied at `jobSpec()` L61 via `BackoffLimit: &backoff` L76.
@@ -128,6 +146,8 @@ Cross-namespace S3 credential projection for executor Jobs. Source secret lives 
 
 **Day-2 op path (direct)**: Human creates day-2 CR (e.g., EtcdMaintenance) --> reconciler calls `getClusterRunnerConfig()` + `hasCapability()` --> for backup/restore operations: `resolveEtcdBackupS3Secret()` or `resolveS3CredentialsForRestore()` resolves the source Secret, then `ensureS3EnvSecret()` projects a normalized copy into `em.Namespace` -- if no S3 secret is found, `EtcdBackupDestinationAbsent` condition is set and reconcile stops --> builds Job spec via `jobSpec()` or `jobSpecWithExclusions()` --> `appendS3EnvFrom()` mounts the projected secret via `envFrom` --> submits Conductor executor Job --> polls `readOperationRecord()` --> updates CR status.
 
+**PKI rotation path**: `Reconcile()` Step F fires only for stable-Ready clusters (clusters that were Ready before this reconcile pass). Two triggers: (1) annotation `platform.ontai.dev/rotate-pki=true` calls `ensureAnnotationRotationPKI()` which creates a manual PKIRotation CR; annotation is cleared via Patch. (2) `syncPKIExpiry()` reads kubeconfig and talosconfig Secrets, parses X.509 cert expiry, writes `tc.Status.PkiExpiryDate`, and when expiry is within threshold calls `ensureAutoRotationPKI()`. Stable-Ready clusters requeue every 24h for daily expiry monitoring. platform-schema.md §13.
+
 ---
 
 ## 4. Invariants
@@ -160,5 +180,6 @@ Cross-namespace S3 credential projection for executor Jobs. Source secret lives 
 |---------|----------|
 | `test/unit/controller` | TalosClusterReconciler (bootstrap, CAPI, import paths), handleTalosClusterDeletion, ensureTenantOnboarding, operational job base (jobSpec, hasCapability) |
 | `test/unit/controller` (s3) | `NormalizeS3SecretData`: required-key validation, camelCase input, AWS SDK env var input, mixed keys, optional endpoint omission |
+| `test/unit/controller` (pki) | `ParsePEMCertExpiry`: single cert, multiple certs (earliest wins), empty input, non-cert PEM. `ParseKubeconfigCertExpiry`: valid embedded cert data, no cert data. `ParseTalosConfigCertExpiry`: valid crt field, missing crt, no active context. |
 | `test/integration/day2` | EtcdMaintenance reconciler (backup with S3, S3-absent condition, etcd defrag, restore path); verifies SSA status patch, Job creation with capability label, S3 projected secret creation via `ensureS3EnvSecret` |
-| `test/e2e` | Stub files; all skip when `MGMT_KUBECONFIG` absent; skip reasons reference backlog item IDs |
+| `test/e2e` | Stub files; all skip when `MGMT_KUBECONFIG` absent; skip reasons reference backlog item IDs. PKI rotation automation stubs (pki_rotation_automation_test.go): annotation-triggered rotation, synthetic expiry injection, idempotency guard. |

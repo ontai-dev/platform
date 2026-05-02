@@ -683,6 +683,42 @@ delivery sequence.
 
 ---
 
+## 13. PKI Rotation Contract
+
+**PKI rotation automation -- session/17, 2026-05-02.**
+
+Imported Talos clusters carry two sets of short-lived certificates stored in Secrets:
+- Admin kubeconfig (Kubernetes client cert, ~1 year TTL): `seam-mc-{cluster}-kubeconfig` in `seam-tenant-{cluster}`, key `value`.
+- Talosconfig client cert: `seam-mc-{cluster}-talosconfig` in `seam-tenant-{cluster}`, key `talosconfig`.
+
+When these expire, the platform operator and Conductor executor lose the ability to connect to the cluster.
+
+**Spec fields (InfrastructureTalosCluster, seam-core):**
+- `spec.pkiRotationThresholdDays` (int32, default 30, minimum 1): days before cert expiry to auto-trigger PKI rotation.
+
+**Status fields (InfrastructureTalosCluster, seam-core):**
+- `status.pkiExpiryDate` (*metav1.Time): earliest certificate expiry across both Secrets. Written by TalosCluster reconciler.
+
+**Triggers:**
+1. Annotation `platform.ontai.dev/rotate-pki=true` on InfrastructureTalosCluster: on-demand rotation. The reconciler creates a PKIRotation CR with label `pki-trigger=manual` in `seam-tenant-{cluster}`, then clears the annotation via Patch.
+2. Auto-rotation: when `status.pkiExpiryDate` is within `spec.pkiRotationThresholdDays` days of the current time, the reconciler creates a PKIRotation CR with label `pki-trigger=auto`. Idempotent: skips if a PKIRotation CR for this cluster already exists and is not yet complete or failed.
+
+**Reconcile loop integration:**
+PKI expiry check runs in Step F of `Reconcile()` only for stable-Ready clusters (clusters that had `Ready=True` before the current reconcile pass). Step F does NOT run during the first-pass Ready transition to avoid overriding the clean result returned by routing functions.
+
+Stable-Ready clusters are requeued every 24 hours for daily expiry monitoring.
+
+**Conductor execute-mode behavior (pkiRotateHandler):**
+After the staged machine config apply succeeds, `pkiRotateHandler.Execute()` calls `TalosClient.Kubeconfig()` to generate a fresh kubeconfig and writes it to both `seam-mc-{cluster}-kubeconfig` and `target-cluster-kubeconfig` in `seam-tenant-{cluster}` via the dynamic client. Kubeconfig refresh is best-effort: if it fails, the operation result is still `Succeeded` because the staged config apply is the critical step. The failure is recorded in the step results with a note.
+
+**Implementation files:**
+- `platform/internal/controller/pki_cert_helpers.go`: cert expiry detection, Secret reading, PKIRotation CR creation.
+- `conductor/internal/capability/platform_security.go`: `pkiRotateHandler.Execute()` with kubeconfig refresh.
+- `conductor/internal/capability/clients.go`: `TalosNodeClient.Kubeconfig()` interface method.
+- `conductor/internal/capability/adapters.go`: `TalosClientAdapter.Kubeconfig()` adapter.
+
+---
+
 *platform.ontai.dev schema - Platform*
 *Amendments:*
 *2026-03-30 - CAPI adopted for target cluster lifecycle. Seam Infrastructure Provider*
