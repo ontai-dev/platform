@@ -16,12 +16,14 @@ import (
 	"testing"
 	"time"
 
+	batchv1 "k8s.io/api/batch/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
 	clientevents "k8s.io/client-go/tools/events"
 	ctrl "sigs.k8s.io/controller-runtime"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 
 	platformv1alpha1 "github.com/ontai-dev/platform/api/v1alpha1"
@@ -128,9 +130,10 @@ func TestUpgradePolicyCAPI_NonCAPICluster_UsesDirectPath(t *testing.T) {
 			TargetTalosVersion: "v1.10.0",
 		},
 	}
+	rc := fakeClusterRC("ccs-mgmt", "talos-upgrade")
 	c := fake.NewClientBuilder().
 		WithScheme(scheme).
-		WithObjects(tc, up).
+		WithObjects(tc, up, rc).
 		WithStatusSubresource(up).
 		Build()
 	r := &controller.UpgradePolicyReconciler{Client: c, Scheme: scheme, Recorder: clientevents.NewFakeRecorder(8)}
@@ -142,13 +145,13 @@ func TestUpgradePolicyCAPI_NonCAPICluster_UsesDirectPath(t *testing.T) {
 		t.Fatalf("Reconcile: %v", err)
 	}
 
-	// Non-CAPI path submits a RunnerConfig.
-	rcList := &controller.OperationalRunnerConfigList{}
-	if err := c.List(context.Background(), rcList); err != nil {
-		t.Fatalf("list RunnerConfigs: %v", err)
+	// Non-CAPI path submits a Job.
+	jobList := &batchv1.JobList{}
+	if err := c.List(context.Background(), jobList, client.InNamespace(ns)); err != nil {
+		t.Fatalf("list Jobs: %v", err)
 	}
-	if len(rcList.Items) != 1 {
-		t.Errorf("non-CAPI path: expected 1 RunnerConfig, got %d", len(rcList.Items))
+	if len(jobList.Items) != 1 {
+		t.Errorf("non-CAPI path: expected 1 Job, got %d", len(jobList.Items))
 	}
 
 	// CAPIDelegated must NOT be set on the non-CAPI path.
@@ -241,9 +244,10 @@ func TestClusterResetCAPI_ApprovedSubmitsRunnerConfig(t *testing.T) {
 			ClusterRef: platformv1alpha1.LocalObjectRef{Name: "ccs-app"},
 		},
 	}
+	rc := fakeClusterRC("ccs-app", "cluster-reset")
 	c := fake.NewClientBuilder().
 		WithScheme(scheme).
-		WithObjects(tc, crst).
+		WithObjects(tc, crst, rc).
 		WithStatusSubresource(crst).
 		Build()
 	r := &controller.ClusterResetReconciler{Client: c, Scheme: scheme, Recorder: clientevents.NewFakeRecorder(8)}
@@ -255,18 +259,19 @@ func TestClusterResetCAPI_ApprovedSubmitsRunnerConfig(t *testing.T) {
 		t.Fatalf("Reconcile: %v", err)
 	}
 	if result.RequeueAfter == 0 {
-		t.Error("expected RequeueAfter > 0 after RunnerConfig submission")
+		t.Error("expected RequeueAfter > 0 after Job submission")
 	}
 
-	rcList := &controller.OperationalRunnerConfigList{}
-	if err := c.List(context.Background(), rcList); err != nil {
-		t.Fatalf("list RunnerConfigs: %v", err)
+	jobList := &batchv1.JobList{}
+	if err := c.List(context.Background(), jobList, client.InNamespace(ns)); err != nil {
+		t.Fatalf("list Jobs: %v", err)
 	}
-	if len(rcList.Items) != 1 {
-		t.Fatalf("CAPI ClusterReset: expected 1 RunnerConfig after approval, got %d", len(rcList.Items))
+	if len(jobList.Items) != 1 {
+		t.Fatalf("CAPI ClusterReset: expected 1 Job after approval, got %d", len(jobList.Items))
 	}
-	if rcList.Items[0].Spec.Steps[0].Capability != "cluster-reset" {
-		t.Errorf("capability = %q, want cluster-reset", rcList.Items[0].Spec.Steps[0].Capability)
+	if jobList.Items[0].Labels["platform.ontai.dev/capability"] != "cluster-reset" {
+		t.Errorf("Job capability label = %q, want cluster-reset",
+			jobList.Items[0].Labels["platform.ontai.dev/capability"])
 	}
 }
 

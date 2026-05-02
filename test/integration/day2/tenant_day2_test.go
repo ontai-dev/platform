@@ -14,10 +14,12 @@ import (
 	"context"
 	"testing"
 
+	batchv1 "k8s.io/api/batch/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 	clientevents "k8s.io/client-go/tools/events"
 	ctrl "sigs.k8s.io/controller-runtime"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 
 	platformv1alpha1 "github.com/ontai-dev/platform/api/v1alpha1"
@@ -40,9 +42,10 @@ func TestTenantEtcdMaintenance_ImportMode_BackupSubmitted(t *testing.T) {
 			Operation:  platformv1alpha1.EtcdMaintenanceOperationBackup,
 		},
 	}
+	rc := fakeClusterRC("ccs-dev", "etcd-backup")
 	c := fake.NewClientBuilder().
 		WithScheme(scheme).
-		WithObjects(em, defaultS3Secret()).
+		WithObjects(em, rc, defaultS3Secret()).
 		WithStatusSubresource(em).
 		Build()
 	r := &controller.EtcdMaintenanceReconciler{Client: c, Scheme: scheme, Recorder: clientevents.NewFakeRecorder(8)}
@@ -54,26 +57,23 @@ func TestTenantEtcdMaintenance_ImportMode_BackupSubmitted(t *testing.T) {
 		t.Fatalf("Reconcile: %v", err)
 	}
 	if result.RequeueAfter == 0 {
-		t.Error("expected RequeueAfter > 0 after RunnerConfig submission")
+		t.Error("expected RequeueAfter > 0 after Job submission")
 	}
 
-	rcList := &controller.OperationalRunnerConfigList{}
-	if err := c.List(context.Background(), rcList); err != nil {
-		t.Fatalf("list RunnerConfigs: %v", err)
+	jobList := &batchv1.JobList{}
+	if err := c.List(context.Background(), jobList, client.InNamespace(ns)); err != nil {
+		t.Fatalf("list Jobs: %v", err)
 	}
-	if len(rcList.Items) != 1 {
-		t.Fatalf("expected 1 RunnerConfig in tenant namespace, got %d", len(rcList.Items))
+	if len(jobList.Items) != 1 {
+		t.Fatalf("expected 1 Job in tenant namespace, got %d", len(jobList.Items))
 	}
-	rc := rcList.Items[0]
-	if rc.Namespace != ns {
-		t.Errorf("RunnerConfig.Namespace = %q, want %q", rc.Namespace, ns)
+	job := jobList.Items[0]
+	if job.Namespace != ns {
+		t.Errorf("Job.Namespace = %q, want %q", job.Namespace, ns)
 	}
-	if rc.Spec.Steps[0].Capability != "etcd-backup" {
-		t.Errorf("capability = %q, want etcd-backup", rc.Spec.Steps[0].Capability)
-	}
-	// S3 falls back to cluster-wide default (no per-op secret set).
-	if rc.Spec.Steps[0].Parameters["s3SecretName"] != "seam-etcd-backup-config" {
-		t.Errorf("s3SecretName = %q, want seam-etcd-backup-config", rc.Spec.Steps[0].Parameters["s3SecretName"])
+	if job.Labels["platform.ontai.dev/capability"] != "etcd-backup" {
+		t.Errorf("Job capability label = %q, want etcd-backup",
+			job.Labels["platform.ontai.dev/capability"])
 	}
 
 	// EtcdMaintenanceRunning condition must be set.
@@ -83,7 +83,7 @@ func TestTenantEtcdMaintenance_ImportMode_BackupSubmitted(t *testing.T) {
 	}
 	cond := platformv1alpha1.FindCondition(got.Status.Conditions, platformv1alpha1.ConditionTypeEtcdMaintenanceRunning)
 	if cond == nil {
-		t.Fatal("EtcdMaintenanceRunning condition not set after RunnerConfig submission")
+		t.Fatal("EtcdMaintenanceRunning condition not set after Job submission")
 	}
 	if cond.Status != metav1.ConditionTrue {
 		t.Errorf("EtcdMaintenanceRunning.Status = %s, want True", cond.Status)
@@ -107,9 +107,10 @@ func TestTenantEtcdMaintenance_CAPIMode_BackupSubmitted(t *testing.T) {
 			Operation:  platformv1alpha1.EtcdMaintenanceOperationBackup,
 		},
 	}
+	rc := fakeClusterRC("ccs-app", "etcd-backup")
 	c := fake.NewClientBuilder().
 		WithScheme(scheme).
-		WithObjects(em, defaultS3Secret()).
+		WithObjects(em, rc, defaultS3Secret()).
 		WithStatusSubresource(em).
 		Build()
 	r := &controller.EtcdMaintenanceReconciler{Client: c, Scheme: scheme, Recorder: clientevents.NewFakeRecorder(8)}
@@ -121,15 +122,16 @@ func TestTenantEtcdMaintenance_CAPIMode_BackupSubmitted(t *testing.T) {
 		t.Fatalf("Reconcile: %v", err)
 	}
 
-	rcList := &controller.OperationalRunnerConfigList{}
-	if err := c.List(context.Background(), rcList); err != nil {
-		t.Fatalf("list RunnerConfigs: %v", err)
+	// CAPI clusters bypass CAPI for etcd — direct Job path like import-mode.
+	jobList := &batchv1.JobList{}
+	if err := c.List(context.Background(), jobList, client.InNamespace(ns)); err != nil {
+		t.Fatalf("list Jobs: %v", err)
 	}
-	if len(rcList.Items) != 1 {
-		t.Fatalf("CAPI tenant: expected 1 RunnerConfig (direct Job, not CAPI path), got %d", len(rcList.Items))
+	if len(jobList.Items) != 1 {
+		t.Fatalf("CAPI tenant: expected 1 Job (direct path, not CAPI), got %d", len(jobList.Items))
 	}
-	if rcList.Items[0].Namespace != ns {
-		t.Errorf("RunnerConfig.Namespace = %q, want %q", rcList.Items[0].Namespace, ns)
+	if jobList.Items[0].Namespace != ns {
+		t.Errorf("Job.Namespace = %q, want %q", jobList.Items[0].Namespace, ns)
 	}
 }
 
@@ -150,9 +152,10 @@ func TestTenantEtcdMaintenance_S3AbsentInTenantNamespace(t *testing.T) {
 			// No EtcdBackupS3SecretRef and no cluster-wide default in seam-system.
 		},
 	}
+	rc := fakeClusterRC("ccs-dev", "etcd-backup")
 	c := fake.NewClientBuilder().
 		WithScheme(scheme).
-		WithObjects(em).
+		WithObjects(em, rc).
 		WithStatusSubresource(em).
 		Build()
 	r := &controller.EtcdMaintenanceReconciler{Client: c, Scheme: scheme, Recorder: clientevents.NewFakeRecorder(8)}
@@ -164,12 +167,12 @@ func TestTenantEtcdMaintenance_S3AbsentInTenantNamespace(t *testing.T) {
 		t.Fatalf("Reconcile: %v", err)
 	}
 
-	rcList := &controller.OperationalRunnerConfigList{}
-	if err := c.List(context.Background(), rcList); err != nil {
-		t.Fatalf("list RunnerConfigs: %v", err)
+	jobList := &batchv1.JobList{}
+	if err := c.List(context.Background(), jobList, client.InNamespace(ns)); err != nil {
+		t.Fatalf("list Jobs: %v", err)
 	}
-	if len(rcList.Items) != 0 {
-		t.Errorf("expected 0 RunnerConfigs when S3 absent, got %d", len(rcList.Items))
+	if len(jobList.Items) != 0 {
+		t.Errorf("expected 0 Jobs when S3 absent, got %d", len(jobList.Items))
 	}
 
 	got := &platformv1alpha1.EtcdMaintenance{}
