@@ -91,15 +91,6 @@ func buildCAPITalosCluster(name string) *platformv1alpha1.TalosCluster {
 	}
 }
 
-// getUnstructured fetches an unstructured object from the fake client by GVK and name.
-func getUnstructured(t *testing.T, c interface {
-	Get(context.Context, types.NamespacedName, *unstructured.Unstructured) error
-}, gvk schema.GroupVersionKind, ns, name string) *unstructured.Unstructured {
-	t.Helper()
-	obj := &unstructured.Unstructured{}
-	obj.SetGroupVersionKind(gvk)
-	return obj
-}
 
 // ── Scenario 1: CAPI provision ───────────────────────────────────────────────
 
