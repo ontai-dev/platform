@@ -106,6 +106,18 @@ const finalizerTenantNamespaceCleanup = "platform.ontai.dev/tenant-namespace-cle
 // PLATFORM-BL-WRAPPER-RUNNER-RBAC-LIFECYCLE.
 const finalizerWrapperRunnerCRBCleanup = "platform.ontai.dev/wrapper-runner-crb-cleanup"
 
+// finalizerDecisionHCascade is placed on role=tenant TalosCluster objects.
+// Decision H mandates a fixed teardown order: wrapper components first
+// (PackExecutions, PackInstances), guardian components second (conductor-tenant
+// RBACProfile, allowedClusters removal, targetClusters removal), then existing
+// finalizers handle RunnerConfig, namespace, and CRB cleanup.
+//
+// mode=bootstrap: cluster is permanently decommissioned and infrastructure torn down.
+// mode=import: management relationship is severed only; the cluster continues to exist
+// but is no longer governed by ONT (a divorce, not a destruction).
+// Both share this management-cluster cleanup order. Decision H.
+const finalizerDecisionHCascade = "platform.ontai.dev/decision-h-cascade"
+
 // bootstrapRunnerConfigName returns the name of the RunnerConfig for a management
 // cluster bootstrap. The name is the cluster name exactly — Conductor resolves the
 // RunnerConfig by the value of its --cluster flag, which equals TalosCluster.Name.
@@ -1090,8 +1102,31 @@ func (r *TalosClusterReconciler) ensureWrapperRunnerCRBCleanupFinalizer(
 	return nil
 }
 
+// ensureDecisionHCascadeFinalizer adds finalizerDecisionHCascade to role=tenant
+// TalosCluster objects so the Decision H teardown order is enforced before the
+// existing finalizers handle RunnerConfig, namespace, and CRB cleanup. Decision H, T-24.
+func (r *TalosClusterReconciler) ensureDecisionHCascadeFinalizer(
+	ctx context.Context,
+	tc *platformv1alpha1.TalosCluster,
+) error {
+	if tc.Spec.Role != platformv1alpha1.TalosClusterRoleTenant {
+		return nil
+	}
+	if controllerutil.ContainsFinalizer(tc, finalizerDecisionHCascade) {
+		return nil
+	}
+	controllerutil.AddFinalizer(tc, finalizerDecisionHCascade)
+	if err := r.Client.Update(ctx, tc); err != nil {
+		return fmt.Errorf("ensureDecisionHCascadeFinalizer: add finalizer: %w", err)
+	}
+	return nil
+}
+
 // handleTalosClusterDeletion is called when tc.DeletionTimestamp is set. Handles
-// three finalizers:
+// four finalizers in order:
+//  0. finalizerDecisionHCascade (role=tenant only): Decision H ordered teardown.
+//     Deletes wrapper components (PackExecutions, PackInstances), then guardian
+//     components (conductor-tenant RBACProfile, allowedClusters, targetClusters).
 //  1. finalizerRunnerConfigCleanup (annotation-gated): deletes the RunnerConfig in
 //     ont-system and cluster Secrets from seam-system. Bug 3.
 //  2. finalizerTenantNamespaceCleanup (CAPI-enabled only): deletes the
@@ -1106,6 +1141,85 @@ func (r *TalosClusterReconciler) handleTalosClusterDeletion(
 	ctx context.Context,
 	tc *platformv1alpha1.TalosCluster,
 ) (ctrl.Result, error) {
+	// Step 0 — Decision H cascade (role=tenant only). Decision H, T-24.
+	// Wrapper components first, guardian components second. Both mode=bootstrap
+	// (cluster decommissioned) and mode=import (severance only) share this cleanup
+	// order on the management cluster. Decision H.
+	if controllerutil.ContainsFinalizer(tc, finalizerDecisionHCascade) {
+		tenantNS := "seam-tenant-" + tc.Name
+
+		// Step 0a — Delete all InfrastructurePackExecutions in seam-tenant-{name}.
+		peList := &unstructured.UnstructuredList{}
+		peList.SetGroupVersionKind(schema.GroupVersionKind{
+			Group:   packExecutionTenantGVK.Group,
+			Version: packExecutionTenantGVK.Version,
+			Kind:    packExecutionTenantGVK.Kind + "List",
+		})
+		if err := r.Client.List(ctx, peList, client.InNamespace(tenantNS)); err != nil && !apierrors.IsNotFound(err) {
+			return ctrl.Result{}, fmt.Errorf("handleTalosClusterDeletion: list PackExecutions in %s: %w", tenantNS, err)
+		}
+		for i := range peList.Items {
+			pe := &peList.Items[i]
+			if delErr := r.Client.Delete(ctx, pe); delErr != nil && !apierrors.IsNotFound(delErr) {
+				return ctrl.Result{}, fmt.Errorf("handleTalosClusterDeletion: delete PackExecution %s/%s: %w", tenantNS, pe.GetName(), delErr)
+			}
+		}
+
+		// Step 0b — Delete all InfrastructurePackInstances in seam-tenant-{name}.
+		piList := &unstructured.UnstructuredList{}
+		piList.SetGroupVersionKind(schema.GroupVersionKind{
+			Group:   packInstanceTenantGVK.Group,
+			Version: packInstanceTenantGVK.Version,
+			Kind:    packInstanceTenantGVK.Kind + "List",
+		})
+		if err := r.Client.List(ctx, piList, client.InNamespace(tenantNS)); err != nil && !apierrors.IsNotFound(err) {
+			return ctrl.Result{}, fmt.Errorf("handleTalosClusterDeletion: list PackInstances in %s: %w", tenantNS, err)
+		}
+		for i := range piList.Items {
+			pi := &piList.Items[i]
+			if delErr := r.Client.Delete(ctx, pi); delErr != nil && !apierrors.IsNotFound(delErr) {
+				return ctrl.Result{}, fmt.Errorf("handleTalosClusterDeletion: delete PackInstance %s/%s: %w", tenantNS, pi.GetName(), delErr)
+			}
+		}
+
+		// Step 0c — Delete conductor-tenant RBACProfile in seam-tenant-{name}.
+		rbacProfile := &unstructured.Unstructured{}
+		rbacProfile.SetGroupVersionKind(rbacProfileGVK)
+		err := r.Client.Get(ctx, types.NamespacedName{Name: "conductor-tenant", Namespace: tenantNS}, rbacProfile)
+		if err != nil && !apierrors.IsNotFound(err) {
+			return ctrl.Result{}, fmt.Errorf("handleTalosClusterDeletion: get conductor-tenant RBACProfile in %s: %w", tenantNS, err)
+		}
+		if err == nil {
+			if delErr := r.Client.Delete(ctx, rbacProfile); delErr != nil && !apierrors.IsNotFound(delErr) {
+				return ctrl.Result{}, fmt.Errorf("handleTalosClusterDeletion: delete conductor-tenant RBACProfile in %s: %w", tenantNS, delErr)
+			}
+		}
+
+		// Step 0d — Remove cluster from seam-platform-rbac-policy.spec.allowedClusters in ont-system.
+		if err := r.removeFromUnstructuredStringSlice(
+			ctx, rbacPolicyGVK, rbacPolicyNamespace, "seam-platform-rbac-policy",
+			[]string{"spec", "allowedClusters"}, tc.Name,
+		); err != nil {
+			return ctrl.Result{}, fmt.Errorf("handleTalosClusterDeletion: remove from rbac-policy allowedClusters: %w", err)
+		}
+
+		// Step 0e — Remove cluster from spec.targetClusters on the four platform-wide RBACProfile CRs in seam-system.
+		for _, profileName := range []string{"rbac-wrapper", "rbac-conductor", "rbac-platform", "rbac-seam-core"} {
+			if err := r.removeFromUnstructuredStringSlice(
+				ctx, rbacProfileGVK, rbacProfileNamespace, profileName,
+				[]string{"spec", "targetClusters"}, tc.Name,
+			); err != nil {
+				return ctrl.Result{}, fmt.Errorf("handleTalosClusterDeletion: remove from RBACProfile %s targetClusters: %w", profileName, err)
+			}
+		}
+
+		// Step 0f — Remove finalizer.
+		controllerutil.RemoveFinalizer(tc, finalizerDecisionHCascade)
+		if err := r.Client.Update(ctx, tc); err != nil {
+			return ctrl.Result{}, fmt.Errorf("handleTalosClusterDeletion: remove decision-h-cascade finalizer: %w", err)
+		}
+	}
+
 	// Step 1 — RunnerConfig and Secret cleanup (annotation-gated).
 	if controllerutil.ContainsFinalizer(tc, finalizerRunnerConfigCleanup) {
 		rc := &OperationalRunnerConfig{}
@@ -1249,6 +1363,60 @@ func (r *TalosClusterReconciler) appendToUnstructuredStringSlice(
 	return nil
 }
 
+// removeFromUnstructuredStringSlice reads the object identified by gvk/namespace/name,
+// extracts the string slice at the given field path, and removes value if present.
+// Patches via MergePatch. Returns nil on NotFound so callers remain non-fatal when
+// guardian resources are absent. Decision H (deletion cascade). T-24.
+func (r *TalosClusterReconciler) removeFromUnstructuredStringSlice(
+	ctx context.Context,
+	gvk schema.GroupVersionKind,
+	namespace, name string,
+	fieldPath []string,
+	value string,
+) error {
+	obj := &unstructured.Unstructured{}
+	obj.SetGroupVersionKind(gvk)
+	if err := r.Client.Get(ctx, types.NamespacedName{Name: name, Namespace: namespace}, obj); err != nil {
+		if apierrors.IsNotFound(err) {
+			return nil // non-fatal: guardian resource not present
+		}
+		return fmt.Errorf("removeFromUnstructuredStringSlice: get %s/%s: %w", namespace, name, err)
+	}
+
+	// Extract current slice and filter out value.
+	raw, _, _ := unstructured.NestedStringSlice(obj.Object, fieldPath...)
+	filtered := make([]string, 0, len(raw))
+	for _, v := range raw {
+		if v != value {
+			filtered = append(filtered, v)
+		}
+	}
+	if len(filtered) == len(raw) {
+		return nil // value was not present, nothing to patch
+	}
+
+	// Build a MergePatch that sets only the target field.
+	patch := map[string]interface{}{}
+	nested := patch
+	for i, key := range fieldPath {
+		if i == len(fieldPath)-1 {
+			nested[key] = filtered
+		} else {
+			child := map[string]interface{}{}
+			nested[key] = child
+			nested = child
+		}
+	}
+	data, err := json.Marshal(patch)
+	if err != nil {
+		return fmt.Errorf("removeFromUnstructuredStringSlice: marshal patch: %w", err)
+	}
+	if err := r.Client.Patch(ctx, obj, client.RawPatch(types.MergePatchType, data)); err != nil {
+		return fmt.Errorf("removeFromUnstructuredStringSlice: patch %s/%s: %w", namespace, name, err)
+	}
+	return nil
+}
+
 // ensureLocalQueue creates a Kueue LocalQueue in the given namespace pointing to
 // clusterQueueName if it does not already exist. Uses unstructured to avoid importing
 // Kueue types. Returns nil on AlreadyExists. PLATFORM-BL-3 step 3.
@@ -1287,6 +1455,22 @@ var rbacProfileGVK = schema.GroupVersionKind{
 	Group:   "security.ontai.dev",
 	Version: "v1alpha1",
 	Kind:    "RBACProfile",
+}
+
+// packExecutionTenantGVK is the GVK for InfrastructurePackExecution CRs in
+// the tenant namespace. Owned by seam-core. Decision G.
+var packExecutionTenantGVK = schema.GroupVersionKind{
+	Group:   "infrastructure.ontai.dev",
+	Version: "v1alpha1",
+	Kind:    "InfrastructurePackExecution",
+}
+
+// packInstanceTenantGVK is the GVK for InfrastructurePackInstance CRs in
+// the tenant namespace. Owned by seam-core. Decision G.
+var packInstanceTenantGVK = schema.GroupVersionKind{
+	Group:   "infrastructure.ontai.dev",
+	Version: "v1alpha1",
+	Kind:    "InfrastructurePackInstance",
 }
 
 // rbacPolicyNamespace is the namespace where the platform-wide RBACPolicy lives.
@@ -1460,7 +1644,7 @@ func (r *TalosClusterReconciler) ensureTenantExecutorResources(ctx context.Conte
 				},
 				{
 					APIGroups: []string{"platform.ontai.dev"},
-					Resources: []string{"etcdmaintenances", "nodemaintenances", "nodeoperations", "pkirotations"},
+					Resources: []string{"etcdmaintenances", "hardeningprofiles", "nodemaintenances", "nodeoperations", "pkirotations", "upgradepolicies"},
 					Verbs:     []string{"get", "list", "watch"},
 				},
 				{

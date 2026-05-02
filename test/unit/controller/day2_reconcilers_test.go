@@ -173,6 +173,11 @@ func TestEtcdMaintenanceReconcile_SubmitsJob(t *testing.T) {
 	}
 	defaultS3Secret := &corev1.Secret{
 		ObjectMeta: metav1.ObjectMeta{Name: "seam-etcd-backup-config", Namespace: "seam-system"},
+		Data: map[string][]byte{
+			"AWS_ACCESS_KEY_ID":     []byte("testkey"),
+			"AWS_SECRET_ACCESS_KEY": []byte("testsecret"),
+			"S3_REGION":             []byte("us-east-1"),
+		},
 	}
 	c := fake.NewClientBuilder().
 		WithScheme(scheme).
@@ -1521,6 +1526,11 @@ func TestEtcdMaintenanceReconcile_S3SecretRefSubmitsJob(t *testing.T) {
 	}
 	s3Secret := &corev1.Secret{
 		ObjectMeta: metav1.ObjectMeta{Name: "my-s3-config", Namespace: "seam-system"},
+		Data: map[string][]byte{
+			"AWS_ACCESS_KEY_ID":     []byte("testkey"),
+			"AWS_SECRET_ACCESS_KEY": []byte("testsecret"),
+			"S3_REGION":             []byte("us-east-1"),
+		},
 	}
 	c := fake.NewClientBuilder().
 		WithScheme(scheme).

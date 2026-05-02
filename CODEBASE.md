@@ -56,31 +56,79 @@ Talos goclient is permitted ONLY in `SeamInfrastructureClusterReconciler` and `S
 
 #### `taloscluster_helpers.go`
 
-`handleTalosClusterDeletion()` L1073 -- **current implementation**:
-- Step 1 (L1078): Delete RunnerConfig in `bootstrapRunnerConfigNamespace` + kubeconfig/talosconfig Secrets in `seam-tenant-{cluster}`. Gated by `finalizerRunnerConfigCleanup`.
-- Step 2 (L1121): Delete tenant namespace `seam-tenant-{cluster}`. Gated by `finalizerTenantNamespaceCleanup`. Comment: `PLATFORM-BL-TENANT-GC`.
+`handleTalosClusterDeletion()` -- **Decision H deletion cascade (T-24)**:
+- Step 0 (`finalizerDecisionHCascade`, role=tenant only): Decision H ordered teardown. Deletes all InfrastructurePackExecutions and InfrastructurePackInstances in `seam-tenant-{cluster}`, deletes `conductor-tenant` RBACProfile in `seam-tenant-{cluster}`, removes cluster from `seam-platform-rbac-policy.spec.allowedClusters`, removes cluster from `spec.targetClusters` on `rbac-wrapper`, `rbac-conductor`, `rbac-platform`, `rbac-seam-core` profiles in `seam-system`. mode=bootstrap: permanent decommission. mode=import: management severance only (cluster continues). Both share this cleanup order.
+- Step 1 (`finalizerRunnerConfigCleanup`, annotation-gated): Deletes RunnerConfig in `ont-system` + kubeconfig/talosconfig Secrets in `seam-tenant-{cluster}`.
+- Step 2 (`finalizerTenantNamespaceCleanup`, CAPI-only): Deletes tenant namespace `seam-tenant-{cluster}`.
+- Step 3 (`finalizerWrapperRunnerCRBCleanup`, role=tenant only): Deletes cluster-scoped wrapper-runner ClusterRoleBinding.
 
-**What is NOT covered** (Decision H order violation -- T-24 open): PackInstance deletion, PackExecution deletion, RBACProfile deletion, PermissionSet deletion, RBACPolicy deletion, PermissionSnapshot deletion. Decision H requires wrapper components first, guardian components second, TalosCluster CR last. Current implementation skips all of these.
+`finalizerDecisionHCascade = "platform.ontai.dev/decision-h-cascade"` -- added by `ensureDecisionHCascadeFinalizer()` for all role=tenant clusters. Added in Step C0 of Reconcile alongside the other finalizer-ensure calls. T-24.
 
-`ensureTenantOnboarding()` L1254 -- called on new tenant cluster registration:
-1. L1256: Append cluster to `seam-platform-rbac-policy` spec.allowedClusters via `appendToUnstructuredStringSlice()`.
-2. L1263: Append cluster to targetClusters for profiles: `rbac-wrapper`, `rbac-conductor`, `rbac-platform`, `rbac-seam-core`.
-3. L1274: Create LocalQueue `pack-deploy-queue` in tenant namespace for Kueue.
-4. L1279: Call `ensureExecutorTalosconfig()` -- copies talosconfig Secret to `ont-system` and `seam-tenant-{cluster}`.
-5. L1283: Call `ensureTenantExecutorResources()` -- creates executor SA/Role/RoleBinding for day-2 Jobs.
-6. L1292: Call `ensureWrapperRunnerResources()` L1469 -- creates wrapper-runner SA/Role/RoleBinding/ClusterRoleBinding for pack-deploy Jobs.
+`packExecutionTenantGVK`, `packInstanceTenantGVK` -- GVKs for InfrastructurePackExecution/PackInstance under infrastructure.ontai.dev/v1alpha1. Used in Decision H cascade.
 
-`ensureManagementOnboarding()` L1303 -- called for management cluster: appends "management" to rbac-policy allowedClusters, copies talosconfig, creates executor resources.
+`removeFromUnstructuredStringSlice()` -- mirror of `appendToUnstructuredStringSlice()` that removes a value from a string slice field via MergePatch. Returns nil on NotFound (non-fatal). Used in Decision H cascade for allowedClusters and targetClusters cleanup. T-24.
 
-`appendToUnstructuredStringSlice()` L1151 -- reads object via GVK/namespace/name, appends value to string slice field at fieldPath via MergePatch. Returns nil on NotFound (non-fatal for test environments).
+`ensureTenantOnboarding()` -- called on new tenant cluster registration:
+1. Append cluster to `seam-platform-rbac-policy` spec.allowedClusters via `appendToUnstructuredStringSlice()`.
+2. Append cluster to targetClusters for profiles: `rbac-wrapper`, `rbac-conductor`, `rbac-platform`, `rbac-seam-core`.
+3. Create LocalQueue `pack-deploy-queue` in tenant namespace for Kueue.
+4. Call `ensureExecutorTalosconfig()` -- copies talosconfig Secret to `ont-system` and `seam-tenant-{cluster}`.
+5. Call `ensureTenantExecutorResources()` -- creates executor SA/Role/RoleBinding for day-2 Jobs.
+6. Call `ensureWrapperRunnerResources()` -- creates wrapper-runner SA/Role/RoleBinding/ClusterRoleBinding for pack-deploy Jobs.
 
-`ensureWrapperRunnerResources()` L1469 -- creates `wrapper-runner-{cluster}` SA + `wrapper-runner` Role + `wrapper-runner-{cluster}` RoleBinding + `wrapper-runner-{cluster}` ClusterRoleBinding. **Not deleted on TalosCluster deletion** (PLATFORM-BL-WRAPPER-RUNNER-RBAC-LIFECYCLE open).
+`ensureManagementOnboarding()` -- called for management cluster: appends "management" to rbac-policy allowedClusters, copies talosconfig, creates executor resources.
+
+`appendToUnstructuredStringSlice()` -- reads object via GVK/namespace/name, appends value to string slice field at fieldPath via MergePatch. Returns nil on NotFound (non-fatal for test environments).
+
+`ensureWrapperRunnerResources()` -- creates `wrapper-runner-{cluster}` SA + `wrapper-runner` Role + `wrapper-runner-{cluster}` RoleBinding + `wrapper-runner-{cluster}` ClusterRoleBinding. Cleanup by `finalizerWrapperRunnerCRBCleanup`.
+
+`ensureTenantExecutorResources()` -- creates `platform-executor` SA/Role/RoleBinding in `seam-tenant-{cluster}`. The `platform-executor` Role grants access to all day-2 operation CRD groups including `platform.ontai.dev` resources: `etcdmaintenances`, `hardeningprofiles`, `nodemaintenances`, `nodeoperations`, `pkirotations`, `upgradepolicies`. The `upgradepolicies` resource is required for the `talos-upgrade` capability to list UpgradePolicy CRs and read the target version.
+
+#### `driftsignal_reconciler.go`
+
+`DriftSignalReconciler` -- new reconciler (T-23). Watches `DriftSignal` objects (seam-core typed). Dispatches on `spec.state=pending` by `affectedCRRef.Kind`:
+
+**`InfrastructureRunnerConfig` case:**
+1. Derives cluster name from namespace: `strings.TrimPrefix(req.Namespace, "seam-tenant-")`.
+2. Finds TalosCluster by name in `seam-system`.
+3. Annotates TalosCluster with `ontai.dev/runnerconfig-drift-requeue={timestamp}` to trigger reconciliation.
+4. Advances DriftSignal `spec.state` to `queued` via MergePatch.
+
+**`InfrastructureTalosCluster` case (T-23 Talos version drift, added session/17):**
+1. Parses `observedVersion` from `spec.driftReason` field `observedTalosVersion:{version}`.
+2. Patches `TalosCluster.status.observedTalosVersion` to `observedVersion`.
+3. Appends a synthetic out-of-band TCOR operation record: capability `talos-version-drift`, status Succeeded.
+4. Calls `bumpTCORRevision()` with the observed version (creates a new revision epoch anchored at the observed version).
+5. Calls `ensureCorrectiveUpgradePolicy()` -- creates `drift-version-{cluster}` UpgradePolicy in `seam-tenant-{cluster}` with `upgradeType=talos`, `targetTalosVersion=spec.talosVersion` (the declared desired state to restore).
+6. Advances DriftSignal `spec.state` to `queued`.
+
+`ensureCorrectiveUpgradePolicy()` is idempotent: no-op if UpgradePolicy already exists with the same target version. Registered in `cmd/platform/main.go`.
+
+Other kinds and non-pending states are no-ops. If TalosCluster not found, advances state to queued to avoid retry storms.
 
 #### `seaminfrastructuremachine_reconciler.go`
 
 `SeamInfrastructureMachineReconciler` -- the ONLY reconciler permitted talos goclient access outside `SeamInfrastructureClusterReconciler` (CP-INV-001). Delivers machineconfig to Talos node on port 50000 via `ApplyConfiguration`. Sets `status.ready=true` after node exits maintenance mode.
 
 `port50000RetryBase = 10 * time.Second` (L36). `port50000RetryCap` (L39) -- max retry interval.
+
+#### `pki_cert_helpers.go`
+
+Certificate expiry detection and PKI rotation triggering. platform-schema.md §13.
+
+`ParsePEMCertExpiry(pemData []byte) (*time.Time, error)` -- iterates PEM blocks, returns earliest NotAfter across all CERTIFICATE blocks. Exported for unit tests.
+
+`ParseKubeconfigCertExpiry(kubeconfigYAML []byte) (*time.Time, error)` -- parses kubeconfig via client-go clientcmd, iterates AuthInfos, returns earliest expiry from ClientCertificateData entries.
+
+`ParseTalosConfigCertExpiry(talosConfigYAML []byte) (*time.Time, error)` -- parses talosconfig YAML, reads active context crt field (base64-encoded PEM), returns cert expiry.
+
+`detectClusterPKIExpiry(ctx, c, clusterName)` -- reads both Secrets via readSecretAndParseExpiry, returns earliest expiry across both. Tolerates NotFound gracefully.
+
+`syncPKIExpiry(ctx, c, tc) (bool, error)` -- calls detectClusterPKIExpiry, writes result to tc.Status.PkiExpiryDate, returns rotationNeeded when expiry is within spec.pkiRotationThresholdDays (default 30 days).
+
+`ensureAutoRotationPKI(ctx, c, scheme, tc) error` -- creates PKIRotation CR named `{cluster}-pki-auto-{ts}` with label `pki-trigger=auto`. Idempotent: skips if an in-progress PKIRotation already exists for the cluster.
+
+`ensureAnnotationRotationPKI(ctx, c, scheme, tc) error` -- creates PKIRotation CR named `{cluster}-pki-manual-{ts}` with label `pki-trigger=manual`. Caller removes the annotation.
 
 #### `operational_job_base.go`
 
@@ -104,6 +152,18 @@ Talos goclient is permitted ONLY in `SeamInfrastructureClusterReconciler` and `S
 
 `buildNodeExclusions()` L307 -- builds list of node names to exclude from Job scheduling.
 
+#### `s3_env_secret.go`
+
+Cross-namespace S3 credential projection for executor Jobs. Source secret lives in `seam-system`; executor Job runs in `seam-tenant-{cluster}`. Direct `envFrom` across namespaces is not possible in Kubernetes, so this file manages a projected copy.
+
+`ensureS3EnvSecret(ctx, c, scheme, sourceName, sourceNS string, em) (string, error)` -- reads source secret, normalizes keys via `NormalizeS3SecretData`, creates/updates `{em.Name}-s3-env` Secret in `em.Namespace` with an ownerReference to `em`. Returns the projected secret name.
+
+`NormalizeS3SecretData(data map[string][]byte) (map[string][]byte, error)` (exported) -- accepts both provider key conventions and outputs canonical AWS SDK env var names. See platform-schema.md §10 for the full key contract.
+
+`appendS3EnvFrom(job *batchv1.Job, envSecretName string)` -- appends an `envFrom` entry for `envSecretName` to the first container of the Job's pod template. No-op when `envSecretName` is empty (non-backup operations).
+
+`resolveS3CredentialsForRestore(ctx, c, em) (string, string, bool, error)` -- resolves S3 credentials for restore: first checks `spec.s3SnapshotPath.credentialsSecretRef`, then falls back to `seam-etcd-backup-config` in `seam-system`.
+
 ---
 
 ## 3. Primary Data Flows
@@ -114,7 +174,9 @@ Talos goclient is permitted ONLY in `SeamInfrastructureClusterReconciler` and `S
 
 **Mode=import path**: `reconcileDirectBootstrap()` for import path imports existing kubeconfig (no machineconfig delivery). Cluster is governed but not bootstrapped by platform.
 
-**Day-2 op path (direct)**: Human creates day-2 CR (e.g., EtcdMaintenance) --> reconciler calls `getClusterRunnerConfig()` + `hasCapability()` --> builds Job spec via `jobSpec()` or `jobSpecWithExclusions()` --> submits Kueue Job --> polls `readOperationRecord()` --> updates CR status.
+**Day-2 op path (direct)**: Human creates day-2 CR (e.g., EtcdMaintenance) --> reconciler calls `getClusterRunnerConfig()` + `hasCapability()` --> for backup/restore operations: `resolveEtcdBackupS3Secret()` or `resolveS3CredentialsForRestore()` resolves the source Secret, then `ensureS3EnvSecret()` projects a normalized copy into `em.Namespace` -- if no S3 secret is found, `EtcdBackupDestinationAbsent` condition is set and reconcile stops --> builds Job spec via `jobSpec()` or `jobSpecWithExclusions()` --> `appendS3EnvFrom()` mounts the projected secret via `envFrom` --> submits Conductor executor Job --> polls `readOperationRecord()` --> updates CR status.
+
+**PKI rotation path**: `Reconcile()` Step F fires only for stable-Ready clusters (clusters that were Ready before this reconcile pass). Two triggers: (1) annotation `platform.ontai.dev/rotate-pki=true` calls `ensureAnnotationRotationPKI()` which creates a manual PKIRotation CR; annotation is cleared via Patch. (2) `syncPKIExpiry()` reads kubeconfig and talosconfig Secrets, parses X.509 cert expiry, writes `tc.Status.PkiExpiryDate`, and when expiry is within threshold calls `ensureAutoRotationPKI()`. Stable-Ready clusters requeue every 24h for daily expiry monitoring. platform-schema.md §13.
 
 ---
 
@@ -134,18 +196,13 @@ Talos goclient is permitted ONLY in `SeamInfrastructureClusterReconciler` and `S
 
 ---
 
-## 5. Open Items
-
-**T-24 (design session required)**: `handleTalosClusterDeletion()` L1073 only covers RunnerConfig + Secrets + namespace deletion. Decision H order not implemented: wrapper components (PackInstance, PackExecution) must be deleted first, then guardian components (RBACProfile, PermissionSet, RBACPolicy, PermissionSnapshot), then TalosCluster CR last. Mode=import vs mode=bootstrap distinction (divorce vs decommission) also absent.
-
-**PLATFORM-BL-WRAPPER-RUNNER-RBAC-LIFECYCLE**: `ensureWrapperRunnerResources()` L1469 creates `ClusterRoleBinding wrapper-runner-{cluster}` but `handleTalosClusterDeletion()` L1073 does not delete it. Required: delete `ClusterRoleBinding wrapper-runner-{cluster}` on TalosCluster deletion.
-
----
-
 ## 6. Test Contract
 
 | Package | Coverage |
 |---------|----------|
+| `internal/controller` | `taloscluster_helpers_test.go`: Decision H cascade (T-24) -- `TestHandleTalosClusterDeletion_DecisionHCascade_DeletesPackExecutions`, `TestHandleTalosClusterDeletion_DecisionHCascade_RemovesFromAllowedClusters`, `TestHandleTalosClusterDeletion_DecisionHCascade_NotTenant`. `removeFromUnstructuredStringSlice` round-trip. `driftsignal_reconciler_test.go`: `TestDriftSignalReconciler_RunnerConfigKind_RequeuesTalosCluster`, `TestDriftSignalReconciler_NonPending_NoOp`, `TestDriftSignalReconciler_UnknownKind_NoOp`, `TestDriftSignalReconciler_NotFound_NoOp` (T-23 RunnerConfig case); `TestDriftSignalReconciler_TalosVersionDrift_FullFlow` verifies observedTalosVersion patch + out-of-band TCOR record + TCOR revision bump + UpgradePolicy creation + DriftSignal state=queued; `TestDriftSignalReconciler_TalosVersionDrift_AlreadyQueued` no-op guard (T-23 Talos version drift case). |
 | `test/unit/controller` | TalosClusterReconciler (bootstrap, CAPI, import paths), handleTalosClusterDeletion, ensureTenantOnboarding, operational job base (jobSpec, hasCapability) |
-| `test/integration` | RunnerConfig generation |
-| `test/e2e` | Stub files; all skip when `MGMT_KUBECONFIG` absent; skip reasons reference backlog item IDs |
+| `test/unit/controller` (s3) | `NormalizeS3SecretData`: required-key validation, camelCase input, AWS SDK env var input, mixed keys, optional endpoint omission |
+| `test/unit/controller` (pki) | `ParsePEMCertExpiry`: single cert, multiple certs (earliest wins), empty input, non-cert PEM. `ParseKubeconfigCertExpiry`: valid embedded cert data, no cert data. `ParseTalosConfigCertExpiry`: valid crt field, missing crt, no active context. |
+| `test/integration/day2` | EtcdMaintenance reconciler (backup with S3, S3-absent condition, etcd defrag, restore path); verifies SSA status patch, Job creation with capability label, S3 projected secret creation via `ensureS3EnvSecret` |
+| `test/e2e` | Stub files; all skip when `MGMT_KUBECONFIG` absent; skip reasons reference backlog item IDs. PKI rotation automation stubs (pki_rotation_automation_test.go): annotation-triggered rotation, synthetic expiry injection, idempotency guard -- all unconditionally skip pending DAY2-OPS-TENANT closure. HardeningProfile live specs (hardeningprofile_e2e_test.go, 6 specs): `MGMT-HP-PROFILE`, `MGMT-HP-CLUSTER`, `MGMT-HP-NODE`, `TENANT-HP-PROFILE`, `TENANT-HP-CLUSTER`, `TENANT-HP-NODE`. PKI rotation live specs (pkirotation_e2e_test.go, 2 specs): `TENANT-PKI-ROTATE` (PKIRotation CR reaches Ready=True; kubeconfig Secrets refreshed), `TENANT-PKI-CLUSTER-REACH` (post-rotation ClusterPack probe proves cluster reachable). Both sets require `MGMT_KUBECONFIG`. `TENANT-HP-NODE` also requires `TENANT_WORKER_NODE`. Uses safe idempotent machineconfig patches (net.ipv4 sysctls). |

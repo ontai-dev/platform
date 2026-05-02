@@ -579,6 +579,39 @@ Conductor and the etcd-backup Job receive the resolved Secret reference via Runn
 They perform no S3 destination resolution themselves. A Conductor execute-mode Job that
 independently resolves an S3 destination is an invariant violation.
 
+**S3 secret key contract (admin responsibility):**
+
+The admin creates the S3 credentials Secret before any EtcdMaintenance CR is submitted.
+The Secret may use either of two key naming conventions; both are accepted and normalized
+by the Platform reconciler before the executor Job is created:
+
+| Provider style | Key name | Normalized to |
+|---|---|---|
+| MinIO / Scality (camelCase) | `accessKeyID` | `AWS_ACCESS_KEY_ID` |
+| MinIO / Scality (camelCase) | `secretAccessKey` | `AWS_SECRET_ACCESS_KEY` |
+| MinIO / Scality (camelCase) | `region` | `S3_REGION` |
+| MinIO / Scality (camelCase) | `endpoint` | `S3_ENDPOINT` (optional) |
+| AWS SDK env var | `AWS_ACCESS_KEY_ID` | `AWS_ACCESS_KEY_ID` |
+| AWS SDK env var | `AWS_SECRET_ACCESS_KEY` | `AWS_SECRET_ACCESS_KEY` |
+| AWS SDK env var | `S3_REGION` | `S3_REGION` |
+| AWS SDK env var | `S3_ENDPOINT` | `S3_ENDPOINT` (optional) |
+
+`accessKeyID`, `secretAccessKey`, and `region` (or their AWS SDK equivalents) are
+required. `endpoint` / `S3_ENDPOINT` is optional and must be omitted for native AWS S3.
+If any required key is absent, reconcile halts with `EtcdBackupDestinationAbsent`.
+
+**Cross-namespace secret projection:**
+
+The source Secret may reside in `seam-system` while the executor Job runs in
+`seam-tenant-{cluster}`. Kubernetes does not permit `envFrom` across namespaces.
+The reconciler reads the source Secret, normalizes its keys to the canonical AWS SDK
+env var names listed above, and writes a projected copy named `{em.Name}-s3-env`
+into `em.Namespace`. The projected Secret carries an ownerReference to the
+EtcdMaintenance CR and is garbage-collected automatically when the CR is deleted.
+The executor Job mounts the projected Secret via `envFrom` so the Conductor binary
+reads `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`, `S3_REGION`, and optionally
+`S3_ENDPOINT` from its environment.
+
 ---
 
 ## 11. Cross-Domain Rules
@@ -650,6 +683,42 @@ delivery sequence.
 
 ---
 
+## 13. PKI Rotation Contract
+
+**PKI rotation automation -- session/17, 2026-05-02.**
+
+Imported Talos clusters carry two sets of short-lived certificates stored in Secrets:
+- Admin kubeconfig (Kubernetes client cert, ~1 year TTL): `seam-mc-{cluster}-kubeconfig` in `seam-tenant-{cluster}`, key `value`.
+- Talosconfig client cert: `seam-mc-{cluster}-talosconfig` in `seam-tenant-{cluster}`, key `talosconfig`.
+
+When these expire, the platform operator and Conductor executor lose the ability to connect to the cluster.
+
+**Spec fields (InfrastructureTalosCluster, seam-core):**
+- `spec.pkiRotationThresholdDays` (int32, default 30, minimum 1): days before cert expiry to auto-trigger PKI rotation.
+
+**Status fields (InfrastructureTalosCluster, seam-core):**
+- `status.pkiExpiryDate` (*metav1.Time): earliest certificate expiry across both Secrets. Written by TalosCluster reconciler.
+
+**Triggers:**
+1. Annotation `platform.ontai.dev/rotate-pki=true` on InfrastructureTalosCluster: on-demand rotation. The reconciler creates a PKIRotation CR with label `pki-trigger=manual` in `seam-tenant-{cluster}`, then clears the annotation via Patch.
+2. Auto-rotation: when `status.pkiExpiryDate` is within `spec.pkiRotationThresholdDays` days of the current time, the reconciler creates a PKIRotation CR with label `pki-trigger=auto`. Idempotent: skips if a PKIRotation CR for this cluster already exists and is not yet complete or failed.
+
+**Reconcile loop integration:**
+PKI expiry check runs in Step F of `Reconcile()` only for stable-Ready clusters (clusters that had `Ready=True` before the current reconcile pass). Step F does NOT run during the first-pass Ready transition to avoid overriding the clean result returned by routing functions.
+
+Stable-Ready clusters are requeued every 24 hours for daily expiry monitoring.
+
+**Conductor execute-mode behavior (pkiRotateHandler):**
+After the staged machine config apply succeeds, `pkiRotateHandler.Execute()` calls `TalosClient.Kubeconfig()` to generate a fresh kubeconfig and writes it to both `seam-mc-{cluster}-kubeconfig` and `target-cluster-kubeconfig` in `seam-tenant-{cluster}` via the dynamic client. Kubeconfig refresh is best-effort: if it fails, the operation result is still `Succeeded` because the staged config apply is the critical step. The failure is recorded in the step results with a note.
+
+**Implementation files:**
+- `platform/internal/controller/pki_cert_helpers.go`: cert expiry detection, Secret reading, PKIRotation CR creation.
+- `conductor/internal/capability/platform_security.go`: `pkiRotateHandler.Execute()` with kubeconfig refresh.
+- `conductor/internal/capability/clients.go`: `TalosNodeClient.Kubeconfig()` interface method.
+- `conductor/internal/capability/adapters.go`: `TalosClientAdapter.Kubeconfig()` adapter.
+
+---
+
 *platform.ontai.dev schema - Platform*
 *Amendments:*
 *2026-03-30 - CAPI adopted for target cluster lifecycle. Seam Infrastructure Provider*
@@ -714,3 +783,12 @@ delivery sequence.
 *  For mode=import, Compiler bootstrap bundle includes seam-tenant-namespace.yaml so*
 *  the admin can apply Secrets and TalosCluster CR in a single kubectl apply run.*
 *  ensureTenantNamespace in the import reconcile path is idempotent safety net only.*
+
+*2026-05-02 - Section 10 extended: S3 secret key contract and cross-namespace projection*
+*  added. Admin creates seam-etcd-backup-config in seam-system before submitting any*
+*  EtcdMaintenance CR. Both provider key conventions accepted: MinIO/Scality camelCase*
+*  (accessKeyID, secretAccessKey, region, endpoint) and AWS SDK env var names*
+*  (AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY, S3_REGION, S3_ENDPOINT). Reconciler*
+*  normalizes to AWS SDK env var form and writes a projected secret {em.Name}-s3-env*
+*  in em.Namespace owned by the EtcdMaintenance CR. Executor Job mounts via envFrom.*
+*  s3_env_secret.go added to platform/internal/controller.*

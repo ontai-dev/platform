@@ -49,20 +49,33 @@ func buildDay2IntegrationScheme(t *testing.T) *runtime.Scheme {
 }
 
 // defaultS3Secret builds the cluster-wide default S3 Secret in seam-system.
-// Used to satisfy the S3 resolution hierarchy fallback. platform-schema.md §10.
+// Uses camelCase keys to exercise the MinIO/Scality provider normalization path.
+// platform-schema.md §10 S3 secret contract.
 func defaultS3Secret() *corev1.Secret {
 	return &corev1.Secret{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      "seam-etcd-backup-config",
 			Namespace: "seam-system",
 		},
+		Data: map[string][]byte{
+			"accessKeyID":     []byte("test-access-key"),
+			"secretAccessKey": []byte("test-secret-key"),
+			"region":          []byte("us-east-1"),
+			"endpoint":        []byte("http://minio.minio-system.svc:9000"),
+		},
 	}
 }
 
 // perOpS3Secret builds a per-operation S3 Secret for use as spec.etcdBackupS3SecretRef.
+// Uses AWS SDK env var key names to exercise the AWS-style normalization path.
 func perOpS3Secret(name, ns string) *corev1.Secret {
 	return &corev1.Secret{
 		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: ns},
+		Data: map[string][]byte{
+			"AWS_ACCESS_KEY_ID":     []byte("per-op-access-key"),
+			"AWS_SECRET_ACCESS_KEY": []byte("per-op-secret-key"),
+			"S3_REGION":             []byte("us-east-1"),
+		},
 	}
 }
 
