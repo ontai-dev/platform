@@ -153,7 +153,7 @@ func TestHandleTalosClusterDeletion_DecisionHCascade_DeletesPackExecutions(t *te
 	if err != nil {
 		t.Fatalf("handleTalosClusterDeletion: %v", err)
 	}
-	if result.Requeue || result.RequeueAfter != 0 {
+	if result.RequeueAfter != 0 {
 		t.Errorf("unexpected requeue: %+v", result)
 	}
 
@@ -287,7 +287,7 @@ func TestHandleTalosClusterDeletion_DecisionHCascade_NotTenant(t *testing.T) {
 	if err != nil {
 		t.Fatalf("handleTalosClusterDeletion on management cluster: %v", err)
 	}
-	if result.Requeue || result.RequeueAfter != 0 {
+	if result.RequeueAfter != 0 {
 		t.Errorf("unexpected requeue for management cluster deletion: %+v", result)
 	}
 }

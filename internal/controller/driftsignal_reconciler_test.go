@@ -130,7 +130,7 @@ func TestDriftSignalReconciler_RunnerConfigKind_RequeuesTalosCluster(t *testing.
 	if err != nil {
 		t.Fatalf("Reconcile: %v", err)
 	}
-	if result.Requeue || result.RequeueAfter != 0 {
+	if result.RequeueAfter != 0 {
 		t.Errorf("unexpected requeue result: %+v", result)
 	}
 
@@ -237,7 +237,7 @@ func TestDriftSignalReconciler_NotFound_NoOp(t *testing.T) {
 	if err != nil {
 		t.Errorf("expected nil error for NotFound DriftSignal, got: %v", err)
 	}
-	if result.Requeue || result.RequeueAfter != 0 {
+	if result.RequeueAfter != 0 {
 		t.Errorf("unexpected requeue: %+v", result)
 	}
 }

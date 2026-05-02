@@ -10,7 +10,6 @@ package day2_e2e_test
 
 import (
 	"context"
-	"fmt"
 	"os"
 	"time"
 
@@ -170,7 +169,6 @@ var _ = Describe("PKIRotation automation", func() {
 			// This test verifies the idempotency guard in ensureAutoRotationPKI.
 			// Create a manual PKIRotation CR without Ready condition, inject expiry,
 			// reconcile twice, and verify no second CR is created.
-			Expect(fmt.Sprintf("BACKLOG-PKI-001")).NotTo(BeNil()) // suppress unused import warning
 			Skip("requires management cluster access and BACKLOG-PKI-001 closed")
 		})
 	})

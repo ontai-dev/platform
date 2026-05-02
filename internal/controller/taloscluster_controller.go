@@ -261,7 +261,7 @@ func (r *TalosClusterReconciler) Reconcile(ctx context.Context, req ctrl.Request
 
 		// Schedule daily expiry monitoring so the reconciler checks PKI expiry
 		// even when no other spec or status changes trigger a reconcile.
-		if routeResult.RequeueAfter == 0 && !routeResult.Requeue {
+		if routeResult.RequeueAfter == 0 {
 			return ctrl.Result{RequeueAfter: 24 * time.Hour}, nil
 		}
 	}
