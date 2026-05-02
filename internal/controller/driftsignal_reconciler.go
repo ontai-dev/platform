@@ -149,6 +149,15 @@ func (r *DriftSignalReconciler) handleTalosVersionDrift(ctx context.Context, log
 	}
 	log.Info("TCOR revision bumped to observed Talos version", "cluster", clusterName, "version", observedVersion)
 
+	// 4. Create a corrective UpgradePolicy to bring the cluster back to spec.talosVersion.
+	// The talos-upgrade capability reads the UpgradePolicy from seam-tenant-{cluster} and
+	// drives the Talos OS version change via the management-side executor Job. This enforces
+	// the declared desired state: spec.talosVersion is the truth; out-of-band changes are reverted.
+	if err := r.ensureCorrectiveUpgradePolicy(ctx, clusterName, tc.Spec.TalosVersion); err != nil {
+		return ctrl.Result{}, fmt.Errorf("DriftSignalReconciler: ensure corrective UpgradePolicy %s: %w", clusterName, err)
+	}
+	log.Info("corrective UpgradePolicy ensured", "cluster", clusterName, "targetVersion", tc.Spec.TalosVersion)
+
 	return ctrl.Result{}, r.advanceDriftSignalToQueued(ctx, ds)
 }
 
@@ -224,6 +233,33 @@ func (r *DriftSignalReconciler) advanceDriftSignalToQueued(ctx context.Context, 
 	); err != nil {
 		return fmt.Errorf("advanceDriftSignalToQueued: patch DriftSignal %s/%s: %w",
 			ds.Namespace, ds.Name, err)
+	}
+	return nil
+}
+
+// ensureCorrectiveUpgradePolicy creates a UpgradePolicy in seam-tenant-{cluster} to bring
+// the cluster back to specVersion (the declared desired state in TalosCluster.spec.talosVersion).
+// Idempotent: create is skipped if the UpgradePolicy already exists.
+// The UpgradePolicyReconciler picks it up and submits a talos-upgrade executor Job on the
+// management cluster that drives the Talos OS version correction via the cluster talosconfig.
+func (r *DriftSignalReconciler) ensureCorrectiveUpgradePolicy(ctx context.Context, clusterName, specVersion string) error {
+	ns := tenantNS(clusterName)
+	up := &platformv1alpha1.UpgradePolicy{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "drift-version-" + clusterName,
+			Namespace: ns,
+		},
+		Spec: platformv1alpha1.UpgradePolicySpec{
+			ClusterRef: platformv1alpha1.LocalObjectRef{
+				Name:      clusterName,
+				Namespace: rbacProfileNamespace, // seam-system -- where TalosCluster lives
+			},
+			UpgradeType:        platformv1alpha1.UpgradeTypeTalos,
+			TargetTalosVersion: specVersion,
+		},
+	}
+	if err := r.Client.Create(ctx, up); err != nil && !apierrors.IsAlreadyExists(err) {
+		return fmt.Errorf("create UpgradePolicy drift-version-%s: %w", clusterName, err)
 	}
 	return nil
 }

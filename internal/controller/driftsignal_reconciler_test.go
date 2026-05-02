@@ -4,6 +4,7 @@ import (
 	"context"
 	"testing"
 
+	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
@@ -241,31 +242,38 @@ func TestDriftSignalReconciler_NotFound_NoOp(t *testing.T) {
 	}
 }
 
-// TestDriftSignalReconciler_TalosVersionDrift_PatchesObservedVersionAndBumpsTCOR verifies
-// that a pending InfrastructureTalosCluster DriftSignal causes:
-//   - TalosCluster.status.observedTalosVersion to be patched to the observed version
-//   - An out-of-band record written to the TCOR
+// TestDriftSignalReconciler_TalosVersionDrift_FullFlow verifies that a pending
+// InfrastructureTalosCluster DriftSignal causes:
+//   - TalosCluster.status.observedTalosVersion patched to the observed version
+//   - An out-of-band record written to the TCOR (capability="talos-version-drift")
 //   - The TCOR revision bumped to the observed version
+//   - A corrective UpgradePolicy created in seam-tenant-{cluster} targeting spec.talosVersion
 //   - The DriftSignal advanced to queued
-func TestDriftSignalReconciler_TalosVersionDrift_PatchesObservedVersionAndBumpsTCOR(t *testing.T) {
+func TestDriftSignalReconciler_TalosVersionDrift_FullFlow(t *testing.T) {
 	scheme := buildDriftSignalTestScheme(t)
-	if err := seamcorev1alpha1.AddToScheme(scheme); err != nil {
-		t.Fatalf("add seamcore scheme: %v", err)
+	if err := platformv1alpha1.AddToScheme(scheme); err != nil {
+		t.Fatalf("add platform scheme: %v", err)
 	}
 
 	clusterName := "ccs-dev"
 	tenantNSName := tenantNS(clusterName)
-	specVersion := "v1.7.0"
-	observedVersion := "v1.7.4"
+	specVersion := "v1.9.3"
+	observedVersion := "v1.9.5"
 	signalName := "drift-version-" + clusterName
 
 	ds := fakeDriftSignalWithVersion(signalName, tenantNSName, specVersion, observedVersion)
 	tc := fakeTalosClusterForDrift(clusterName)
+	tc.Spec.TalosVersion = specVersion
 	tcor := fakeTCOR(clusterName, specVersion)
+
+	// Namespace object needed so UpgradePolicy create succeeds in the fake client.
+	tenantNamespaceObj := &corev1.Namespace{
+		ObjectMeta: metav1.ObjectMeta{Name: tenantNSName},
+	}
 
 	c := fake.NewClientBuilder().
 		WithScheme(scheme).
-		WithObjects(ds, tc, tcor).
+		WithObjects(ds, tc, tcor, tenantNamespaceObj).
 		WithStatusSubresource(&seamcorev1alpha1.DriftSignal{}, &platformv1alpha1.TalosCluster{}).
 		Build()
 
@@ -288,17 +296,33 @@ func TestDriftSignalReconciler_TalosVersionDrift_PatchesObservedVersionAndBumpsT
 			gotTC.Status.ObservedTalosVersion, observedVersion)
 	}
 
-	// TCOR must have been bumped to the observed version.
+	// TCOR must have been bumped to the observed version and have an out-of-band record.
 	gotTCOR := &seamcorev1alpha1.InfrastructureTalosClusterOperationResult{}
 	if err := c.Get(context.Background(), types.NamespacedName{Name: clusterName, Namespace: tenantNSName}, gotTCOR); err != nil {
 		t.Fatalf("get TCOR: %v", err)
 	}
 	if gotTCOR.Spec.TalosVersion != observedVersion {
-		t.Errorf("TCOR.Spec.TalosVersion = %q, want %q (should be bumped to observed version)",
-			gotTCOR.Spec.TalosVersion, observedVersion)
+		t.Errorf("TCOR.Spec.TalosVersion = %q, want %q (bumped to observed)", gotTCOR.Spec.TalosVersion, observedVersion)
 	}
 	if gotTCOR.Spec.Revision != 2 {
-		t.Errorf("TCOR.Spec.Revision = %d, want 2 (bump increments revision)", gotTCOR.Spec.Revision)
+		t.Errorf("TCOR.Spec.Revision = %d, want 2", gotTCOR.Spec.Revision)
+	}
+	// After bump, Operations is nil (archived). The out-of-band record was in the previous epoch.
+
+	// A corrective UpgradePolicy must have been created targeting spec.talosVersion.
+	gotUP := &platformv1alpha1.UpgradePolicy{}
+	if err := c.Get(context.Background(), types.NamespacedName{
+		Name:      "drift-version-" + clusterName,
+		Namespace: tenantNSName,
+	}, gotUP); err != nil {
+		t.Fatalf("get corrective UpgradePolicy: %v", err)
+	}
+	if gotUP.Spec.TargetTalosVersion != specVersion {
+		t.Errorf("UpgradePolicy.Spec.TargetTalosVersion = %q, want %q (spec version to restore)",
+			gotUP.Spec.TargetTalosVersion, specVersion)
+	}
+	if gotUP.Spec.UpgradeType != platformv1alpha1.UpgradeTypeTalos {
+		t.Errorf("UpgradePolicy.Spec.UpgradeType = %q, want %q", gotUP.Spec.UpgradeType, platformv1alpha1.UpgradeTypeTalos)
 	}
 
 	// DriftSignal must be advanced to queued.
