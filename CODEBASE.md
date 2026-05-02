@@ -104,6 +104,18 @@ Talos goclient is permitted ONLY in `SeamInfrastructureClusterReconciler` and `S
 
 `buildNodeExclusions()` L307 -- builds list of node names to exclude from Job scheduling.
 
+#### `s3_env_secret.go`
+
+Cross-namespace S3 credential projection for executor Jobs. Source secret lives in `seam-system`; executor Job runs in `seam-tenant-{cluster}`. Direct `envFrom` across namespaces is not possible in Kubernetes, so this file manages a projected copy.
+
+`ensureS3EnvSecret(ctx, c, scheme, sourceName, sourceNS string, em) (string, error)` -- reads source secret, normalizes keys via `NormalizeS3SecretData`, creates/updates `{em.Name}-s3-env` Secret in `em.Namespace` with an ownerReference to `em`. Returns the projected secret name.
+
+`NormalizeS3SecretData(data map[string][]byte) (map[string][]byte, error)` (exported) -- accepts both provider key conventions and outputs canonical AWS SDK env var names. See platform-schema.md §10 for the full key contract.
+
+`appendS3EnvFrom(job *batchv1.Job, envSecretName string)` -- appends an `envFrom` entry for `envSecretName` to the first container of the Job's pod template. No-op when `envSecretName` is empty (non-backup operations).
+
+`resolveS3CredentialsForRestore(ctx, c, em) (string, string, bool, error)` -- resolves S3 credentials for restore: first checks `spec.s3SnapshotPath.credentialsSecretRef`, then falls back to `seam-etcd-backup-config` in `seam-system`.
+
 ---
 
 ## 3. Primary Data Flows
@@ -114,7 +126,7 @@ Talos goclient is permitted ONLY in `SeamInfrastructureClusterReconciler` and `S
 
 **Mode=import path**: `reconcileDirectBootstrap()` for import path imports existing kubeconfig (no machineconfig delivery). Cluster is governed but not bootstrapped by platform.
 
-**Day-2 op path (direct)**: Human creates day-2 CR (e.g., EtcdMaintenance) --> reconciler calls `getClusterRunnerConfig()` + `hasCapability()` --> builds Job spec via `jobSpec()` or `jobSpecWithExclusions()` --> submits Kueue Job --> polls `readOperationRecord()` --> updates CR status.
+**Day-2 op path (direct)**: Human creates day-2 CR (e.g., EtcdMaintenance) --> reconciler calls `getClusterRunnerConfig()` + `hasCapability()` --> for backup/restore operations: `resolveEtcdBackupS3Secret()` or `resolveS3CredentialsForRestore()` resolves the source Secret, then `ensureS3EnvSecret()` projects a normalized copy into `em.Namespace` -- if no S3 secret is found, `EtcdBackupDestinationAbsent` condition is set and reconcile stops --> builds Job spec via `jobSpec()` or `jobSpecWithExclusions()` --> `appendS3EnvFrom()` mounts the projected secret via `envFrom` --> submits Conductor executor Job --> polls `readOperationRecord()` --> updates CR status.
 
 ---
 
@@ -147,5 +159,6 @@ Talos goclient is permitted ONLY in `SeamInfrastructureClusterReconciler` and `S
 | Package | Coverage |
 |---------|----------|
 | `test/unit/controller` | TalosClusterReconciler (bootstrap, CAPI, import paths), handleTalosClusterDeletion, ensureTenantOnboarding, operational job base (jobSpec, hasCapability) |
-| `test/integration` | RunnerConfig generation |
+| `test/unit/controller` (s3) | `NormalizeS3SecretData`: required-key validation, camelCase input, AWS SDK env var input, mixed keys, optional endpoint omission |
+| `test/integration/day2` | EtcdMaintenance reconciler (backup with S3, S3-absent condition, etcd defrag, restore path); verifies SSA status patch, Job creation with capability label, S3 projected secret creation via `ensureS3EnvSecret` |
 | `test/e2e` | Stub files; all skip when `MGMT_KUBECONFIG` absent; skip reasons reference backlog item IDs |

@@ -61,6 +61,12 @@ func TestEtcdMaintenance_Integration_BackupWithS3(t *testing.T) {
 
 	defaultS3Secret := &corev1.Secret{
 		ObjectMeta: metav1.ObjectMeta{Name: "seam-etcd-backup-config", Namespace: "seam-system"},
+		Data: map[string][]byte{
+			"accessKeyID":     []byte("test-access-key"),
+			"secretAccessKey": []byte("test-secret-key"),
+			"region":          []byte("us-east-1"),
+			"endpoint":        []byte("http://minio.minio-system.svc:9000"),
+		},
 	}
 	if err := testClient.Create(ctx, defaultS3Secret); err != nil {
 		_ = err // may already exist from prior run

@@ -159,12 +159,14 @@ func (r *EtcdMaintenanceReconciler) Reconcile(ctx context.Context, req ctrl.Requ
 	}
 
 	if existingJob == nil {
-		// For backup operations: resolve S3 destination before submitting.
-		// platform-schema.md §10 S3 resolution hierarchy. The resolved secret
-		// reference is validated here so the platform sets the correct condition;
-		// the Conductor capability implementation reads the Secret at execution time.
+		// For backup operations: resolve and project S3 credentials.
+		// platform-schema.md §10 S3 resolution hierarchy and secret contract.
+		// The projected secret (em.Name + "-s3-env") is mounted via envFrom so the
+		// Conductor executor binary finds AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY,
+		// S3_REGION, and (optionally) S3_ENDPOINT from the environment.
+		var s3EnvSecretName string
 		if em.Spec.Operation == platformv1alpha1.EtcdMaintenanceOperationBackup {
-			_, _, found, sErr := resolveEtcdBackupS3Secret(ctx, r.Client, em)
+			s3Name, s3NS, found, sErr := resolveEtcdBackupS3Secret(ctx, r.Client, em)
 			if sErr != nil {
 				return ctrl.Result{}, fmt.Errorf("EtcdMaintenanceReconciler: resolve S3 secret: %w", sErr)
 			}
@@ -191,6 +193,27 @@ func (r *EtcdMaintenanceReconciler) Reconcile(ctx context.Context, req ctrl.Requ
 						"EtcdMaintenance %s/%s: no S3 backup destination configured", em.Namespace, em.Name)
 					return ctrl.Result{}, nil
 				}
+			} else {
+				// Project credentials into job namespace so the executor pod can read them.
+				projName, projErr := ensureS3EnvSecret(ctx, r.Client, r.Scheme, s3Name, s3NS, em)
+				if projErr != nil {
+					return ctrl.Result{}, fmt.Errorf("EtcdMaintenanceReconciler: project S3 env secret: %w", projErr)
+				}
+				s3EnvSecretName = projName
+			}
+		}
+
+		if em.Spec.Operation == platformv1alpha1.EtcdMaintenanceOperationRestore {
+			s3Name, s3NS, found, sErr := resolveS3CredentialsForRestore(ctx, r.Client, em)
+			if sErr != nil {
+				return ctrl.Result{}, fmt.Errorf("EtcdMaintenanceReconciler: resolve restore S3 secret: %w", sErr)
+			}
+			if found {
+				projName, projErr := ensureS3EnvSecret(ctx, r.Client, r.Scheme, s3Name, s3NS, em)
+				if projErr != nil {
+					return ctrl.Result{}, fmt.Errorf("EtcdMaintenanceReconciler: project restore S3 env secret: %w", projErr)
+				}
+				s3EnvSecretName = projName
 			}
 		}
 
@@ -203,6 +226,7 @@ func (r *EtcdMaintenanceReconciler) Reconcile(ctx context.Context, req ctrl.Requ
 		nodeExclusions := buildNodeExclusions(em.Spec.TargetNodes, leaderNode)
 
 		job := jobSpecWithExclusions(jobName, em.Namespace, em.Spec.ClusterRef.Name, capability, nodeExclusions, clusterRC.Spec.RunnerImage)
+		appendS3EnvFrom(job, s3EnvSecretName)
 		if err := controllerutil.SetControllerReference(em, job, r.Scheme); err != nil {
 			return ctrl.Result{}, fmt.Errorf("EtcdMaintenanceReconciler: set owner reference: %w", err)
 		}

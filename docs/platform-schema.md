@@ -579,6 +579,39 @@ Conductor and the etcd-backup Job receive the resolved Secret reference via Runn
 They perform no S3 destination resolution themselves. A Conductor execute-mode Job that
 independently resolves an S3 destination is an invariant violation.
 
+**S3 secret key contract (admin responsibility):**
+
+The admin creates the S3 credentials Secret before any EtcdMaintenance CR is submitted.
+The Secret may use either of two key naming conventions; both are accepted and normalized
+by the Platform reconciler before the executor Job is created:
+
+| Provider style | Key name | Normalized to |
+|---|---|---|
+| MinIO / Scality (camelCase) | `accessKeyID` | `AWS_ACCESS_KEY_ID` |
+| MinIO / Scality (camelCase) | `secretAccessKey` | `AWS_SECRET_ACCESS_KEY` |
+| MinIO / Scality (camelCase) | `region` | `S3_REGION` |
+| MinIO / Scality (camelCase) | `endpoint` | `S3_ENDPOINT` (optional) |
+| AWS SDK env var | `AWS_ACCESS_KEY_ID` | `AWS_ACCESS_KEY_ID` |
+| AWS SDK env var | `AWS_SECRET_ACCESS_KEY` | `AWS_SECRET_ACCESS_KEY` |
+| AWS SDK env var | `S3_REGION` | `S3_REGION` |
+| AWS SDK env var | `S3_ENDPOINT` | `S3_ENDPOINT` (optional) |
+
+`accessKeyID`, `secretAccessKey`, and `region` (or their AWS SDK equivalents) are
+required. `endpoint` / `S3_ENDPOINT` is optional and must be omitted for native AWS S3.
+If any required key is absent, reconcile halts with `EtcdBackupDestinationAbsent`.
+
+**Cross-namespace secret projection:**
+
+The source Secret may reside in `seam-system` while the executor Job runs in
+`seam-tenant-{cluster}`. Kubernetes does not permit `envFrom` across namespaces.
+The reconciler reads the source Secret, normalizes its keys to the canonical AWS SDK
+env var names listed above, and writes a projected copy named `{em.Name}-s3-env`
+into `em.Namespace`. The projected Secret carries an ownerReference to the
+EtcdMaintenance CR and is garbage-collected automatically when the CR is deleted.
+The executor Job mounts the projected Secret via `envFrom` so the Conductor binary
+reads `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`, `S3_REGION`, and optionally
+`S3_ENDPOINT` from its environment.
+
 ---
 
 ## 11. Cross-Domain Rules
@@ -714,3 +747,12 @@ delivery sequence.
 *  For mode=import, Compiler bootstrap bundle includes seam-tenant-namespace.yaml so*
 *  the admin can apply Secrets and TalosCluster CR in a single kubectl apply run.*
 *  ensureTenantNamespace in the import reconcile path is idempotent safety net only.*
+
+*2026-05-02 - Section 10 extended: S3 secret key contract and cross-namespace projection*
+*  added. Admin creates seam-etcd-backup-config in seam-system before submitting any*
+*  EtcdMaintenance CR. Both provider key conventions accepted: MinIO/Scality camelCase*
+*  (accessKeyID, secretAccessKey, region, endpoint) and AWS SDK env var names*
+*  (AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY, S3_REGION, S3_ENDPOINT). Reconciler*
+*  normalizes to AWS SDK env var form and writes a projected secret {em.Name}-s3-env*
+*  in em.Namespace owned by the EtcdMaintenance CR. Executor Job mounts via envFrom.*
+*  s3_env_secret.go added to platform/internal/controller.*
