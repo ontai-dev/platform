@@ -148,6 +148,12 @@ func (r *TalosClusterReconciler) Reconcile(ctx context.Context, req ctrl.Request
 	if err := r.ensureWrapperRunnerCRBCleanupFinalizer(ctx, tc); err != nil {
 		return ctrl.Result{}, fmt.Errorf("reconcile: ensure wrapper-runner-crb finalizer: %w", err)
 	}
+	// Decision H cascade finalizer (role=tenant only). Enforces wrapper-first,
+	// guardian-second teardown order before RunnerConfig, namespace, and CRB cleanup.
+	// Decision H, T-24.
+	if err := r.ensureDecisionHCascadeFinalizer(ctx, tc); err != nil {
+		return ctrl.Result{}, fmt.Errorf("reconcile: ensure decision-h-cascade finalizer: %w", err)
+	}
 
 	// Step C — Advance ObservedGeneration.
 	tc.Status.ObservedGeneration = tc.Generation

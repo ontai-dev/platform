@@ -201,6 +201,15 @@ func main() {
 		os.Exit(1)
 	}
 
+	// DriftSignalReconciler handles RunnerConfig-missing DriftSignals from conductor
+	// and requeues the owning TalosCluster for reconciliation. T-23.
+	if err := (&controller.DriftSignalReconciler{
+		Client: mgr.GetClient(),
+	}).SetupWithManager(mgr); err != nil {
+		setupLog.Error(err, "unable to create controller", "controller", "DriftSignal")
+		os.Exit(1)
+	}
+
 	if err := mgr.AddHealthzCheck("healthz", healthz.Ping); err != nil {
 		setupLog.Error(err, "unable to set up health check")
 		os.Exit(1)
