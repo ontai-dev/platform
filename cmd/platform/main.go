@@ -220,6 +220,32 @@ func main() {
 		os.Exit(1)
 	}
 
+	if err := (&controller.MachineConfigRestoreReconciler{
+		Client:    mgr.GetClient(),
+		APIReader: mgr.GetAPIReader(),
+		Scheme:    mgr.GetScheme(),
+		Recorder:  mgr.GetEventRecorder("machineconfigrestore-controller"),
+	}).SetupWithManager(mgr); err != nil {
+		setupLog.Error(err, "unable to create controller", "controller", "MachineConfigRestore")
+		os.Exit(1)
+	}
+
+	if err := (&controller.MachineConfigBackupScheduleReconciler{
+		Client: mgr.GetClient(),
+		Scheme: mgr.GetScheme(),
+	}).SetupWithManager(mgr); err != nil {
+		setupLog.Error(err, "unable to create controller", "controller", "MachineConfigBackupSchedule")
+		os.Exit(1)
+	}
+
+	if err := (&controller.EtcdBackupScheduleReconciler{
+		Client: mgr.GetClient(),
+		Scheme: mgr.GetScheme(),
+	}).SetupWithManager(mgr); err != nil {
+		setupLog.Error(err, "unable to create controller", "controller", "EtcdBackupSchedule")
+		os.Exit(1)
+	}
+
 	if err := mgr.AddHealthzCheck("healthz", healthz.Ping); err != nil {
 		setupLog.Error(err, "unable to set up health check")
 		os.Exit(1)
