@@ -759,17 +759,10 @@ func (r *TalosClusterReconciler) EnsureRemoteConductorBootstrap(
 
 	tenantNS := "seam-tenant-" + tc.Name
 
-	// Determine kubeconfig Secret name from cluster mode.
-	// - Import clusters: kubeconfig is at tenantKubeconfigSecretName ("target-cluster-kubeconfig"),
-	//   written by ensureTenantKubeconfigCopy. platform-schema.md §12.
-	// - CAPI clusters: kubeconfig is at "{cluster-name}-kubeconfig", written by CAPI after
-	//   the cluster reaches Running state.
-	var kubeSecretName string
-	if tc.Spec.Mode == platformv1alpha1.TalosClusterModeImport {
-		kubeSecretName = tenantKubeconfigSecretName
-	} else {
-		kubeSecretName = tc.Name + "-kubeconfig"
-	}
+	// Both import and CAPI clusters: kubeconfig is at seam-mc-{cluster}-kubeconfig in
+	// seam-tenant-{cluster}. Import path writes it via ensureKubeconfigSecret.
+	// CAPI path writes it via ensureCAPIKubeconfig after the cluster reaches Running.
+	kubeSecretName := kubeconfigSecretName(tc.Name)
 
 	// Get the kubeconfig Secret for the target cluster.
 	kubeconfigSecret := &corev1.Secret{}
@@ -1573,8 +1566,11 @@ func (r *TalosClusterReconciler) ensureExecutorTalosconfig(ctx context.Context, 
 		return fmt.Errorf("ensureExecutorTalosconfig: get source Secret %s/%s: %w", srcNS, srcName, err)
 	}
 
-	// Copy to ont-system (Conductor agent Jobs) and to seam-tenant-{cluster} (day-2 executor Jobs).
-	for _, dstNS := range []string{bootstrapRunnerConfigNamespace, "seam-tenant-" + tc.Name} {
+	// Copy to seam-tenant-{cluster} (day-2 executor Jobs). The Job namespace is always
+	// seam-tenant-{clusterName}; operational_job_base.go mounts from the Job namespace.
+	// ont-system is NOT a destination: the conductor agent Deployment reads its talosconfig
+	// via TALOSCONFIG_PATH from the enable bundle manifest, not via this copy.
+	for _, dstNS := range []string{"seam-tenant-" + tc.Name} {
 		dst := &corev1.Secret{}
 		if err := r.Client.Get(ctx, types.NamespacedName{Name: dstName, Namespace: dstNS}, dst); err == nil {
 			continue // already exists
@@ -1807,5 +1803,85 @@ func (r *TalosClusterReconciler) ensureWrapperRunnerResources(ctx context.Contex
 		}
 	}
 
+	return nil
+}
+
+// ensureCAPIKubeconfig copies the CAPI-generated kubeconfig Secret to the canonical
+// seam-mc-{cluster}-kubeconfig name in seam-tenant-{cluster}. CAPI writes
+// {cluster}-kubeconfig in the cluster namespace after the cluster reaches Running state.
+// All platform operations (EnsureRemoteConductorBootstrap, PKI rotation, conductor-execute
+// Jobs) read from the canonical name. Idempotent. Called from reconcileCAPIPath after
+// CAPI Cluster reaches Running.
+func (r *TalosClusterReconciler) ensureCAPIKubeconfig(ctx context.Context, tc *platformv1alpha1.TalosCluster) error {
+	tenantNS := "seam-tenant-" + tc.Name
+	dstName := kubeconfigSecretName(tc.Name)
+
+	if err := r.Client.Get(ctx, types.NamespacedName{Name: dstName, Namespace: tenantNS}, &corev1.Secret{}); err == nil {
+		return nil
+	} else if !apierrors.IsNotFound(err) {
+		return fmt.Errorf("ensureCAPIKubeconfig: check %s/%s: %w", tenantNS, dstName, err)
+	}
+
+	srcName := tc.Name + "-kubeconfig"
+	src := &corev1.Secret{}
+	if err := r.Client.Get(ctx, types.NamespacedName{Name: srcName, Namespace: tenantNS}, src); err != nil {
+		if apierrors.IsNotFound(err) {
+			return nil // CAPI not yet written; reconcile will retry
+		}
+		return fmt.Errorf("ensureCAPIKubeconfig: get source %s/%s: %w", tenantNS, srcName, err)
+	}
+
+	dst := &corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      dstName,
+			Namespace: tenantNS,
+			Labels:    map[string]string{"platform.ontai.dev/cluster": tc.Name},
+		},
+		Type: corev1.SecretTypeOpaque,
+		Data: src.Data,
+	}
+	if err := r.Client.Create(ctx, dst); err != nil && !apierrors.IsAlreadyExists(err) {
+		return fmt.Errorf("ensureCAPIKubeconfig: create %s/%s: %w", tenantNS, dstName, err)
+	}
+	return nil
+}
+
+// ensureCAPITalosconfig copies the TALM-generated talosconfig Secret to the canonical
+// seam-mc-{cluster}-talosconfig name in seam-tenant-{cluster}. TALM writes
+// {cluster}-talosconfig in the cluster namespace. The canonical name is what
+// ensureExecutorTalosconfig reads as its source, so day-2 executor Jobs receive
+// the correct talosconfig in seam-tenant-{cluster}. Idempotent. Called from
+// reconcileCAPIPath after CAPI Cluster reaches Running.
+func (r *TalosClusterReconciler) ensureCAPITalosconfig(ctx context.Context, tc *platformv1alpha1.TalosCluster) error {
+	tenantNS := "seam-tenant-" + tc.Name
+	dstName := talosconfigSecretName(tc.Name)
+
+	if err := r.Client.Get(ctx, types.NamespacedName{Name: dstName, Namespace: tenantNS}, &corev1.Secret{}); err == nil {
+		return nil
+	} else if !apierrors.IsNotFound(err) {
+		return fmt.Errorf("ensureCAPITalosconfig: check %s/%s: %w", tenantNS, dstName, err)
+	}
+
+	srcName := tc.Name + "-talosconfig"
+	src := &corev1.Secret{}
+	if err := r.Client.Get(ctx, types.NamespacedName{Name: srcName, Namespace: tenantNS}, src); err != nil {
+		if apierrors.IsNotFound(err) {
+			return nil // TALM not yet written; reconcile will retry
+		}
+		return fmt.Errorf("ensureCAPITalosconfig: get source %s/%s: %w", tenantNS, srcName, err)
+	}
+
+	dst := &corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      dstName,
+			Namespace: tenantNS,
+			Labels:    map[string]string{"platform.ontai.dev/cluster": tc.Name},
+		},
+		Type: corev1.SecretTypeOpaque,
+		Data: src.Data,
+	}
+	if err := r.Client.Create(ctx, dst); err != nil && !apierrors.IsAlreadyExists(err) {
+		return fmt.Errorf("ensureCAPITalosconfig: create %s/%s: %w", tenantNS, dstName, err)
+	}
 	return nil
 }

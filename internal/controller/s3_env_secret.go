@@ -132,6 +132,67 @@ func appendS3EnvFrom(job *batchv1.Job, envSecretName string) {
 	)
 }
 
+// resolveS3BackupSecretRef resolves S3 credentials from an optional per-operation
+// SecretReference, falling back to the cluster-wide seam-etcd-backup-config Secret.
+// Generic: used by any backup reconciler that follows the §10 S3 resolution hierarchy.
+// Returns (secretName, secretNamespace, found, error).
+func resolveS3BackupSecretRef(ctx context.Context, c client.Client, secretRef *corev1.SecretReference) (string, string, bool, error) {
+	if secretRef != nil && secretRef.Name != "" {
+		ns := secretRef.Namespace
+		if ns == "" {
+			ns = "seam-system"
+		}
+		secret := &corev1.Secret{}
+		if err := c.Get(ctx, types.NamespacedName{Name: secretRef.Name, Namespace: ns}, secret); err != nil {
+			if apierrors.IsNotFound(err) {
+				return "", "", false, nil
+			}
+			return "", "", false, fmt.Errorf("get S3 secret %s/%s: %w", ns, secretRef.Name, err)
+		}
+		return secretRef.Name, ns, true, nil
+	}
+	const defaultName = "seam-etcd-backup-config"
+	const defaultNS = "seam-system"
+	secret := &corev1.Secret{}
+	if err := c.Get(ctx, types.NamespacedName{Name: defaultName, Namespace: defaultNS}, secret); err != nil {
+		if apierrors.IsNotFound(err) {
+			return "", "", false, nil
+		}
+		return "", "", false, fmt.Errorf("get default S3 secret %s/%s: %w", defaultNS, defaultName, err)
+	}
+	return defaultName, defaultNS, true, nil
+}
+
+// ensureS3EnvSecretFor projects S3 credentials from sourceName/sourceNS into a Secret
+// owned by owner in projNS. The projected secret is named projName.
+// Generic: works for any CR type as owner.
+func ensureS3EnvSecretFor(ctx context.Context, c client.Client, scheme *runtime.Scheme, sourceName, sourceNS string, owner client.Object, projName, projNS string) error {
+	src := &corev1.Secret{}
+	if err := c.Get(ctx, types.NamespacedName{Name: sourceName, Namespace: sourceNS}, src); err != nil {
+		return fmt.Errorf("read S3 source secret %s/%s: %w", sourceNS, sourceName, err)
+	}
+	envData, err := NormalizeS3SecretData(src.Data)
+	if err != nil {
+		return fmt.Errorf("normalize S3 secret %s/%s: %w", sourceNS, sourceName, err)
+	}
+	proj := &corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      projName,
+			Namespace: projNS,
+		},
+	}
+	if err := controllerutil.SetControllerReference(owner, proj, scheme); err != nil {
+		return fmt.Errorf("set owner reference on S3 env secret: %w", err)
+	}
+	if _, err := controllerutil.CreateOrUpdate(ctx, c, proj, func() error {
+		proj.Data = envData
+		return nil
+	}); err != nil {
+		return fmt.Errorf("upsert S3 env secret %s/%s: %w", projNS, projName, err)
+	}
+	return nil
+}
+
 // resolveS3CredentialsForRestore resolves S3 credentials for an etcd restore operation.
 // Resolution order (mirrors backup resolution, platform-schema.md §10):
 //  1. spec.s3SnapshotPath.credentialsSecretRef — per-operation override.
