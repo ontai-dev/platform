@@ -473,22 +473,51 @@ func (r *TalosClusterReconciler) ensureTalosConfigTemplate(ctx context.Context, 
 		//   not blocked by the kernel JIT hardening security gate.
 		// kernel.unprivileged_bpf_disabled=0: allow non-privileged BPF, required for
 		//   Cilium's host networking and L3/L4 policy enforcement datapath.
+		baseSysctls := map[string]interface{}{
+			"net.core.bpf_jit_harden":         "0",
+			"kernel.unprivileged_bpf_disabled": "0",
+		}
+
+		var hardeningPatches []interface{}
+		if tc.Spec.HardeningProfileRef != nil {
+			hpNS := tc.Spec.HardeningProfileRef.Namespace
+			if hpNS == "" {
+				hpNS = tc.Namespace
+			}
+			hp := &platformv1alpha1.HardeningProfile{}
+			if err := r.Client.Get(ctx, types.NamespacedName{
+				Name:      tc.Spec.HardeningProfileRef.Name,
+				Namespace: hpNS,
+			}, hp); err != nil {
+				return fmt.Errorf("ensureTalosConfigTemplate: get HardeningProfile: %w", err)
+			}
+			for k, v := range hp.Spec.SysctlParams {
+				baseSysctls[k] = v
+			}
+			for _, patchStr := range hp.Spec.MachineConfigPatches {
+				var patchObj map[string]interface{}
+				if err := json.Unmarshal([]byte(patchStr), &patchObj); err != nil {
+					return fmt.Errorf("ensureTalosConfigTemplate: parse HardeningProfile patch: %w", err)
+				}
+				hardeningPatches = append(hardeningPatches, patchObj)
+			}
+		}
+
 		machineConfigPatches := []interface{}{
 			map[string]interface{}{
 				"op":    "replace",
 				"path":  "/cluster/network/cni/name",
 				"value": "none",
 			},
-			// Cilium-required BPF kernel parameters. CP-INV-009.
+			// Cilium-required BPF kernel parameters merged with HardeningProfile sysctlParams. CP-INV-009.
 			map[string]interface{}{
 				"op":    "add",
 				"path":  "/machine/sysctls",
-				"value": map[string]interface{}{
-					"net.core.bpf_jit_harden":       "0",
-					"kernel.unprivileged_bpf_disabled": "0",
-				},
+				"value": baseSysctls,
 			},
 		}
+		machineConfigPatches = append(machineConfigPatches, hardeningPatches...)
+
 		if err := unstructured.SetNestedField(tct.Object, map[string]interface{}{
 			"generateType": "worker",
 			"talosVersion": tc.Spec.CAPI.TalosVersion,

@@ -70,6 +70,7 @@ const (
 	ConditionTypeKubeconfigUnavailable        = conditions.ConditionTypeKubeconfigUnavailable
 	ConditionTypeVersionUpgradePending        = conditions.ConditionTypeVersionUpgradePending
 	ConditionTypeVersionRegressionBlocked     = conditions.ConditionTypeVersionRegressionBlocked
+	ConditionTypeHardeningApplied             = conditions.ConditionTypeHardeningApplied
 )
 
 // Reason constants for TalosCluster -- re-exported from seam-core/pkg/conditions.
@@ -95,4 +96,7 @@ const (
 	ReasonVersionUpgradeSubmitted        = conditions.ReasonVersionUpgradeSubmitted
 	ReasonVersionUpgradeComplete         = conditions.ReasonVersionUpgradeComplete
 	ReasonVersionRegressionAttempted     = conditions.ReasonVersionRegressionAttempted
+	ReasonHardeningApplied               = conditions.ReasonHardeningApplied
+	ReasonHardeningPending               = conditions.ReasonHardeningPending
+	ReasonHardeningProfileNotValid       = conditions.ReasonHardeningProfileNotValid
 )
