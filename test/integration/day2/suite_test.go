@@ -6,10 +6,10 @@
 // the unit tests' fake client cannot replicate (no SSA merge semantics, no etcd
 // visibility, no watch event propagation).
 //
-// envtest binaries required:
+// envtest binaries required. From the ontai root:
 //
-//	setup-envtest use --bin-dir /tmp/envtest-bins
-//	export KUBEBUILDER_ASSETS=/tmp/envtest-bins/k8s/1.35.0-linux-amd64
+//	make envtest-setup
+//	export KUBEBUILDER_ASSETS=$(make -s envtest-path)
 //
 // All tests skip automatically when KUBEBUILDER_ASSETS is absent.
 package day2_integration_test
