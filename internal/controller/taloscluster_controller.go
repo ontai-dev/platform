@@ -228,6 +228,24 @@ func (r *TalosClusterReconciler) Reconcile(ctx context.Context, req ctrl.Request
 		return routeResult, routeErr
 	}
 
+	// Step G -- Bootstrap hardening (ONT-native path only). When hardeningProfileRef is
+	// set and the cluster is currently Ready, ensure the bootstrap NodeMaintenance exists
+	// in seam-tenant-{cluster} and set HardeningApplied once it reaches Ready=True.
+	// Idempotent: the label check prevents duplicate NodeMaintenance creation.
+	// CAPI path: HardeningApplied is set in reconcileCAPIPath (patches baked in at boot).
+	if tc.Spec.HardeningProfileRef != nil && (tc.Spec.CAPI == nil || !tc.Spec.CAPI.Enabled) {
+		currentReady := platformv1alpha1.FindCondition(tc.Status.Conditions, platformv1alpha1.ConditionTypeReady)
+		if currentReady != nil && currentReady.Status == metav1.ConditionTrue {
+			hardenResult, hardenErr := r.ensureBootstrapHardening(ctx, tc)
+			if hardenErr != nil {
+				return ctrl.Result{}, fmt.Errorf("reconcile: ensureBootstrapHardening: %w", hardenErr)
+			}
+			if hardenResult.RequeueAfter > 0 {
+				return hardenResult, nil
+			}
+		}
+	}
+
 	// Step F -- PKI expiry check and annotation-triggered rotation.
 	// Only executed when the cluster was already in Ready state before this
 	// reconcile pass (stable-Ready). Non-fatal: failures are logged and result
@@ -536,11 +554,22 @@ func (r *TalosClusterReconciler) reconcileCAPIPath(ctx context.Context, tc *plat
 		return ctrl.Result{}, fmt.Errorf("reconcileCAPIPath: ensure CAPI Cluster: %w", err)
 	}
 
-	// Step 4 — Ensure TalosConfigTemplate exists (with CNI=none + Cilium BPF params).
-	// CP-INV-009: every TalosConfigTemplate includes cluster.network.cni.name: none
-	// and the Cilium-required BPF kernel parameters.
+	// Step 4 — Ensure TalosConfigTemplate exists (with CNI=none + Cilium BPF params,
+	// plus HardeningProfile patches when hardeningProfileRef is set). CP-INV-009.
 	if err := r.ensureTalosConfigTemplate(ctx, tc); err != nil {
 		return ctrl.Result{}, fmt.Errorf("reconcileCAPIPath: ensure TalosConfigTemplate: %w", err)
+	}
+	// Patches are baked into the template at creation time. Mark HardeningApplied when
+	// the profile is referenced (the template may already exist from a previous pass).
+	if tc.Spec.HardeningProfileRef != nil {
+		platformv1alpha1.SetCondition(
+			&tc.Status.Conditions,
+			platformv1alpha1.ConditionTypeHardeningApplied,
+			metav1.ConditionTrue,
+			platformv1alpha1.ReasonHardeningApplied,
+			"HardeningProfile patches merged into TalosConfigTemplate at provisioning time.",
+			tc.Generation,
+		)
 	}
 
 	// Step 5 — Ensure TalosControlPlane exists.
