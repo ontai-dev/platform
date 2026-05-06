@@ -96,32 +96,18 @@ var _ = Describe("TENANT-PKI-ROTATE: PKIRotation on import-mode cluster", func()
 				"PKIRotation Ready must be True after pki-rotate completes")
 		}, pkiRotationTimeout, pollInterval).Should(Succeed())
 
-		// Verify that pkiRotateHandler wrote the refreshed kubeconfig Secret.
-		// The Secret name is target-cluster-kubeconfig in seam-tenant-{cluster}.
-		// platform-schema.md §13: pkiRotateHandler writes two Secrets on success.
+		// Verify that pkiRotateHandler wrote the refreshed seam-mc-{cluster}-kubeconfig
+		// Secret. This is the canonical kubeconfig name; target-cluster-kubeconfig no
+		// longer exists. platform-schema.md §13.
 		Eventually(func(g Gomega) {
 			secret := &corev1.Secret{}
 			g.Expect(mgmtClient.Get(mgmtCtx, types.NamespacedName{
-				Name:      "target-cluster-kubeconfig",
-				Namespace: tenantNS,
-			}, secret)).To(Succeed(), "target-cluster-kubeconfig Secret not found in %s", tenantNS)
-			g.Expect(secret.Data).NotTo(BeEmpty(),
-				"target-cluster-kubeconfig Secret must have non-empty data")
-		}, 30*time.Second, pollInterval).Should(Succeed())
-
-		// Best-effort: verify the seam-mc-{cluster}-kubeconfig Secret was also refreshed.
-		// This Secret is written with best-effort semantics by pkiRotateHandler --
-		// its absence does not indicate a failed rotation.
-		func() {
-			secret := &corev1.Secret{}
-			if err := mgmtClient.Get(mgmtCtx, types.NamespacedName{
 				Name:      "seam-mc-" + cluster + "-kubeconfig",
 				Namespace: tenantNS,
-			}, secret); err == nil {
-				Expect(secret.Data).NotTo(BeEmpty(),
-					"seam-mc-%s-kubeconfig Secret exists but has empty data", cluster)
-			}
-		}()
+			}, secret)).To(Succeed(), "seam-mc-%s-kubeconfig Secret not found in %s", cluster, tenantNS)
+			g.Expect(secret.Data).NotTo(BeEmpty(),
+				"seam-mc-%s-kubeconfig Secret must have non-empty data", cluster)
+		}, 30*time.Second, pollInterval).Should(Succeed())
 	})
 })
 

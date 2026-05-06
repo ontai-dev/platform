@@ -341,15 +341,6 @@ func (r *TalosClusterReconciler) reconcileDirectBootstrap(ctx context.Context, t
 			return result, nil
 		}
 
-		// Copy the generated kubeconfig to target-cluster-kubeconfig in
-		// seam-tenant-{cluster} for all import clusters regardless of role.
-		// conductor-execute Jobs for both management-cluster and tenant-cluster
-		// PackExecutions mount this Secret — the same name, the same namespace,
-		// no role-specific divergence. platform-schema.md §9.
-		if err := r.ensureTenantKubeconfigCopy(ctx, tc); err != nil {
-			return ctrl.Result{}, fmt.Errorf("reconcileDirectBootstrap: copy kubeconfig to tenant namespace: %w", err)
-		}
-
 		// Role=tenant on the direct path: create the seam-tenant namespace and
 		// register the cluster for RBAC and pack delivery. CP-INV-004: Platform is
 		// the sole namespace creation authority. WS5.
@@ -628,12 +619,30 @@ func (r *TalosClusterReconciler) reconcileCAPIPath(ctx context.Context, tc *plat
 	// CAPI-bootstrapped cluster: origin is bootstrapped.
 	tc.Status.Origin = platformv1alpha1.TalosClusterOriginBootstrapped
 
+	// Step 8.5 — Normalize CAPI-generated secrets to canonical platform names and
+	// register the cluster for RBAC and pack delivery. These three steps run once
+	// after CAPI Running is confirmed and are idempotent on subsequent passes.
+	// TALM writes {cluster}-talosconfig; translate to seam-mc-{cluster}-talosconfig
+	// so ensureExecutorTalosconfig finds the source when distributing to day-2 Jobs.
+	if err := r.ensureCAPITalosconfig(ctx, tc); err != nil {
+		return ctrl.Result{}, fmt.Errorf("reconcileCAPIPath: ensure CAPI talosconfig: %w", err)
+	}
+	// CAPI writes {cluster}-kubeconfig; translate to seam-mc-{cluster}-kubeconfig
+	// so EnsureRemoteConductorBootstrap and all conductor-execute Jobs read one name.
+	if err := r.ensureCAPIKubeconfig(ctx, tc); err != nil {
+		return ctrl.Result{}, fmt.Errorf("reconcileCAPIPath: ensure CAPI kubeconfig: %w", err)
+	}
+	// Register in RBACPolicy/RBACProfiles, create LocalQueue, platform-executor and
+	// wrapper-runner SA/Role/RoleBinding, distribute talosconfig to day-2 namespaces.
+	if err := r.ensureTenantOnboarding(ctx, tc); err != nil {
+		return ctrl.Result{}, fmt.Errorf("reconcileCAPIPath: tenant onboarding: %w", err)
+	}
+
 	// Step 9 — Check Cilium PackInstance Ready status.
 	if tc.Spec.CAPI.CiliumPackRef == nil {
 		// No Cilium pack configured — skip Cilium gate (development mode).
 		logger.Info("no CiliumPackRef configured — skipping Cilium gate (development mode)",
 			"name", tc.Name)
-		// Ensure Conductor Deployment exists and is Available. Gap 27.
 		return r.ensureConductorReadyAndTransition(ctx, tc)
 	}
 
