@@ -91,11 +91,11 @@ func TestTalosCluster_VersionUpgrade_CreatesUpgradePolicy(t *testing.T) {
 		t.Error("expected non-zero RequeueAfter while waiting for UpgradePolicy")
 	}
 
-	// UpgradePolicy must exist.
+	// UpgradePolicy must exist in the tenant namespace (not the ITC's namespace).
 	up := &platformv1alpha1.UpgradePolicy{}
 	if err := c.Get(context.Background(), types.NamespacedName{
 		Name:      "ccs-mgmt-version-upgrade",
-		Namespace: "seam-system",
+		Namespace: "seam-tenant-ccs-mgmt",
 	}, up); err != nil {
 		t.Fatalf("UpgradePolicy not created: %v", err)
 	}
@@ -246,12 +246,12 @@ func TestTalosCluster_VersionUpgrade_CompletesCondition(t *testing.T) {
 	tc := buildReadyManagementCluster("ccs-mgmt", "seam-system", "v1.9.4", "v1.9.3")
 	tc.Spec.VersionUpgrade = true
 
-	// Pre-create the UpgradePolicy in Ready=True state (simulates prior reconcile
-	// creating it and the upgrade completing).
+	// Pre-create the UpgradePolicy in the tenant namespace in Ready=True state
+	// (simulates prior reconcile creating it and the upgrade completing).
 	existingUP := &platformv1alpha1.UpgradePolicy{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      "ccs-mgmt-version-upgrade",
-			Namespace: "seam-system",
+			Namespace: "seam-tenant-ccs-mgmt",
 		},
 		Spec: platformv1alpha1.UpgradePolicySpec{
 			ClusterRef:         platformv1alpha1.LocalObjectRef{Name: "ccs-mgmt", Namespace: "seam-system"},
@@ -495,7 +495,7 @@ func TestTalosCluster_VersionUpgrade_KubernetesOnly_CreatesKubePolicy(t *testing
 	up := &platformv1alpha1.UpgradePolicy{}
 	if err := c.Get(context.Background(), types.NamespacedName{
 		Name:      "ccs-mgmt-version-upgrade",
-		Namespace: "seam-system",
+		Namespace: "seam-tenant-ccs-mgmt",
 	}, up); err != nil {
 		t.Fatalf("UpgradePolicy not created: %v", err)
 	}
@@ -555,7 +555,7 @@ func TestTalosCluster_VersionUpgrade_Stack_CreatesBothVersions(t *testing.T) {
 	up := &platformv1alpha1.UpgradePolicy{}
 	if err := c.Get(context.Background(), types.NamespacedName{
 		Name:      "ccs-mgmt-version-upgrade",
-		Namespace: "seam-system",
+		Namespace: "seam-tenant-ccs-mgmt",
 	}, up); err != nil {
 		t.Fatalf("UpgradePolicy not created: %v", err)
 	}

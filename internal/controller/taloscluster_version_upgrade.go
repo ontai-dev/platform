@@ -146,10 +146,15 @@ func (r *TalosClusterReconciler) reconcileVersionUpgrade(ctx context.Context, tc
 	}
 
 	upName := tc.Name + versionUpgradeSuffix
+	// UpgradePolicy lives in the tenant namespace so the Conductor executor Job
+	// that processes it runs in the same namespace as the platform-executor SA
+	// and the talosconfig Secret (both provisioned by ensureTenantExecutorResources
+	// and ensureExecutorTalosconfig respectively).
+	upNamespace := "seam-tenant-" + tc.Name
 
 	// Check if the UpgradePolicy already exists.
 	existing := &platformv1alpha1.UpgradePolicy{}
-	err = r.Client.Get(ctx, types.NamespacedName{Name: upName, Namespace: tc.Namespace}, existing)
+	err = r.Client.Get(ctx, types.NamespacedName{Name: upName, Namespace: upNamespace}, existing)
 	if err != nil && !apierrors.IsNotFound(err) {
 		return true, ctrl.Result{}, fmt.Errorf("reconcileVersionUpgrade: get UpgradePolicy: %w", err)
 	}
@@ -169,7 +174,7 @@ func (r *TalosClusterReconciler) reconcileVersionUpgrade(ctx context.Context, tc
 		up := &platformv1alpha1.UpgradePolicy{
 			ObjectMeta: metav1.ObjectMeta{
 				Name:      upName,
-				Namespace: tc.Namespace,
+				Namespace: upNamespace,
 				Labels: map[string]string{
 					labelVersionUpgradeOwned:    "true",
 					"platform.ontai.dev/cluster": tc.Name,
@@ -191,9 +196,10 @@ func (r *TalosClusterReconciler) reconcileVersionUpgrade(ctx context.Context, tc
 			tc.Generation,
 		)
 		r.Recorder.Eventf(tc, nil, "Normal", "VersionUpgradeSubmitted", "VersionUpgradeSubmitted",
-			"Created UpgradePolicy %s for cluster %s (%s)", upName, tc.Name, upgradeType)
+			"Created UpgradePolicy %s/%s for cluster %s (%s)", upNamespace, upName, tc.Name, upgradeType)
 		logger.Info("created UpgradePolicy for spec.versionUpgrade",
-			"cluster", tc.Name, "upgradePolicyName", upName, "upgradeType", upgradeType,
+			"cluster", tc.Name, "upgradePolicyName", upName, "upgradePolicyNamespace", upNamespace,
+			"upgradeType", upgradeType,
 			"talosVersion", tc.Spec.TalosVersion, "kubernetesVersion", tc.Spec.KubernetesVersion)
 		return true, ctrl.Result{RequeueAfter: operationalJobPollInterval}, nil
 	}
