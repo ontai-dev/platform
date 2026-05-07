@@ -459,3 +459,127 @@ func TestTCOR_RevisionBumpedAfterUpgrade(t *testing.T) {
 		t.Errorf("Operations len = %d after revision bump, want 0", len(tcor.Spec.Operations))
 	}
 }
+
+// TestTalosCluster_VersionUpgrade_KubernetesOnly_CreatesKubePolicy verifies that when
+// spec.versionUpgrade=true and only spec.kubernetesVersion is set (talosVersion empty),
+// the reconciler creates an UpgradePolicy with UpgradeTypeKubernetes and the correct
+// TargetKubernetesVersion. TargetTalosVersion must be empty.
+func TestTalosCluster_VersionUpgrade_KubernetesOnly_CreatesKubePolicy(t *testing.T) {
+	scheme := buildDay2Scheme(t)
+	// talosVersion="" means no Talos upgrade requested — kubernetesVersion drives it.
+	tc := buildReadyManagementCluster("ccs-mgmt", "seam-system", "", "v1.9.4")
+	tc.Spec.KubernetesVersion = "1.32.4"
+	tc.Spec.VersionUpgrade = true
+
+	c := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithObjects(tc).
+		WithStatusSubresource(tc).
+		Build()
+	r := &controller.TalosClusterReconciler{
+		Client:   c,
+		Scheme:   scheme,
+		Recorder: clientevents.NewFakeRecorder(32),
+	}
+
+	result, err := r.Reconcile(context.Background(), ctrl.Request{
+		NamespacedName: types.NamespacedName{Name: "ccs-mgmt", Namespace: "seam-system"},
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if result.RequeueAfter == 0 {
+		t.Error("expected non-zero RequeueAfter while waiting for UpgradePolicy")
+	}
+
+	up := &platformv1alpha1.UpgradePolicy{}
+	if err := c.Get(context.Background(), types.NamespacedName{
+		Name:      "ccs-mgmt-version-upgrade",
+		Namespace: "seam-system",
+	}, up); err != nil {
+		t.Fatalf("UpgradePolicy not created: %v", err)
+	}
+	if up.Spec.UpgradeType != platformv1alpha1.UpgradeTypeKubernetes {
+		t.Errorf("UpgradeType = %q, want kubernetes", up.Spec.UpgradeType)
+	}
+	if up.Spec.TargetKubernetesVersion != "1.32.4" {
+		t.Errorf("TargetKubernetesVersion = %q, want 1.32.4", up.Spec.TargetKubernetesVersion)
+	}
+	if up.Spec.TargetTalosVersion != "" {
+		t.Errorf("TargetTalosVersion = %q, want empty for kubernetes-only upgrade", up.Spec.TargetTalosVersion)
+	}
+
+	got := &platformv1alpha1.TalosCluster{}
+	if err := c.Get(context.Background(), types.NamespacedName{
+		Name: "ccs-mgmt", Namespace: "seam-system",
+	}, got); err != nil {
+		t.Fatalf("get TalosCluster: %v", err)
+	}
+	cond := platformv1alpha1.FindCondition(got.Status.Conditions, platformv1alpha1.ConditionTypeVersionUpgradePending)
+	if cond == nil || cond.Status != metav1.ConditionTrue {
+		t.Fatal("VersionUpgradePending not set to True for kubernetes-only upgrade")
+	}
+}
+
+// TestTalosCluster_VersionUpgrade_Stack_CreatesBothVersions verifies that when
+// spec.versionUpgrade=true with both spec.talosVersion and spec.kubernetesVersion set,
+// the reconciler creates an UpgradePolicy with UpgradeTypeStack carrying both target
+// versions (sequential Talos then k8s upgrade).
+func TestTalosCluster_VersionUpgrade_Stack_CreatesBothVersions(t *testing.T) {
+	scheme := buildDay2Scheme(t)
+	tc := buildReadyManagementCluster("ccs-mgmt", "seam-system", "v1.9.4", "v1.9.3")
+	tc.Spec.KubernetesVersion = "1.32.4"
+	tc.Spec.VersionUpgrade = true
+
+	c := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithObjects(tc).
+		WithStatusSubresource(tc).
+		Build()
+	r := &controller.TalosClusterReconciler{
+		Client:   c,
+		Scheme:   scheme,
+		Recorder: clientevents.NewFakeRecorder(32),
+	}
+
+	result, err := r.Reconcile(context.Background(), ctrl.Request{
+		NamespacedName: types.NamespacedName{Name: "ccs-mgmt", Namespace: "seam-system"},
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if result.RequeueAfter == 0 {
+		t.Error("expected non-zero RequeueAfter while waiting for UpgradePolicy")
+	}
+
+	up := &platformv1alpha1.UpgradePolicy{}
+	if err := c.Get(context.Background(), types.NamespacedName{
+		Name:      "ccs-mgmt-version-upgrade",
+		Namespace: "seam-system",
+	}, up); err != nil {
+		t.Fatalf("UpgradePolicy not created: %v", err)
+	}
+	if up.Spec.UpgradeType != platformv1alpha1.UpgradeTypeStack {
+		t.Errorf("UpgradeType = %q, want stack", up.Spec.UpgradeType)
+	}
+	if up.Spec.TargetTalosVersion != "v1.9.4" {
+		t.Errorf("TargetTalosVersion = %q, want v1.9.4", up.Spec.TargetTalosVersion)
+	}
+	if up.Spec.TargetKubernetesVersion != "1.32.4" {
+		t.Errorf("TargetKubernetesVersion = %q, want 1.32.4", up.Spec.TargetKubernetesVersion)
+	}
+	if up.Spec.ClusterRef.Name != "ccs-mgmt" {
+		t.Errorf("ClusterRef.Name = %q, want ccs-mgmt", up.Spec.ClusterRef.Name)
+	}
+
+	got := &platformv1alpha1.TalosCluster{}
+	if err := c.Get(context.Background(), types.NamespacedName{
+		Name: "ccs-mgmt", Namespace: "seam-system",
+	}, got); err != nil {
+		t.Fatalf("get TalosCluster: %v", err)
+	}
+	cond := platformv1alpha1.FindCondition(got.Status.Conditions, platformv1alpha1.ConditionTypeVersionUpgradePending)
+	if cond == nil || cond.Status != metav1.ConditionTrue {
+		t.Fatal("VersionUpgradePending not set to True for stack upgrade")
+	}
+}
