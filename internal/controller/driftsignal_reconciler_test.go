@@ -335,6 +335,85 @@ func TestDriftSignalReconciler_TalosVersionDrift_FullFlow(t *testing.T) {
 	}
 }
 
+// TestDriftSignalReconciler_K8sVersionDrift_CreatesUpgradePolicy verifies that a pending
+// DriftSignal named "drift-k8s-version-{cluster}" with kind=InfrastructureTalosCluster causes:
+//   - A corrective UpgradePolicy (type=kubernetes) targeting spec.kubernetesVersion
+//   - The DriftSignal advanced to queued
+func TestDriftSignalReconciler_K8sVersionDrift_CreatesUpgradePolicy(t *testing.T) {
+	scheme := buildDriftSignalTestScheme(t)
+	if err := platformv1alpha1.AddToScheme(scheme); err != nil {
+		t.Fatalf("add platform scheme: %v", err)
+	}
+
+	clusterName := "ccs-dev"
+	tenantNSName := tenantNS(clusterName)
+	signalName := "drift-k8s-version-" + clusterName
+
+	ds := &seamcorev1alpha1.DriftSignal{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: signalName, Namespace: tenantNSName, ResourceVersion: "1",
+		},
+		Spec: seamcorev1alpha1.DriftSignalSpec{
+			State:         seamcorev1alpha1.DriftSignalStatePending,
+			CorrelationID: "k8s-version-ccs-dev-123",
+			ObservedAt:    metav1.Now(),
+			AffectedCRRef: seamcorev1alpha1.DriftAffectedCRRef{
+				Group: "infrastructure.ontai.dev",
+				Kind:  "InfrastructureTalosCluster",
+				Name:  clusterName,
+			},
+			DriftReason: "kubernetes version drift: spec=1.32.2 observed=1.32.3",
+		},
+	}
+
+	tc := fakeTalosClusterForDrift(clusterName)
+	tc.Spec.KubernetesVersion = "1.32.2"
+
+	tenantNamespaceObj := &corev1.Namespace{
+		ObjectMeta: metav1.ObjectMeta{Name: tenantNSName},
+	}
+
+	c := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithObjects(ds, tc, tenantNamespaceObj).
+		WithStatusSubresource(&seamcorev1alpha1.DriftSignal{}).
+		Build()
+
+	r := &DriftSignalReconciler{Client: c}
+
+	_, err := r.Reconcile(context.Background(), ctrl.Request{
+		NamespacedName: types.NamespacedName{Name: signalName, Namespace: tenantNSName},
+	})
+	if err != nil {
+		t.Fatalf("Reconcile: %v", err)
+	}
+
+	// UpgradePolicy must be created with type=kubernetes targeting spec.kubernetesVersion.
+	gotUP := &platformv1alpha1.UpgradePolicy{}
+	if err := c.Get(context.Background(), types.NamespacedName{
+		Name: signalName, Namespace: tenantNSName,
+	}, gotUP); err != nil {
+		t.Fatalf("get corrective kube UpgradePolicy: %v", err)
+	}
+	if gotUP.Spec.UpgradeType != platformv1alpha1.UpgradeTypeKubernetes {
+		t.Errorf("UpgradePolicy.Spec.UpgradeType = %q, want %q",
+			gotUP.Spec.UpgradeType, platformv1alpha1.UpgradeTypeKubernetes)
+	}
+	if gotUP.Spec.TargetKubernetesVersion != "1.32.2" {
+		t.Errorf("UpgradePolicy.Spec.TargetKubernetesVersion = %q, want 1.32.2",
+			gotUP.Spec.TargetKubernetesVersion)
+	}
+
+	// DriftSignal must be advanced to queued.
+	gotDS := &seamcorev1alpha1.DriftSignal{}
+	if err := c.Get(context.Background(), types.NamespacedName{Name: signalName, Namespace: tenantNSName}, gotDS); err != nil {
+		t.Fatalf("get DriftSignal: %v", err)
+	}
+	if gotDS.Spec.State != seamcorev1alpha1.DriftSignalStateQueued {
+		t.Errorf("DriftSignal.Spec.State = %q, want queued", gotDS.Spec.State)
+	}
+}
+
 // TestDriftSignalReconciler_TalosVersionDrift_NoParsableVersion_AdvancesToQueued verifies
 // that a version drift signal without a parseable observed version is still advanced to queued
 // (does not retry indefinitely).
