@@ -4,7 +4,7 @@ go 1.25.3
 
 replace github.com/ontai-dev/conductor => ../conductor
 
-replace github.com/ontai-dev/seam => ../seam-core
+replace github.com/ontai-dev/seam => ../seam
 
 replace github.com/ontai-dev/seam-sdk => ../seam-sdk
 
