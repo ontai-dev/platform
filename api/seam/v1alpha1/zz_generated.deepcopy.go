@@ -3,7 +3,7 @@
 package v1alpha1
 
 import (
-	"github.com/ontai-dev/seam-core/pkg/lineage"
+	"github.com/ontai-dev/seam/pkg/lineage"
 	v1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	runtime "k8s.io/apimachinery/pkg/runtime"
 )

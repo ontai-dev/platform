@@ -19,7 +19,7 @@ import (
 
 	platformv1alpha1 "github.com/ontai-dev/platform/api/v1alpha1"
 	"github.com/ontai-dev/platform/internal/controller"
-	"github.com/ontai-dev/seam-core/pkg/lineage"
+	"github.com/ontai-dev/seam/pkg/lineage"
 )
 
 // capiTCForLineage returns a minimal TalosCluster with CAPI enabled.

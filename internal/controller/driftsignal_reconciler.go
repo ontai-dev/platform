@@ -17,7 +17,7 @@ import (
 
 	platformv1alpha1 "github.com/ontai-dev/platform/api/v1alpha1"
 	seamplatformv1alpha1 "github.com/ontai-dev/platform/api/seam/v1alpha1"
-	seamcorev1alpha1 "github.com/ontai-dev/seam-core/api/v1alpha1"
+	seamcorev1alpha1 "github.com/ontai-dev/seam/api/v1alpha1"
 )
 
 // DriftSignalReconciler handles cluster-state DriftSignals written by conductor role=tenant.

@@ -4,7 +4,7 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
-	"github.com/ontai-dev/seam-core/pkg/lineage"
+	"github.com/ontai-dev/seam/pkg/lineage"
 )
 
 // Condition type and reason constants for TalosMachineConfigBackup.

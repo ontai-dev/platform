@@ -24,7 +24,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 
 	platformv1alpha1 "github.com/ontai-dev/platform/api/v1alpha1"
-	"github.com/ontai-dev/seam-core/pkg/lineage"
+	"github.com/ontai-dev/seam/pkg/lineage"
 )
 
 const (

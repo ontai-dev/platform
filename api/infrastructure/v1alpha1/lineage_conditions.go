@@ -6,14 +6,14 @@ package v1alpha1
 //
 // Seam Infrastructure Provider reconcilers reference these via the infrav1alpha1
 // package alias; they continue to compile without modification. New code should
-// prefer importing github.com/ontai-dev/seam-core/pkg/conditions directly.
+// prefer importing github.com/ontai-dev/seam/pkg/conditions directly.
 
-import "github.com/ontai-dev/seam-core/pkg/conditions"
+import "github.com/ontai-dev/seam/pkg/conditions"
 
 const (
 	// ConditionTypeLineageSynced is the reserved condition type for lineage
 	// synchronization status on every root declaration CR.
-	// Canonical source: github.com/ontai-dev/seam-core/pkg/conditions.
+	// Canonical source: github.com/ontai-dev/seam/pkg/conditions.
 	ConditionTypeLineageSynced = conditions.ConditionTypeLineageSynced
 
 	// ReasonLineageControllerAbsent is set when the reconciler initialises

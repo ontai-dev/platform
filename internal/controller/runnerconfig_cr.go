@@ -7,15 +7,15 @@ package controller
 
 import (
 	seamplatformv1alpha1 "github.com/ontai-dev/platform/api/seam/v1alpha1"
-	seamcorev1alpha1 "github.com/ontai-dev/seam-core/api/v1alpha1"
+	seamcorev1alpha1 "github.com/ontai-dev/seam/api/v1alpha1"
 )
 
 // Type aliases -- struct definitions live in the owning packages. These preserve
 // the controller package interface for all day-2 reconcilers without source edits.
 type (
-	OperationalRunnerConfig     = seamcorev1alpha1.InfrastructureRunnerConfig
-	OperationalRunnerConfigList = seamcorev1alpha1.InfrastructureRunnerConfigList
-	OperationalRunnerConfigSpec = seamcorev1alpha1.InfrastructureRunnerConfigSpec
+	OperationalRunnerConfig     = seamcorev1alpha1.RunnerConfig
+	OperationalRunnerConfigList = seamcorev1alpha1.RunnerConfigList
+	OperationalRunnerConfigSpec = seamcorev1alpha1.RunnerConfigSpec
 
 	// OperationalStep is an alias for RunnerConfigStep.
 	OperationalStep = seamcorev1alpha1.RunnerConfigStep
@@ -23,8 +23,8 @@ type (
 	// CapabilityEntry is an alias for RunnerCapabilityEntry.
 	CapabilityEntry = seamcorev1alpha1.RunnerCapabilityEntry
 
-	// OperationalRunnerConfigStatus is an alias for InfrastructureRunnerConfigStatus.
-	OperationalRunnerConfigStatus = seamcorev1alpha1.InfrastructureRunnerConfigStatus
+	// OperationalRunnerConfigStatus is an alias for RunnerConfigStatus.
+	OperationalRunnerConfigStatus = seamcorev1alpha1.RunnerConfigStatus
 
 	// TalosClusterOperationResult is the day-2 operation result CR (ClusterLog) written
 	// by the Conductor execute-mode Job. One CR per cluster, in seam-tenant-{clusterRef}.

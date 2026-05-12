@@ -4,6 +4,8 @@ kind: CustomResourceDefinition
 metadata:
   annotations:
     controller-gen.kubebuilder.io/version: v0.16.1
+  labels:
+    infrastructure.ontai.dev/lineage-root: "true"
   name: talosclusters.seam.ontai.dev
 spec:
   group: seam.ontai.dev

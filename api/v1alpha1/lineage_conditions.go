@@ -6,9 +6,9 @@ package v1alpha1
 //
 // Platform reconcilers reference these via the platformv1alpha1 package alias;
 // they continue to compile without modification. New code should prefer importing
-// github.com/ontai-dev/seam-core/pkg/conditions directly.
+// github.com/ontai-dev/seam/pkg/conditions directly.
 
-import "github.com/ontai-dev/seam-core/pkg/conditions"
+import "github.com/ontai-dev/seam/pkg/conditions"
 
 const (
 	// ConditionTypeLineageSynced is the reserved condition type for lineage
@@ -20,7 +20,7 @@ const (
 	//  2. InfrastructureLineageController takes ownership on deployment, sets True.
 	//  3. If InfrastructureLineageController is absent, remains False/LineageControllerAbsent.
 	//
-	// Canonical source: github.com/ontai-dev/seam-core/pkg/conditions.
+	// Canonical source: github.com/ontai-dev/seam/pkg/conditions.
 	ConditionTypeLineageSynced = conditions.ConditionTypeLineageSynced
 
 	// ReasonLineageControllerAbsent is set when the reconciler initialises

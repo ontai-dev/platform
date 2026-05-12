@@ -6,7 +6,7 @@ package v1alpha1
 
 import (
 	seamv1alpha1 "github.com/ontai-dev/platform/api/seam/v1alpha1"
-	"github.com/ontai-dev/seam-core/pkg/conditions"
+	"github.com/ontai-dev/seam/pkg/conditions"
 )
 
 // Type aliases -- struct definitions live in platform/api/seam/v1alpha1.
@@ -54,7 +54,7 @@ const (
 
 // Condition type constants for TalosCluster -- re-exported from seam-core/pkg/conditions.
 // Platform reconcilers reference these via the platformv1alpha1 alias; new code should
-// import github.com/ontai-dev/seam-core/pkg/conditions directly.
+// import github.com/ontai-dev/seam/pkg/conditions directly.
 const (
 	ConditionTypeReady                        = conditions.ConditionTypeReady
 	ConditionTypeBootstrapping                = conditions.ConditionTypeBootstrapping
