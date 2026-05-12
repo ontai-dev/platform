@@ -42,7 +42,7 @@ func buildHelperTestScheme(t *testing.T) *runtime.Scheme {
 		packInstanceTenantGVK.GroupVersion().WithKind(packInstanceTenantGVK.Kind+"List"),
 		&unstructured.UnstructuredList{},
 	)
-	// security.ontai.dev types (RBACPolicy, RBACProfile) are not in seam-core;
+	// guardian.ontai.dev types (RBACPolicy, RBACProfile) are not in seam-core;
 	// register as unstructured so the fake client can list/patch them.
 	s.AddKnownTypeWithName(rbacPolicyGVK, &unstructured.Unstructured{})
 	s.AddKnownTypeWithName(

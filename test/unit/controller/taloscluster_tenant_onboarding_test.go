@@ -70,7 +70,7 @@ func TestEnsureRemoteConductorRBAC_CreatesClusterRoleAndBinding(t *testing.T) {
 			if group == "infrastructure.ontai.dev" {
 				hasInfra = true
 			}
-			if group == "security.ontai.dev" {
+			if group == "guardian.ontai.dev" {
 				hasSecurity = true
 			}
 			if group == "coordination.k8s.io" {
@@ -85,7 +85,7 @@ func TestEnsureRemoteConductorRBAC_CreatesClusterRoleAndBinding(t *testing.T) {
 		t.Error("ClusterRole missing infrastructure.ontai.dev API group rule")
 	}
 	if !hasSecurity {
-		t.Error("ClusterRole missing security.ontai.dev API group rule")
+		t.Error("ClusterRole missing guardian.ontai.dev API group rule")
 	}
 	if !hasCoordination {
 		t.Error("ClusterRole missing coordination.k8s.io API group rule (required for leader election leases)")

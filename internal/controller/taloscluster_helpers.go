@@ -919,9 +919,9 @@ func EnsureRemoteConductorRBAC(ctx context.Context, k8s kubernetes.Interface) er
 				Verbs:     []string{"get", "list", "watch", "create", "update", "patch"},
 			},
 			{
-				// RBACProfilePullLoop and RBACPolicyPullLoop SSA-patch security.ontai.dev
+				// RBACProfilePullLoop and RBACPolicyPullLoop SSA-patch guardian.ontai.dev
 				// resources into ont-system. Needs create/update/patch in addition to read.
-				APIGroups: []string{"security.ontai.dev"},
+				APIGroups: []string{"guardian.ontai.dev"},
 				Resources: []string{"*"},
 				Verbs:     []string{"get", "list", "watch", "create", "update", "patch"},
 			},
@@ -1466,16 +1466,16 @@ func (r *TalosClusterReconciler) ensureLocalQueue(
 	return nil
 }
 
-// rbacPolicyGVK is the GVK for guardian RBACPolicy (security.ontai.dev/v1alpha1).
+// rbacPolicyGVK is the GVK for guardian RBACPolicy (guardian.ontai.dev/v1alpha1).
 var rbacPolicyGVK = schema.GroupVersionKind{
-	Group:   "security.ontai.dev",
+	Group:   "guardian.ontai.dev",
 	Version: "v1alpha1",
 	Kind:    "RBACPolicy",
 }
 
-// rbacProfileGVK is the GVK for guardian RBACProfile (security.ontai.dev/v1alpha1).
+// rbacProfileGVK is the GVK for guardian RBACProfile (guardian.ontai.dev/v1alpha1).
 var rbacProfileGVK = schema.GroupVersionKind{
-	Group:   "security.ontai.dev",
+	Group:   "guardian.ontai.dev",
 	Version: "v1alpha1",
 	Kind:    "RBACProfile",
 }
@@ -1778,7 +1778,7 @@ func (r *TalosClusterReconciler) ensureWrapperRunnerResources(ctx context.Contex
 				{APIGroups: []string{"autoscaling"}, Resources: []string{"horizontalpodautoscalers"}, Verbs: []string{"get", "list", "watch", "create", "update", "patch", "delete"}},
 				{APIGroups: []string{"infrastructure.ontai.dev"}, Resources: []string{"infrastructurepackexecutions", "infrastructureclusterpacks", "infrastructurepackinstances"}, Verbs: []string{"get", "list", "watch"}},
 				{APIGroups: []string{"infrastructure.ontai.dev"}, Resources: []string{"infrastructurerunnerconfigs"}, Verbs: []string{"get", "list", "watch", "patch", "update"}},
-				{APIGroups: []string{"security.ontai.dev"}, Resources: []string{"rbacprofiles"}, Verbs: []string{"get", "list", "watch"}},
+				{APIGroups: []string{"guardian.ontai.dev"}, Resources: []string{"rbacprofiles"}, Verbs: []string{"get", "list", "watch"}},
 				{APIGroups: []string{"infrastructure.ontai.dev"}, Resources: []string{"packoperationresults"}, Verbs: []string{"get", "list", "watch", "create", "update", "patch", "delete"}},
 			},
 		}
