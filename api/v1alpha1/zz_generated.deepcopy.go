@@ -5,7 +5,6 @@
 package v1alpha1
 
 import (
-	apiv1alpha1 "github.com/ontai-dev/seam-core/api/v1alpha1"
 	"github.com/ontai-dev/seam-core/pkg/lineage"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -656,7 +655,7 @@ func (in *NodeMaintenanceSpec) DeepCopyInto(out *NodeMaintenanceSpec) {
 	}
 	if in.HardeningProfileRef != nil {
 		in, out := &in.HardeningProfileRef, &out.HardeningProfileRef
-		*out = new(apiv1alpha1.InfrastructureLocalObjectRef)
+		*out = new(LocalObjectRef)
 		**out = **in
 	}
 	if in.Lineage != nil {

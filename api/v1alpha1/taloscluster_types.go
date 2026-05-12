@@ -1,55 +1,55 @@
 package v1alpha1
 
-// TalosCluster types are owned by seam-core (infrastructure.ontai.dev/v1alpha1).
+// TalosCluster types are now owned by platform (seam.ontai.dev/v1alpha1).
 // Platform reconcilers reference these aliases; all field types and constants resolve
-// to the seam-core definitions. T-2B-8.
+// to the platform/api/seam/v1alpha1 definitions. MIGRATION-3.1.
 
 import (
-	seamcorev1alpha1 "github.com/ontai-dev/seam-core/api/v1alpha1"
+	seamv1alpha1 "github.com/ontai-dev/platform/api/seam/v1alpha1"
 	"github.com/ontai-dev/seam-core/pkg/conditions"
 )
 
-// Type aliases -- struct definitions moved to seam-core. These preserve the
-// platformv1alpha1 package interface for all reconcilers without source edits.
+// Type aliases -- struct definitions live in platform/api/seam/v1alpha1.
+// These preserve the platformv1alpha1 package interface for all reconcilers without source edits.
 type (
-	TalosCluster           = seamcorev1alpha1.InfrastructureTalosCluster
-	TalosClusterList       = seamcorev1alpha1.InfrastructureTalosClusterList
-	TalosClusterSpec       = seamcorev1alpha1.InfrastructureTalosClusterSpec
-	TalosClusterStatus     = seamcorev1alpha1.InfrastructureTalosClusterStatus
-	TalosClusterMode       = seamcorev1alpha1.InfrastructureTalosClusterMode
-	TalosClusterRole       = seamcorev1alpha1.InfrastructureTalosClusterRole
-	TalosClusterOrigin     = seamcorev1alpha1.InfrastructureTalosClusterOrigin
-	InfrastructureProvider = seamcorev1alpha1.InfrastructureProvider
-	CAPIConfig             = seamcorev1alpha1.InfrastructureCAPIConfig
-	CAPIControlPlaneConfig = seamcorev1alpha1.InfrastructureCAPIControlPlaneConfig
-	CAPIWorkerPool         = seamcorev1alpha1.InfrastructureCAPIWorkerPool
-	CAPICiliumPackRef      = seamcorev1alpha1.InfrastructureCAPICiliumPackRef
-	LocalObjectRef         = seamcorev1alpha1.InfrastructureLocalObjectRef
+	TalosCluster           = seamv1alpha1.TalosCluster
+	TalosClusterList       = seamv1alpha1.TalosClusterList
+	TalosClusterSpec       = seamv1alpha1.TalosClusterSpec
+	TalosClusterStatus     = seamv1alpha1.TalosClusterStatus
+	TalosClusterMode       = seamv1alpha1.TalosClusterMode
+	TalosClusterRole       = seamv1alpha1.TalosClusterRole
+	TalosClusterOrigin     = seamv1alpha1.TalosClusterOrigin
+	InfrastructureProvider = seamv1alpha1.InfrastructureProvider
+	CAPIConfig             = seamv1alpha1.CAPIConfig
+	CAPIControlPlaneConfig = seamv1alpha1.CAPIControlPlaneConfig
+	CAPIWorkerPool         = seamv1alpha1.CAPIWorkerPool
+	CAPICiliumPackRef      = seamv1alpha1.CAPICiliumPackRef
+	LocalObjectRef         = seamv1alpha1.LocalObjectRef
 )
 
 // Mode constants.
 const (
-	TalosClusterModeBootstrap = seamcorev1alpha1.InfrastructureTalosClusterModeBootstrap
-	TalosClusterModeImport    = seamcorev1alpha1.InfrastructureTalosClusterModeImport
+	TalosClusterModeBootstrap = seamv1alpha1.TalosClusterModeBootstrap
+	TalosClusterModeImport    = seamv1alpha1.TalosClusterModeImport
 )
 
 // Role constants.
 const (
-	TalosClusterRoleManagement = seamcorev1alpha1.InfrastructureTalosClusterRoleManagement
-	TalosClusterRoleTenant     = seamcorev1alpha1.InfrastructureTalosClusterRoleTenant
+	TalosClusterRoleManagement = seamv1alpha1.TalosClusterRoleManagement
+	TalosClusterRoleTenant     = seamv1alpha1.TalosClusterRoleTenant
 )
 
 // Origin constants.
 const (
-	TalosClusterOriginBootstrapped = seamcorev1alpha1.InfrastructureTalosClusterOriginBootstrapped
-	TalosClusterOriginImported     = seamcorev1alpha1.InfrastructureTalosClusterOriginImported
+	TalosClusterOriginBootstrapped = seamv1alpha1.TalosClusterOriginBootstrapped
+	TalosClusterOriginImported     = seamv1alpha1.TalosClusterOriginImported
 )
 
 // InfrastructureProvider constants.
 const (
-	InfrastructureProviderNative = seamcorev1alpha1.InfrastructureProviderNative
-	InfrastructureProviderCAPI   = seamcorev1alpha1.InfrastructureProviderCAPI
-	InfrastructureProviderScreen = seamcorev1alpha1.InfrastructureProviderScreen
+	InfrastructureProviderNative = seamv1alpha1.InfrastructureProviderNative
+	InfrastructureProviderCAPI   = seamv1alpha1.InfrastructureProviderCAPI
+	InfrastructureProviderScreen = seamv1alpha1.InfrastructureProviderScreen
 )
 
 // Condition type constants for TalosCluster -- re-exported from seam-core/pkg/conditions.
@@ -75,28 +75,28 @@ const (
 
 // Reason constants for TalosCluster -- re-exported from seam-core/pkg/conditions.
 const (
-	ReasonBootstrapJobSubmitted          = conditions.ReasonBootstrapJobSubmitted
-	ReasonBootstrapJobComplete           = conditions.ReasonBootstrapJobComplete
-	ReasonBootstrapJobFailed             = conditions.ReasonBootstrapJobFailed
-	ReasonCAPIObjectsCreated             = conditions.ReasonCAPIObjectsCreated
-	ReasonCAPIClusterRunning             = conditions.ReasonCAPIClusterRunning
-	ReasonCiliumPackPending              = conditions.ReasonCiliumPackPending
-	ReasonCiliumPackReady                = conditions.ReasonCiliumPackReady
-	ReasonClusterReady                   = conditions.ReasonClusterReady
-	ReasonImportComplete                 = conditions.ReasonImportComplete
-	ReasonDegraded                       = conditions.ReasonDegraded
-	ReasonControlPlaneNodeUnreachable    = conditions.ReasonControlPlaneNodeUnreachable
-	ReasonWorkerNodeUnreachable          = conditions.ReasonWorkerNodeUnreachable
+	ReasonBootstrapJobSubmitted      = conditions.ReasonBootstrapJobSubmitted
+	ReasonBootstrapJobComplete       = conditions.ReasonBootstrapJobComplete
+	ReasonBootstrapJobFailed         = conditions.ReasonBootstrapJobFailed
+	ReasonCAPIObjectsCreated         = conditions.ReasonCAPIObjectsCreated
+	ReasonCAPIClusterRunning         = conditions.ReasonCAPIClusterRunning
+	ReasonCiliumPackPending          = conditions.ReasonCiliumPackPending
+	ReasonCiliumPackReady            = conditions.ReasonCiliumPackReady
+	ReasonClusterReady               = conditions.ReasonClusterReady
+	ReasonImportComplete             = conditions.ReasonImportComplete
+	ReasonDegraded                   = conditions.ReasonDegraded
+	ReasonControlPlaneNodeUnreachable = conditions.ReasonControlPlaneNodeUnreachable
+	ReasonWorkerNodeUnreachable      = conditions.ReasonWorkerNodeUnreachable
 	ReasonConductorBootstrapComplete = conditions.ReasonConductorBootstrapComplete
 	ReasonConductorBootstrapPending  = conditions.ReasonConductorBootstrapPending
-	ReasonScreenNotImplemented           = conditions.ReasonScreenNotImplemented
-	ReasonTalosVersionRequired           = conditions.ReasonTalosVersionRequired
-	ReasonTalosConfigSecretAbsent        = conditions.ReasonTalosConfigSecretAbsent
-	ReasonVersionUpgradeRequested        = conditions.ReasonVersionUpgradeRequested
-	ReasonVersionUpgradeSubmitted        = conditions.ReasonVersionUpgradeSubmitted
-	ReasonVersionUpgradeComplete         = conditions.ReasonVersionUpgradeComplete
-	ReasonVersionRegressionAttempted     = conditions.ReasonVersionRegressionAttempted
-	ReasonHardeningApplied               = conditions.ReasonHardeningApplied
-	ReasonHardeningPending               = conditions.ReasonHardeningPending
-	ReasonHardeningProfileNotValid       = conditions.ReasonHardeningProfileNotValid
+	ReasonScreenNotImplemented       = conditions.ReasonScreenNotImplemented
+	ReasonTalosVersionRequired       = conditions.ReasonTalosVersionRequired
+	ReasonTalosConfigSecretAbsent    = conditions.ReasonTalosConfigSecretAbsent
+	ReasonVersionUpgradeRequested    = conditions.ReasonVersionUpgradeRequested
+	ReasonVersionUpgradeSubmitted    = conditions.ReasonVersionUpgradeSubmitted
+	ReasonVersionUpgradeComplete     = conditions.ReasonVersionUpgradeComplete
+	ReasonVersionRegressionAttempted = conditions.ReasonVersionRegressionAttempted
+	ReasonHardeningApplied           = conditions.ReasonHardeningApplied
+	ReasonHardeningPending           = conditions.ReasonHardeningPending
+	ReasonHardeningProfileNotValid   = conditions.ReasonHardeningProfileNotValid
 )

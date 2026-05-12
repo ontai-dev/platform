@@ -187,9 +187,9 @@ func TestEnsureRemoteTalosClusterCopy_CreatesCR(t *testing.T) {
 	}
 
 	gvr := schema.GroupVersionResource{
-		Group:    "infrastructure.ontai.dev",
+		Group:    "seam.ontai.dev",
 		Version:  "v1alpha1",
-		Resource: "infrastructuretalosclusters",
+		Resource: "talosclusters",
 	}
 	obj, err := dynClient.Resource(gvr).Namespace("ont-system").Get(context.Background(), "ccs-dev", metav1.GetOptions{})
 	if err != nil {
@@ -249,10 +249,10 @@ func TestEnsureRemoteTalosClusterCopy_CRDNotYetInstalled(t *testing.T) {
 	// Inject a reactor that returns NotFound for both GET and CREATE on
 	// infrastructuretalosclusters, simulating a cluster where the CRD is absent.
 	notFoundErr := apierrors.NewNotFound(
-		schema.GroupResource{Group: "infrastructure.ontai.dev", Resource: "infrastructuretalosclusters"},
+		schema.GroupResource{Group: "seam.ontai.dev", Resource: "talosclusters"},
 		"ccs-dev",
 	)
-	dynClient.Fake.PrependReactor("*", "infrastructuretalosclusters",
+	dynClient.Fake.PrependReactor("*", "talosclusters",
 		func(_ k8stesting.Action) (bool, runtime.Object, error) {
 			return true, nil, notFoundErr
 		},

@@ -68,7 +68,7 @@ func (r *DriftSignalReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 	switch ds.Spec.AffectedCRRef.Kind {
 	case "InfrastructureRunnerConfig":
 		return r.handleRunnerConfigDrift(ctx, log, ds, clusterName)
-	case "InfrastructureTalosCluster":
+	case "TalosCluster":
 		if strings.HasPrefix(ds.Name, "drift-k8s-version-") {
 			return r.handleKubernetesVersionDrift(ctx, log, ds, clusterName)
 		}

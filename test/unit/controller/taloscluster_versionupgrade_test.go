@@ -321,9 +321,9 @@ func TestTalosCluster_VersionUpgrade_CompletesCondition(t *testing.T) {
 func TestUpgradePolicy_PatchesObservedTalosVersion(t *testing.T) {
 	scheme := buildDay2Scheme(t)
 
-	// buildReadyManagementCluster returns a *platformv1alpha1.TalosCluster, which is a type
-	// alias for *seamcorev1alpha1.InfrastructureTalosCluster. patchObservedTalosVersion
-	// patches status on this same object. observedVersion="v1.9.3" is the pre-upgrade value.
+	// buildReadyManagementCluster returns a *platformv1alpha1.TalosCluster.
+	// patchObservedTalosVersion patches status on this same object.
+	// observedVersion="v1.9.3" is the pre-upgrade value.
 	tc := buildReadyManagementCluster("ccs-mgmt", "seam-system", "v1.9.4", "v1.9.3")
 
 	up := &platformv1alpha1.UpgradePolicy{
@@ -365,12 +365,12 @@ func TestUpgradePolicy_PatchesObservedTalosVersion(t *testing.T) {
 		t.Fatalf("unexpected error: %v", err)
 	}
 
-	// InfrastructureTalosCluster.status.observedTalosVersion must be updated.
-	gotTC := &seamcorev1alpha1.InfrastructureTalosCluster{}
+	// TalosCluster.status.observedTalosVersion must be updated.
+	gotTC := &platformv1alpha1.TalosCluster{}
 	if err := c.Get(context.Background(), types.NamespacedName{
 		Name: "ccs-mgmt", Namespace: "seam-system",
 	}, gotTC); err != nil {
-		t.Fatalf("get InfrastructureTalosCluster: %v", err)
+		t.Fatalf("get TalosCluster: %v", err)
 	}
 	if gotTC.Status.ObservedTalosVersion != "v1.9.4" {
 		t.Errorf("ObservedTalosVersion = %q, want v1.9.4", gotTC.Status.ObservedTalosVersion)

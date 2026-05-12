@@ -13,6 +13,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 
 	platformv1alpha1 "github.com/ontai-dev/platform/api/v1alpha1"
+	seamplatformv1alpha1 "github.com/ontai-dev/platform/api/seam/v1alpha1"
 	seamcorev1alpha1 "github.com/ontai-dev/seam-core/api/v1alpha1"
 )
 
@@ -22,6 +23,9 @@ func buildDriftSignalTestScheme(t *testing.T) *runtime.Scheme {
 	s := runtime.NewScheme()
 	if err := clientgoscheme.AddToScheme(s); err != nil {
 		t.Fatalf("add clientgo scheme: %v", err)
+	}
+	if err := seamplatformv1alpha1.AddToScheme(s); err != nil {
+		t.Fatalf("add seamplatformv1alpha1 scheme: %v", err)
 	}
 	if err := seamcorev1alpha1.AddToScheme(s); err != nil {
 		t.Fatalf("add seamcorev1alpha1 scheme: %v", err)
@@ -96,8 +100,8 @@ func fakeDriftSignalWithVersion(name, ns, specVersion, observedVersion string) *
 			CorrelationID: "test-version-correlation-id",
 			ObservedAt:    metav1.Now(),
 			AffectedCRRef: seamcorev1alpha1.DriftAffectedCRRef{
-				Group: "infrastructure.ontai.dev",
-				Kind:  "InfrastructureTalosCluster",
+				Group: "seam.ontai.dev",
+				Kind:  "TalosCluster",
 				Name:  "ccs-dev",
 			},
 			DriftReason: "talos version drift: spec=" + specVersion + " observed=" + observedVersion,
@@ -358,8 +362,8 @@ func TestDriftSignalReconciler_K8sVersionDrift_CreatesUpgradePolicy(t *testing.T
 			CorrelationID: "k8s-version-ccs-dev-123",
 			ObservedAt:    metav1.Now(),
 			AffectedCRRef: seamcorev1alpha1.DriftAffectedCRRef{
-				Group: "infrastructure.ontai.dev",
-				Kind:  "InfrastructureTalosCluster",
+				Group: "seam.ontai.dev",
+				Kind:  "TalosCluster",
 				Name:  clusterName,
 			},
 			DriftReason: "kubernetes version drift: spec=1.32.2 observed=1.32.3",
@@ -432,8 +436,8 @@ func TestDriftSignalReconciler_TalosVersionDrift_NoParsableVersion_AdvancesToQue
 			CorrelationID: "test-no-version",
 			ObservedAt:    metav1.Now(),
 			AffectedCRRef: seamcorev1alpha1.DriftAffectedCRRef{
-				Group: "infrastructure.ontai.dev",
-				Kind:  "InfrastructureTalosCluster",
+				Group: "seam.ontai.dev",
+				Kind:  "TalosCluster",
 				Name:  clusterName,
 			},
 			DriftReason: "talos version drift: no version info",
