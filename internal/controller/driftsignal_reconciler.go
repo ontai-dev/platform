@@ -16,6 +16,7 @@ import (
 	ctrllog "sigs.k8s.io/controller-runtime/pkg/log"
 
 	platformv1alpha1 "github.com/ontai-dev/platform/api/v1alpha1"
+	seamplatformv1alpha1 "github.com/ontai-dev/platform/api/seam/v1alpha1"
 	seamcorev1alpha1 "github.com/ontai-dev/seam-core/api/v1alpha1"
 )
 
@@ -43,7 +44,7 @@ type DriftSignalReconciler struct {
 //
 // +kubebuilder:rbac:groups=infrastructure.ontai.dev,resources=driftsignals,verbs=get;list;watch;update;patch
 // +kubebuilder:rbac:groups=infrastructure.ontai.dev,resources=infrastructuretalosclusters,verbs=get;list;watch;update;patch
-// +kubebuilder:rbac:groups=infrastructure.ontai.dev,resources=infrastructuretalosclusteroperationresults,verbs=get;list;watch;update;patch
+// +kubebuilder:rbac:groups=seam.ontai.dev,resources=clusterlogs,verbs=get;list;watch;update;patch
 func (r *DriftSignalReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
 	log := ctrllog.FromContext(ctx).WithValues("driftsignal", req.NamespacedName)
 
@@ -195,26 +196,26 @@ func (r *DriftSignalReconciler) patchObservedTalosVersion(ctx context.Context, t
 // included in the archived revision.
 func (r *DriftSignalReconciler) appendOutOfBandTCORRecord(ctx context.Context, clusterName, specVersion, observedVersion string) error {
 	ns := tenantNS(clusterName)
-	tcor := &seamcorev1alpha1.InfrastructureTalosClusterOperationResult{}
+	tcor := &seamplatformv1alpha1.ClusterLog{}
 	if err := r.Client.Get(ctx, types.NamespacedName{Name: clusterName, Namespace: ns}, tcor); err != nil {
 		if apierrors.IsNotFound(err) {
-			// TCOR does not exist yet -- nothing to append to; bumpTCORRevision will create it.
+			// ClusterLog does not exist yet -- nothing to append to; bumpTCORRevision will create it.
 			return nil
 		}
-		return fmt.Errorf("get TCOR %s/%s: %w", ns, clusterName, err)
+		return fmt.Errorf("get ClusterLog %s/%s: %w", ns, clusterName, err)
 	}
 
 	patch := client.MergeFrom(tcor.DeepCopy())
 	if tcor.Spec.Operations == nil {
-		tcor.Spec.Operations = map[string]seamcorev1alpha1.TalosClusterOperationRecord{}
+		tcor.Spec.Operations = map[string]seamplatformv1alpha1.OperationRecord{}
 	}
 	now := metav1.Now()
 	recordKey := fmt.Sprintf("out-of-band-%d", now.UnixNano())
-	tcor.Spec.Operations[recordKey] = seamcorev1alpha1.TalosClusterOperationRecord{
+	tcor.Spec.Operations[recordKey] = seamplatformv1alpha1.OperationRecord{
 		Capability:  "talos-version-drift",
 		StartedAt:   &now,
 		CompletedAt: &now,
-		Status:      seamcorev1alpha1.TalosClusterResultSucceeded,
+		Status:      seamplatformv1alpha1.ResultSucceeded,
 		Message:     fmt.Sprintf("talos version changed outside ONT management: %s -> %s", specVersion, observedVersion),
 	}
 	tcor.Spec.OperationCount = int64(len(tcor.Spec.Operations))

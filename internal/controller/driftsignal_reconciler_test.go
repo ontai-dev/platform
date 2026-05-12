@@ -71,15 +71,15 @@ func fakeTalosClusterForDrift(name string) *platformv1alpha1.TalosCluster {
 	}
 }
 
-// fakeTCOR builds a minimal InfrastructureTalosClusterOperationResult for DriftSignal tests.
-func fakeTCOR(clusterName, talosVersion string) *seamcorev1alpha1.InfrastructureTalosClusterOperationResult {
-	return &seamcorev1alpha1.InfrastructureTalosClusterOperationResult{
+// fakeTCOR builds a minimal ClusterLog for DriftSignal tests.
+func fakeTCOR(clusterName, talosVersion string) *seamplatformv1alpha1.ClusterLog {
+	return &seamplatformv1alpha1.ClusterLog{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:            clusterName,
 			Namespace:       tenantNS(clusterName),
 			ResourceVersion: "1",
 		},
-		Spec: seamcorev1alpha1.InfrastructureTalosClusterOperationResultSpec{
+		Spec: seamplatformv1alpha1.ClusterLogSpec{
 			ClusterRef:   clusterName,
 			TalosVersion: talosVersion,
 			Revision:     1,
@@ -300,8 +300,8 @@ func TestDriftSignalReconciler_TalosVersionDrift_FullFlow(t *testing.T) {
 			gotTC.Status.ObservedTalosVersion, observedVersion)
 	}
 
-	// TCOR must have been bumped to the observed version and have an out-of-band record.
-	gotTCOR := &seamcorev1alpha1.InfrastructureTalosClusterOperationResult{}
+	// ClusterLog must have been bumped to the observed version and have an out-of-band record.
+	gotTCOR := &seamplatformv1alpha1.ClusterLog{}
 	if err := c.Get(context.Background(), types.NamespacedName{Name: clusterName, Namespace: tenantNSName}, gotTCOR); err != nil {
 		t.Fatalf("get TCOR: %v", err)
 	}

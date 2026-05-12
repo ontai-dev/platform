@@ -19,7 +19,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	platformv1alpha1 "github.com/ontai-dev/platform/api/v1alpha1"
-	seamcorev1alpha1 "github.com/ontai-dev/seam-core/api/v1alpha1"
+	seamplatformv1alpha1 "github.com/ontai-dev/platform/api/seam/v1alpha1"
 )
 
 // pkirotationAutomationClusterName is the name of the test InfrastructureTalosCluster
@@ -43,7 +43,7 @@ var _ = Describe("PKIRotation automation", func() {
 			tenantNS := "seam-tenant-" + clusterName
 
 			// Annotate the InfrastructureTalosCluster with the rotate-pki trigger.
-			itc := &seamcorev1alpha1.InfrastructureTalosCluster{}
+			itc := &seamplatformv1alpha1.TalosCluster{}
 			Expect(mgmtClient.Get(mgmtCtx, client.ObjectKey{
 				Name:      clusterName,
 				Namespace: "seam-system",
@@ -72,7 +72,7 @@ var _ = Describe("PKIRotation automation", func() {
 
 			// Verify the annotation was cleared.
 			Eventually(func() bool {
-				updated := &seamcorev1alpha1.InfrastructureTalosCluster{}
+				updated := &seamplatformv1alpha1.TalosCluster{}
 				if err := mgmtClient.Get(mgmtCtx, client.ObjectKey{
 					Name:      clusterName,
 					Namespace: "seam-system",
@@ -113,7 +113,7 @@ var _ = Describe("PKIRotation automation", func() {
 			// well within the 30-day default threshold).
 			syntheticExpiry := metav1.NewTime(time.Now().Add(5 * 24 * time.Hour))
 
-			itc := &seamcorev1alpha1.InfrastructureTalosCluster{}
+			itc := &seamplatformv1alpha1.TalosCluster{}
 			Expect(mgmtClient.Get(mgmtCtx, client.ObjectKey{
 				Name:      clusterName,
 				Namespace: "seam-system",
@@ -150,7 +150,7 @@ var _ = Describe("PKIRotation automation", func() {
 				}
 
 				// Clear the synthetic pkiExpiryDate.
-				latest := &seamcorev1alpha1.InfrastructureTalosCluster{}
+				latest := &seamplatformv1alpha1.TalosCluster{}
 				if err := mgmtClient.Get(ctx, client.ObjectKey{
 					Name:      clusterName,
 					Namespace: "seam-system",

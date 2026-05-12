@@ -30,9 +30,9 @@ func init() {
 	utilruntime.Must(clientgoscheme.AddToScheme(scheme))
 	utilruntime.Must(platformv1alpha1.AddToScheme(scheme))
 	utilruntime.Must(infrav1alpha1.AddToScheme(scheme))
-	// TalosCluster is now owned by platform (seam.ontai.dev/v1alpha1). MIGRATION-3.1.
+	// TalosCluster and ClusterLog are owned by platform (seam.ontai.dev/v1alpha1). MIGRATION-3.1, MIGRATION-3.2.
 	utilruntime.Must(seamplatformv1alpha1.AddToScheme(scheme))
-	// RunnerConfig, DriftSignal, OperationResult remain in seam-core.
+	// RunnerConfig and DriftSignal remain in seam-core.
 	utilruntime.Must(seamcorev1alpha1.AddToScheme(scheme))
 }
 

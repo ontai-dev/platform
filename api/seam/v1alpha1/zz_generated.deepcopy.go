@@ -8,6 +8,131 @@ import (
 	runtime "k8s.io/apimachinery/pkg/runtime"
 )
 
+func (in *ClusterLog) DeepCopyInto(out *ClusterLog) {
+	*out = *in
+	out.TypeMeta = in.TypeMeta
+	in.ObjectMeta.DeepCopyInto(&out.ObjectMeta)
+	in.Spec.DeepCopyInto(&out.Spec)
+	out.Status = in.Status
+}
+
+func (in *ClusterLog) DeepCopy() *ClusterLog {
+	if in == nil {
+		return nil
+	}
+	out := new(ClusterLog)
+	in.DeepCopyInto(out)
+	return out
+}
+
+func (in *ClusterLog) DeepCopyObject() runtime.Object {
+	if c := in.DeepCopy(); c != nil {
+		return c
+	}
+	return nil
+}
+
+func (in *ClusterLogList) DeepCopyInto(out *ClusterLogList) {
+	*out = *in
+	out.TypeMeta = in.TypeMeta
+	in.ListMeta.DeepCopyInto(&out.ListMeta)
+	if in.Items != nil {
+		in, out := &in.Items, &out.Items
+		*out = make([]ClusterLog, len(*in))
+		for i := range *in {
+			(*in)[i].DeepCopyInto(&(*out)[i])
+		}
+	}
+}
+
+func (in *ClusterLogList) DeepCopy() *ClusterLogList {
+	if in == nil {
+		return nil
+	}
+	out := new(ClusterLogList)
+	in.DeepCopyInto(out)
+	return out
+}
+
+func (in *ClusterLogList) DeepCopyObject() runtime.Object {
+	if c := in.DeepCopy(); c != nil {
+		return c
+	}
+	return nil
+}
+
+func (in *ClusterLogSpec) DeepCopyInto(out *ClusterLogSpec) {
+	*out = *in
+	if in.Operations != nil {
+		in, out := &in.Operations, &out.Operations
+		*out = make(map[string]OperationRecord, len(*in))
+		for key, val := range *in {
+			(*out)[key] = *val.DeepCopy()
+		}
+	}
+}
+
+func (in *ClusterLogSpec) DeepCopy() *ClusterLogSpec {
+	if in == nil {
+		return nil
+	}
+	out := new(ClusterLogSpec)
+	in.DeepCopyInto(out)
+	return out
+}
+
+func (in *ClusterLogStatus) DeepCopyInto(out *ClusterLogStatus) {
+	*out = *in
+}
+
+func (in *ClusterLogStatus) DeepCopy() *ClusterLogStatus {
+	if in == nil {
+		return nil
+	}
+	out := new(ClusterLogStatus)
+	in.DeepCopyInto(out)
+	return out
+}
+
+func (in *OperationFailureReason) DeepCopyInto(out *OperationFailureReason) {
+	*out = *in
+}
+
+func (in *OperationFailureReason) DeepCopy() *OperationFailureReason {
+	if in == nil {
+		return nil
+	}
+	out := new(OperationFailureReason)
+	in.DeepCopyInto(out)
+	return out
+}
+
+func (in *OperationRecord) DeepCopyInto(out *OperationRecord) {
+	*out = *in
+	if in.StartedAt != nil {
+		in, out := &in.StartedAt, &out.StartedAt
+		*out = (*in).DeepCopy()
+	}
+	if in.CompletedAt != nil {
+		in, out := &in.CompletedAt, &out.CompletedAt
+		*out = (*in).DeepCopy()
+	}
+	if in.FailureReason != nil {
+		in, out := &in.FailureReason, &out.FailureReason
+		*out = new(OperationFailureReason)
+		**out = **in
+	}
+}
+
+func (in *OperationRecord) DeepCopy() *OperationRecord {
+	if in == nil {
+		return nil
+	}
+	out := new(OperationRecord)
+	in.DeepCopyInto(out)
+	return out
+}
+
 func (in *CAPIConfig) DeepCopyInto(out *CAPIConfig) {
 	*out = *in
 	if in.ControlPlane != nil {

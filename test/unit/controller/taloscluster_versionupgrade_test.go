@@ -23,9 +23,8 @@ import (
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 
-	seamcorev1alpha1 "github.com/ontai-dev/seam-core/api/v1alpha1"
-
 	platformv1alpha1 "github.com/ontai-dev/platform/api/v1alpha1"
+	seamplatformv1alpha1 "github.com/ontai-dev/platform/api/seam/v1alpha1"
 	"github.com/ontai-dev/platform/internal/controller"
 )
 
@@ -438,8 +437,8 @@ func TestTCOR_RevisionBumpedAfterUpgrade(t *testing.T) {
 		t.Fatalf("unexpected error: %v", err)
 	}
 
-	// TCOR must still exist at seam-tenant-ccs-mgmt/ccs-mgmt — never deleted.
-	tcor := &seamcorev1alpha1.InfrastructureTalosClusterOperationResult{}
+	// ClusterLog must still exist at seam-tenant-ccs-mgmt/ccs-mgmt — never deleted.
+	tcor := &seamplatformv1alpha1.ClusterLog{}
 	if err := c.Get(context.Background(), types.NamespacedName{
 		Name: "ccs-mgmt", Namespace: "seam-tenant-ccs-mgmt",
 	}, tcor); err != nil {
