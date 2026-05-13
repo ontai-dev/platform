@@ -1,794 +1,635 @@
 # platform-schema
-> API Group: platform.ontai.dev (operational CRDs: TalosControlPlane, TalosWorkerConfig, EtcdMaintenance, NodeMaintenance, PKIRotation, ClusterReset, HardeningProfile, UpgradePolicy, NodeOperation, ClusterMaintenance, PlatformTenant, QueueProfile, MaintenanceBundle)
-> InfrastructureTalosCluster: infrastructure.ontai.dev/v1alpha1 -- schema owned by seam-core (Decision G). Platform reconciles it; does not define it.
-> Operator: Platform
-> CAPI Providers: cluster.x-k8s.io, bootstrap.cluster.x-k8s.io, infrastructure.cluster.x-k8s.io
-> Amended: 2026-03-30 - CAPI adopted for target cluster lifecycle. Management cluster
->   bootstrap unchanged. SeamInfrastructureMachine CRD introduced. Kueue scoped to
->   Wrapper quota profile. Operational CRDs retained where CAPI has no equivalent.
+> API Group: seam.ontai.dev/v1alpha1 (TalosCluster, ClusterLog -- cross-operator CRDs)
+> API Group: platform.ontai.dev/v1alpha1 (all day-2 operational CRDs)
+> API Group: infrastructure.cluster.x-k8s.io (CAPI types -- frozen, out of scope)
+> Operator: platform
+> Schema authority: this file (primary). ~/ontai/seam/docs/seam-schema.md (RunnerConfig). ~/ontai/conductor/docs/conductor-schema.md (capabilities). ~/ontai/guardian/docs/guardian-schema.md (RBACProfile gate). ~/ontai/dispatcher/docs/dispatcher-schema.md (PackInstalled gate for Cilium).
 
 ---
 
 ## 1. Domain Boundary
 
-Platform owns the complete lifecycle of Talos clusters and all tenant
-coordination. It does this by composing CAPI primitives for target cluster
-lifecycle while preserving Seam's governing principles - declarative, versioned,
-auditable, and security-first.
+Platform owns the complete lifecycle of Talos clusters and all day-2 operational coordination. It does this by composing CAPI primitives for target cluster lifecycle while preserving Seam governing principles: declarative, versioned, auditable, and security-first.
 
-Platform is the CAPI management plane operator. It creates and owns CAPI
-objects (Cluster, TalosControlPlane, MachineDeployment, SeamInfrastructureMachine)
-as children of the ONT TalosCluster CR. CAPI controllers reconcile those objects
-to actual cluster state through the Seam Infrastructure Provider and CABPT.
+Platform is the CAPI management plane operator. It creates and owns CAPI objects (SeamInfrastructureCluster, cluster.x-k8s.io/Cluster, TalosControlPlane, MachineDeployment, TalosConfigTemplate, SeamInfrastructureMachineTemplate) as children of TalosCluster for target clusters. CAPI controllers reconcile those objects to actual cluster state through the Seam Infrastructure Provider and CABPT.
 
-**What changes with CAPI adoption:**
-- Target cluster lifecycle (bootstrap, upgrade, scale, health) is delegated to CAPI.
-- The Seam Infrastructure Provider (part of Platform) delivers machineconfigs
-  to nodes on port 50000 - it is the Talos-specific infrastructure layer.
-- Kueue Jobs are no longer used for cluster lifecycle operations.
-- Kueue is retained as a prerequisite exclusively for Wrapper pack-deploy Jobs.
-- CAPI provides the observability (Machine status, Cluster conditions, events)
-  that Kueue Jobs previously provided for cluster operations.
+What does not change from the pre-CAPI model:
 
-**What does not change:**
-- Management cluster bootstrap remains Seam-native. CAPI cannot bootstrap the
-  cluster it runs on. See Section 3 for the unchanged management cluster path.
-- All Seam security plane rules. CAPI's RBAC goes through Guardian intake.
-- Guardian deploys before CAPI. CAPI is installed in the enable phase after
-  Guardian is operational.
-- TalosCluster is still the Seam root CR for every cluster. CAPI objects are
-  children of TalosCluster, not the other way around.
-- Operational CRDs with no CAPI equivalent remain and use Conductor capabilities
-  invoked via direct controller reconciliation.
-- Platform creates tenant namespaces. Sole namespace authority unchanged.
+- Management cluster bootstrap remains Seam-native. CAPI cannot bootstrap the cluster it runs on.
+- TalosCluster is still the Seam root CR for every cluster. CAPI objects are children of TalosCluster, not the other way around.
+- Operational CRDs with no CAPI equivalent remain and use Conductor capabilities via direct controller reconciliation.
+- Platform creates tenant namespaces. CP-INV-004 applies without exception.
+- Guardian deploys before platform. Platform starts only after Guardian RBACProfile reaches provisioned=true (CP-INV-012).
 
 ---
 
-## 2. CAPI Provider Architecture
+## 2. Master GVK Reference
 
-### 2.1 Providers Installed on Management Cluster
+### seam.ontai.dev/v1alpha1
 
-**CAPI Core** (cluster.x-k8s.io) - Cluster, Machine, MachineDeployment,
-MachineSet, MachineHealthCheck controllers. These are the battle-tested cluster
-lifecycle primitives. Installed via OperatorManifest in the enable phase, after
-Guardian.
+These types are defined in platform/api/seam/v1alpha1/ and are schema-shared across the platform and seam modules. Platform reconciles them; seam is the canonical source of the type definitions for cross-operator consumption.
 
-**CABPT** (bootstrap.cluster.x-k8s.io) - Cluster API Bootstrap Provider Talos.
-Generates TalosConfig and renders machineconfigs per Machine. Patches TalosConfig
-with cluster-specific CNI=none and kernel parameters needed for Cilium. CABPT is
-the source of rendered machineconfig data that the Seam Infrastructure Provider
-delivers to nodes.
+| Kind | Short | Scope | Namespace |
+|------|-------|-------|-----------|
+| TalosCluster | tc | Namespaced | seam-system (management), seam-tenant-{cluster-name} (target) |
+| ClusterLog | clog | Namespaced | seam-tenant-{cluster-name} |
 
-**Seam Infrastructure Provider** - a purpose-built Platform component that
-implements the CAPI InfrastructureCluster and InfrastructureMachine contracts.
-It does not call any cloud API. It watches SeamInfrastructureCluster and
-SeamInfrastructureMachine objects and delivers machineconfigs to pre-provisioned
-Talos nodes on port 50000 using the talos goclient embedded in the provider binary.
-This is the only place in Platform that uses the talos goclient after bootstrap.
-The provider is a distroless Go binary - talos goclient + kube goclient only.
+### platform.ontai.dev/v1alpha1
 
-### 2.2 CAPI Object Ownership
+All day-2 operational CRDs are owned exclusively by platform.
 
-Platform's TalosCluster reconciler creates and owns:
-- SeamInfrastructureCluster (infra reference for the CAPI Cluster)
-- cluster.x-k8s.io/Cluster (owns TalosControlPlane and MachineDeployments)
-- TalosControlPlane (CACPPT - control plane management)
-- MachineDeployment per node role (control plane, worker)
-- TalosConfigTemplate (CABPT - machineconfig generation template with CNI patches)
-- SeamInfrastructureMachineTemplate (template for SeamInfrastructureMachine per node)
+| Kind | Short | Scope | Conductor capabilities |
+|------|-------|-------|------------------------|
+| EtcdMaintenance | em | Namespaced | etcd-backup, etcd-restore, etcd-defrag |
+| TalosEtcdBackupSchedule | etcdbs | Namespaced | (schedule controller; creates EtcdMaintenance CRs) |
+| NodeMaintenance | nm | Namespaced | node-patch, hardening-apply, credential-rotate |
+| NodeOperation | nop | Namespaced | node-scale-up, node-decommission, node-reboot (non-CAPI path only) |
+| PKIRotation | pkir | Namespaced | pki-rotate |
+| ClusterReset | crst | Namespaced | cluster-reset |
+| ClusterMaintenance | cmaint | Namespaced | (no Job; CAPI pause or Conductor gate) |
+| UpgradePolicy | upgp | Namespaced | talos-upgrade, kube-upgrade, stack-upgrade (non-CAPI path only) |
+| HardeningProfile | hp | Namespaced | (configuration CR; no Job submission) |
+| MaintenanceBundle | mb | Namespaced | drain, upgrade, etcd-backup, machineconfig-rotation |
+| TalosMachineConfigBackup | mcb | Namespaced | machineconfig-backup |
+| TalosMachineConfigBackupSchedule | mcbs | Namespaced | (schedule controller; creates TalosMachineConfigBackup CRs) |
+| TalosMachineConfigRestore | mcr | Namespaced | machineconfig-restore |
 
-These are all created in the tenant-{cluster-name} namespace and owned by the
-TalosCluster CR via ownerReference. Deleting TalosCluster cascades to all owned
-CAPI objects through Kubernetes garbage collection, which triggers CAPI's own
-deletion reconciliation. Seam finalizers on TalosCluster gate this to ensure
-security plane cleanup happens before cascade.
+### infrastructure.cluster.x-k8s.io (CAPI -- frozen)
 
-### 2.3 Cilium CNI Integration
+| Kind | Short | Purpose |
+|------|-------|---------|
+| SeamInfrastructureCluster | sic | Cluster-level CAPI InfrastructureCluster implementation |
+| SeamInfrastructureMachine | sim | Per-node CAPI InfrastructureMachine implementation |
 
-Every TalosConfigTemplate created by Platform includes:
-- cluster.network.cni.name: none (disables default CNI, required for Cilium)
-- BPF kernel parameters in machine config patches
-- Cilium-required sysctl values
-
-After CAPI bootstraps the cluster (nodes reach Running state but are NotReady
-because no CNI is present), Platform triggers a PackExecution for the Cilium
-ClusterPack referenced by spec.capi.ciliumPackRef. This is the first pack deployed
-to every cluster. Nodes transition to Ready only after Cilium is up.
-
-The CAPI MachineHealthCheck is configured with a tolerance window for the CNI
-installation period - nodes are not remediated during this window.
-
-The Cilium ClusterPack is compiled per-cluster on the workstation with values
-specific to the cluster endpoint, IPAM mode, L2 announcement configuration, MTU,
-and routing mode. It is not a generic pack - it carries the cluster endpoint
-address at compile time.
+CAPI types are frozen. Platform implements the CAPI contracts for these types through the Seam Infrastructure Provider but does not modify their schemas.
 
 ---
 
-## 3. Management Cluster Bootstrap - Unchanged
+## 3. TalosCluster (seam.ontai.dev/v1alpha1)
 
-Management cluster bootstrap does not use CAPI. CAPI cannot bootstrap the cluster
-it runs on. The management cluster bootstrap path is:
-
-Human runs Compiler compile mode → generates machineconfigs, SOPS-encrypts
-secrets → secrets committed to git → TalosCluster CR (mode: bootstrap) committed
-to git → GitOps applies to a temporary Kubernetes context (or direct kubectl) →
-Platform generates a bootstrap Job using compiler directly → conductor pushes
-machineconfigs to seed nodes on port 50000 → etcd initializes → Kubernetes API
-comes up → enable phase installs Guardian first, then CAPI providers and
-remaining prerequisites, then other operators.
-
-After the management cluster exists, CAPI is installed and manages only target
-clusters. The management cluster's own TalosCluster CR in seam-system has
-mode: bootstrap and no CAPI children - management cluster lifecycle is not
-CAPI-managed.
-
----
-
-## 4. Seam Infrastructure CRDs
-
-### SeamInfrastructureMachine
-
-Scope: Namespaced - tenant-{cluster-name}
-Short name: sim
-API group: infrastructure.cluster.x-k8s.io (CAPI infrastructure contract)
-
-Wraps a pre-provisioned node IP address and its connection parameters. This is the
-Seam-native implementation of the CAPI InfrastructureMachine contract. One
-SeamInfrastructureMachine per node in the cluster.
-
-The human (or GitOps) declares the available node IPs as SeamInfrastructureMachine
-objects in the tenant namespace before the cluster is bootstrapped. The Seam
-Infrastructure Provider watches for CAPI Machine objects that reference these and
-delivers the CABPT-rendered machineconfig to the declared IP on port 50000.
-
-Key spec fields:
-- address: the pre-provisioned node IP address reachable on port 50000.
-- port: Talos maintenance API port. Default 50000.
-- talosConfigSecretRef: reference to the talosconfig secret in ont-system that
-  the provider uses to authenticate the ApplyConfiguration call.
-- nodeRole: controlplane or worker. Must match the MachineDeployment role.
-
-Status fields (set by the Seam Infrastructure Provider):
-- ready: bool. Set to true after machineconfig is applied and the node transitions
-  out of maintenance mode.
-- machineConfigApplied: bool.
-- providerID: the provider ID string written back to the CAPI Machine object.
-  Format: talos://{cluster-name}/{node-ip}
-
-CAPI contract compliance: SeamInfrastructureMachine implements the InfrastructureMachine
-contract by setting status.ready=true when the machine is provisioned, and writing
-spec.providerID back to the owning Machine object.
-
----
-
-### SeamInfrastructureCluster
-
-Scope: Namespaced - tenant-{cluster-name}
-Short name: sic
-API group: infrastructure.cluster.x-k8s.io
-
-The cluster-level CAPI infrastructure reference. Holds the cluster endpoint and
-any cluster-wide infrastructure parameters. One per cluster. Owned by the CAPI
-Cluster object.
-
-Key spec fields:
-- controlPlaneEndpoint.host: the VIP or first control plane IP. Written into
-  the CAPI Cluster object and into all generated machineconfigs via CABPT.
-- controlPlaneEndpoint.port: Kubernetes API port. Default 6443.
-
-Status fields:
-- ready: bool. Set to true after all control plane SeamInfrastructureMachine
-  objects have status.ready=true.
-
----
-
-### TalosControlPlane
-
-Scope: Namespaced - tenant-{cluster-name}
-Short name: tcpl
-API group: platform.ontai.dev
-
-Dual-mode CRD. At compile time it serves as a command contract: Compiler reads
-TalosControlPlane spec to generate management cluster bootstrap configuration
-before any live cluster exists. At cluster runtime it is a live CR reconciled by
-Platform. Carries the admin's complete control plane configuration intent.
-
-Must never be merged with TalosWorkerConfig - they evolve independently and a
-combined CRD would risk CRD size limits.
-
-Key spec fields: replicas, talosVersion, kubernetesVersion, machineConfigPatches,
-hardeningProfileRef, endpointVIP, installerImage.
-
-TalosCluster references TalosControlPlane by name in its spec.
-
----
-
-### TalosWorkerConfig
-
-Scope: Namespaced - tenant-{cluster-name}
-Short name: twc
-API group: platform.ontai.dev
-
-Dual-mode CRD. Same dual-mode pattern as TalosControlPlane - compile-time command
-contract and live cluster CR. Carries worker node machine configuration intent per
-pool. Must never be merged with TalosControlPlane.
-
-Key spec fields: pools (each with name, replicas, machineConfigPatches, nodeLabels,
-nodeTaints), talosVersion, installerImage, hardeningProfileRef.
-
-TalosCluster references TalosWorkerConfig by name in its spec.
-
----
-
-**Dual-mode pattern:** Both TalosControlPlane and TalosWorkerConfig operate in two
-modes. In compile mode, Compiler reads them as command contracts to generate bootstrap
-artifacts before any cluster exists. In runtime mode, Platform reconciles them as live
-CRs on running clusters, creating TalosConfigTemplate and CABPT objects from their
-specs.
-
----
-
-## 5. CRDs - Platform-Owned
-
-These CRDs are owned by Platform. They are not delegated to CAPI because CAPI has
-no equivalent concept, or because they represent dual-path operations where the
-management cluster path requires a direct conductor Job while CAPI handles the target
-cluster path natively.
-
-### InfrastructureTalosCluster
-
-Kind: InfrastructureTalosCluster. API group: infrastructure.ontai.dev/v1alpha1. Schema owned by seam-core (Decision G). Supersedes platform.ontai.dev/TalosCluster (Phase 2B, 2026-04-25).
-Platform reconciles this type but does not own its CRD definition. Condition constants are imported from seam-core/pkg/conditions, not defined locally in platform.
-Scope: Namespaced - seam-system (management), seam-tenant-{cluster-name} (target)
+Scope: Namespaced -- seam-system (management cluster) or seam-tenant-{cluster-name} (target clusters)
 Short name: tc
-Lives in: git and management cluster.
+Print columns: Mode, Role, Ready, Age
 
-The Seam root CR for every cluster. For target clusters, InfrastructureTalosCluster owns all
-CAPI objects as children. For the management cluster, InfrastructureTalosCluster has no CAPI
-children - it is the bootstrap record and operational anchor.
+The Seam root CR for every cluster. For target clusters, TalosCluster owns all CAPI objects as children via ownerReference (CP-INV-008). For the management cluster, TalosCluster has no CAPI children.
 
-spec.mode (v1alpha1 only): bootstrap or import. As before.
+Deletion of a TalosCluster CR never triggers physical cluster destruction (INV-015). ClusterReset is the only destruction path.
 
-Fields introduced with CAPI adoption:
-- capi.enabled: bool. True for all target clusters. False for management cluster.
-  When true, the TalosCluster reconciler creates CAPI objects. When false, it
-  follows the direct bootstrap path.
-- capi.talosVersion: Talos version to pass to TalosConfigTemplate and CABPT.
-- capi.kubernetesVersion: Kubernetes version for TalosControlPlane.
-- capi.controlPlane.replicas: number of control plane nodes.
-- capi.workers: list of worker pools, each with a name, replica count, and
-  list of SeamInfrastructureMachine names pre-provisioned for that pool.
-- capi.ciliumPackRef: the ClusterPack name and version for Cilium. Platform
-  triggers a PackExecution for this pack when the cluster reaches CAPI Running
-  state, before marking the cluster Ready.
+### spec fields
 
-status.origin: bootstrapped or imported. Unchanged.
-status.capiClusterRef: reference to the owned CAPI Cluster object.
-Status conditions: Ready, Bootstrapping, Importing, Degraded, CiliumPending.
+| Field | Type | Required | Description |
+|-------|------|----------|-------------|
+| mode | string (bootstrap, import) | yes | bootstrap: cluster is formed from scratch. import: existing cluster brought under Seam governance. |
+| role | string (management, tenant) | required when mode=import | Declares cluster role in Seam topology. |
+| talosVersion | string | no | Talos OS version for this cluster. Must match RunnerConfig.agentImage tag (INV-012). |
+| kubernetesVersion | string | no | Kubernetes version for this cluster. When versionUpgrade=true, drives an UpgradeTypeKubernetes policy. |
+| versionUpgrade | bool | no | When true, triggers a cluster-level rolling upgrade. Upgrade type derived from which version fields are set: talosVersion only = UpgradeTypeTalos; kubernetesVersion only = UpgradeTypeKubernetes; both = UpgradeTypeStack. |
+| clusterEndpoint | string | no | Cluster VIP or primary API endpoint IP. |
+| nodeAddresses | []string | no | Node IPs for DNS A-record population. |
+| capi | CAPIConfig | no | CAPI integration settings. When absent, direct bootstrap path is used. |
+| infrastructureProvider | string (native, capi, screen) | no | Default: native. screen is reserved (INV-021). |
+| kubeconfigSecretRef | string | no | Name of the Secret containing the kubeconfig. Required on mode=import. Not used when CAPI manages lifecycle. |
+| talosconfigSecretRef | string | no | Name of the Secret containing the talosconfig. |
+| lineage | SealedCausalChain | no | Sealed causal chain record. Immutable after creation (Decision 1). |
+| pkiRotationThresholdDays | int32 | no | Days before cert expiry at which a PKIRotation CR is auto-created. Default 30, minimum 1. |
+| hardeningProfileRef | LocalObjectRef | no | HardeningProfile CR to apply at bootstrap. |
 
-CiliumPending is set when the cluster reaches CAPI Running state but the Cilium
-ClusterPack has not yet reached PackInstance.Ready. Nodes are NotReady during
-this window. This is expected and not a degraded state.
+### spec.capi fields (CAPIConfig)
+
+| Field | Type | Required | Description |
+|-------|------|----------|-------------|
+| enabled | bool | yes (within capi block) | True for all target clusters. False for management cluster. |
+| talosVersion | string | no | Talos version for TalosConfigTemplate generation. |
+| kubernetesVersion | string | no | Kubernetes version for TalosControlPlane. |
+| controlPlane | CAPIControlPlaneConfig | no | Control plane configuration. Required when enabled=true. |
+| controlPlane.replicas | int32 | no | Desired number of control plane nodes. |
+| workers | []CAPIWorkerPool | no | Worker node pools. |
+| workers[].name | string | yes | Pool identifier. Used as MachineDeployment name suffix. |
+| workers[].replicas | int32 | no | Desired number of worker nodes in this pool. |
+| workers[].seamInfrastructureMachineNames | []string | no | SeamInfrastructureMachine CR names pre-provisioned for this pool. |
+| ciliumPackRef | CAPICiliumPackRef | no | PackDelivery name and version for the Cilium pack. Platform triggers a PackExecution for this pack when the CAPI Cluster reaches Running state. |
+
+### status fields
+
+| Field | Type | Description |
+|-------|------|-------------|
+| observedGeneration | int64 | Generation most recently reconciled. |
+| origin | string (bootstrapped, imported) | How this cluster came under Seam governance. |
+| observedTalosVersion | string | Talos version last confirmed running. |
+| capiClusterRef | LocalObjectRef | Reference to the owned CAPI Cluster object. Only set for capi.enabled=true. |
+| conditions | []metav1.Condition | Status conditions. |
+| pkiExpiryDate | *metav1.Time | Earliest certificate expiry across talosconfig and kubeconfig Secrets. |
+
+### Status condition types
+
+| Condition | Meaning |
+|-----------|---------|
+| Ready | Cluster is fully operational. |
+| Bootstrapping | Bootstrap Job submitted and running. |
+| Bootstrapped | Bootstrap sequence complete. |
+| Importing | Import sequence in progress. |
+| Degraded | Cluster has entered a degraded state. |
+| CiliumPending | CAPI cluster Running but Cilium PackInstance not yet Ready. Not a degraded state (CP-INV-013). |
+| ControlPlaneUnreachable | Control plane API is not responding. |
+| PartialWorkerAvailability | One or more worker nodes are not Ready. |
+| ConductorReady | Conductor agent Deployment is running on the tenant cluster. |
+| VersionUpgradePending | versionUpgrade=true and upgrade is queued. |
+| VersionRegressionBlocked | A version downgrade was attempted and blocked. |
+| HardeningApplied | HardeningProfile has been applied at bootstrap. |
 
 ---
 
-### EtcdMaintenance
+## 4. ClusterLog (seam.ontai.dev/v1alpha1)
 
-Scope: Namespaced - tenant-{cluster-name}
-Short name: em
-Named conductor capabilities: etcd-backup, etcd-restore, etcd-defrag
+Scope: Namespaced -- seam-tenant-{clusterRef}
+Short name: clog
+Print columns: Cluster, TalosVersion, Revision, Ops, Age
 
-Absorbs TalosBackup, TalosEtcdMaintenance, TalosRecovery. Covers all etcd
-lifecycle operations for both management and target clusters. CAPI has no etcd
-concept. Always a direct conductor (mode: execute) Job regardless of spec.capi.enabled on TalosCluster.
+Accumulates the day-2 operation history for one cluster, scoped to the current talosVersion revision. One CR per cluster. Created by platform when the cluster tenant namespace is provisioned. Named by the cluster name.
 
-Key spec fields: clusterRef, operation (backup, restore, defrag), s3Destination (for
-backup), s3SnapshotPath (for restore), targetNodes (for restore), schedule (for
-recurring backup).
+When the cluster talosVersion is upgraded, the current revision is archived to the GraphQuery DB and a new revision begins: Revision increments, TalosVersion is updated, and Operations is cleared.
+
+Operations are appended by the Conductor execute-mode Job. The platform reconciler uses the JobRef field to correlate each record with the Job it submitted.
+
+### spec fields
+
+| Field | Type | Required | Description |
+|-------|------|----------|-------------|
+| clusterRef | string | yes | Name of the TalosCluster this log accumulates. |
+| talosVersion | string | yes | Talos version for the current active revision. Matches TalosCluster.spec.talosVersion at revision start. |
+| revision | int64 | yes | Monotonic revision counter. Starts at 1. Increments on each talosVersion upgrade. |
+| operations | map[string]OperationRecord | no | Day-2 operation records for the current revision, keyed by Kubernetes Job name. |
+| operationCount | int64 | no | Count of records in operations. Maintained alongside operations for kubectl display. |
+
+### OperationRecord fields
+
+| Field | Type | Description |
+|-------|------|-------------|
+| capability | string | Conductor capability that produced this record. |
+| jobRef | string | Kubernetes Job name that produced this record. |
+| status | string (Succeeded, Failed) | Terminal status of the capability execution. |
+| message | string | Human-readable summary of the outcome. |
+| startedAt | *metav1.Time | Time the capability execution began. |
+| completedAt | *metav1.Time | Time the capability execution finished. |
+| failureReason | *OperationFailureReason | Populated when status is Failed. |
+
+### OperationFailureReason fields
+
+| Field | Values | Description |
+|-------|--------|-------------|
+| category | ValidationFailure, CapabilityUnavailable, ExecutionFailure, ExternalDependencyFailure, InvariantViolation | Failure domain classification. |
+| reason | string | Human-readable failure description. |
 
 ---
 
-### NodeMaintenance
+## 5. Operational CRD Catalog (platform.ontai.dev/v1alpha1)
 
-Scope: Namespaced - tenant-{cluster-name}
-Short name: nm
-Named conductor capabilities: node-patch, hardening-apply, credential-rotate
+All operational CRDs live in seam-tenant-{cluster-name} namespaces. All Conductor capabilities referenced here must be verified against conductor-schema.md before any implementation work begins.
 
-Absorbs TalosNodePatch, TalosHardeningApply, TalosCredentialRotation. Covers
-targeted node-level operations CAPI has no equivalent for. Applies to both
-management and target clusters via direct conductor(mode: execute) Job regardless of spec.capi.enabled.
+### EtcdMaintenance (shortName: em)
 
-Key spec fields: clusterRef, operation (patch, hardening-apply, credential-rotate),
-targetNodes, patchSecretRef (for patch), hardeningProfileRef (for hardening-apply),
-rotateServiceAccountKeys and rotateOIDCCredentials (for credential-rotate).
+Covers all etcd lifecycle operations. CAPI has no etcd concept. Always submits a direct Conductor executor Job regardless of the owning TalosCluster's capi.enabled.
+
+Named Conductor capabilities: etcd-backup, etcd-restore, etcd-defrag.
+
+Key spec fields:
+
+| Field | Type | Required | Description |
+|-------|------|----------|-------------|
+| clusterRef | LocalObjectRef | yes | TalosCluster this operation targets. |
+| operation | string (backup, restore, defrag) | yes | Etcd lifecycle operation to perform. |
+| etcdBackupS3SecretRef | *corev1.SecretReference | no | S3 credentials Secret. Takes precedence over cluster-wide seam-etcd-backup-config. Required for backup when no cluster default is configured. See S3 resolution hierarchy in section 8. |
+| s3Destination | *S3Ref | no | S3 location to write the snapshot to. Required when operation=backup. |
+| s3SnapshotPath | *S3Ref | no | S3 location of snapshot to restore from. Required when operation=restore. |
+| targetNodes | []string | no | Nodes to target for restore. All etcd members when empty. |
+| pvcFallbackEnabled | bool | no | Instructs reconciler to proceed with PVC-backed backup when no S3 destination is configured (degraded mode). See section 8. |
+| schedule | string | no | Cron expression for recurring backup operations. |
+
+Status condition types: Ready, Running, Degraded.
 
 ---
 
-### PKIRotation
+### TalosEtcdBackupSchedule (shortName: etcdbs)
 
-Scope: Namespaced - tenant-{cluster-name}
-Short name: pkir
-Named Conductor capability: pki-rotate
+Schedule controller. Creates EtcdMaintenance CRs with operation=backup on a repeating interval. The schedule field accepts Go duration strings (e.g. "24h", "6h").
 
-Absorbs TalosPKIRotation. Single-purpose. Applies to both management and target
-clusters via direct conductor(mode: execute) Job. CAPI has no PKI rotation equivalent.
+No Conductor Job submitted directly. All actual work is delegated to the EtcdMaintenance CRs this controller creates.
+
+Key spec fields: clusterRef, schedule, s3Destination, etcdBackupS3SecretRef.
+
+Status fields: nextRunAt, lastRunAt, lastBackupName.
+
+---
+
+### NodeMaintenance (shortName: nm)
+
+Targeted node-level operations that CAPI has no equivalent for. Applies to both management and target clusters via direct Conductor executor Job regardless of capi.enabled.
+
+Named Conductor capabilities: node-patch, hardening-apply, credential-rotate.
+
+Key spec fields:
+
+| Field | Type | Required | Description |
+|-------|------|----------|-------------|
+| clusterRef | LocalObjectRef | yes | TalosCluster this operation targets. |
+| operation | string (patch, hardening-apply, credential-rotate) | yes | Node-level operation to perform. |
+| targetNodes | []string | no | Node names or IPs to target. All nodes when empty. |
+| patchSecretRef | *SecretRef | no | Secret containing the machine config patch YAML. Required when operation=patch. |
+| hardeningProfileRef | *LocalObjectRef | no | HardeningProfile CR to apply. Required when operation=hardening-apply. |
+| rotateServiceAccountKeys | bool | no | Rotate service account signing keys. Applies when operation=credential-rotate. |
+| rotateOIDCCredentials | bool | no | Rotate OIDC credentials. Applies when operation=credential-rotate. |
+
+Status condition types: Ready, Degraded.
+
+---
+
+### NodeOperation (shortName: nop)
+
+Node lifecycle operations. Dual-path CRD governed by capi.enabled on the owning TalosCluster.
+
+CAPI path (capi.enabled=true): modifies MachineDeployment replicas for scale-up, deletes specific Machine objects for decommission, or sets the Machine reboot annotation. All handled natively by CAPI. No Conductor Job submitted.
+
+Non-CAPI path (capi.enabled=false): submits node-scale-up, node-decommission, or node-reboot Conductor executor Job.
+
+Named Conductor capabilities (non-CAPI path only): node-scale-up, node-decommission, node-reboot.
+
+Key spec fields:
+
+| Field | Type | Required | Description |
+|-------|------|----------|-------------|
+| clusterRef | LocalObjectRef | yes | TalosCluster this operation targets. |
+| operation | string (scale-up, decommission, reboot) | yes | Node lifecycle operation to perform. |
+| targetNodes | []string | no | Node names for decommission or reboot. Required when operation=decommission or reboot. |
+| replicaCount | int32 | no | Desired worker replicas after scale-up. Required when operation=scale-up. |
+
+Status condition types: Ready, Degraded, CAPIDelegated.
+
+---
+
+### PKIRotation (shortName: pkir)
+
+Cluster PKI certificate rotation. Always submits a direct Conductor executor Job via the pki-rotate named capability regardless of capi.enabled. CAPI has no PKI rotation equivalent.
+
+Named Conductor capability: pki-rotate.
 
 Key spec fields: clusterRef.
 
----
+Status fields: jobName, operationResult.
+Status condition types: Ready, Degraded.
 
-### ClusterReset
-
-Scope: Namespaced - tenant-{cluster-name}
-Short name: crst
-Named conductor capability: cluster-reset
-
-Absorbs TalosClusterReset. Destructive factory reset. Human gate required:
-ontai.dev/reset-approved=true annotation must be present before any reconciliation
-proceeds.
-
-For CAPI-managed clusters (spec.capi.enabled=true): deletes CAPI Cluster object
-first, waits for all Machine objects to reach Deleted phase through the Seam
-Infrastructure Provider, then submits cluster-reset conductor(mode: execute) Job.
-
-For management cluster (spec.capi.enabled=false): submits cluster-reset Conductor(mode: execute) Job directly.
-
-Key spec fields: clusterRef, drainGracePeriodSeconds, wipeDisks.
+PKI rotation automation: TalosCluster reconciler monitors pkiExpiryDate and auto-creates a PKIRotation CR when expiry is within pkiRotationThresholdDays days. On-demand rotation is triggered by applying the `platform.ontai.dev/rotate-pki=true` annotation to the TalosCluster CR.
 
 ---
 
-### HardeningProfile
+### ClusterReset (shortName: crst)
 
-Scope: Namespaced
-Short name: hp
+Destructive factory reset. HUMAN GATE REQUIRED: the `ontai.dev/reset-approved=true` annotation must be present before any reconciliation proceeds (CP-INV-006, INV-007). The reconciler holds at PendingApproval and emits an event if the annotation is absent.
 
-Absorbs TalosHardeningProfile. Configuration CR only - not an operational Job
-trigger. Reusable hardening ruleset referenced by NodeMaintenance at runtime and
-by TalosControlPlane and TalosWorkerConfig at compile time.
+CAPI path (capi.enabled=true): deletes CAPI Cluster object first, waits for all Machine objects to reach Deleted phase through the Seam Infrastructure Provider, then submits the cluster-reset Conductor Job.
 
-Key spec fields: machineConfigPatches, sysctlParams, description.
+Non-CAPI path (capi.enabled=false): submits cluster-reset Conductor Job directly.
 
----
+Named Conductor capability: cluster-reset.
 
-### UpgradePolicy
+Key spec fields:
 
-Scope: Namespaced - tenant-{cluster-name}
-Short name: upgp
+| Field | Type | Required | Description |
+|-------|------|----------|-------------|
+| clusterRef | LocalObjectRef | yes | TalosCluster to reset. |
+| drainGracePeriodSeconds | int32 | no | Seconds to wait for node drain before forcing the reset. Default 300. |
+| wipeDisks | bool | no | Whether to call the Talos reset API with wipeDisks=true. Default false. |
 
-Absorbs TalosUpgrade, TalosKubeUpgrade, TalosStackUpgrade. Dual-path CRD governed
-by spec.capi.enabled on the owning TalosCluster.
-
-For CAPI-managed clusters (spec.capi.enabled=true): updates TalosControlPlane
-version field and MachineDeployment rolling upgrade settings natively through CAPI
-machinery - no conductor(mode: execute) Job submitted.
-
-For management cluster (spec.capi.enabled=false): submits talos-upgrade, kube-upgrade,
-or stack-upgrade conductor(mode: execute) Job via OperationalJobReconciler routing.
-
-Key spec fields: clusterRef, upgradeType (talos, kubernetes, stack),
-targetTalosVersion, targetKubernetesVersion, rollingStrategy, healthGateConditions.
+Status condition types: PendingApproval, Ready, Degraded.
 
 ---
 
-### NodeOperation
+### ClusterMaintenance (shortName: cmaint)
 
-Scope: Namespaced - tenant-{cluster-name}
-Short name: nop
+Maintenance window gate. Dual-path CRD governed by capi.enabled on the owning TalosCluster.
 
-Absorbs TalosNodeScaleUp, TalosNodeDecommission, TalosReboot. Dual-path CRD
-governed by spec.capi.enabled on the owning TalosCluster.
+CAPI path (capi.enabled=true): sets `cluster.x-k8s.io/paused=true` on the CAPI Cluster when no active window exists and blockOutsideWindows=true. Pause halts all CAPI reconciliation until the window opens and the annotation is lifted.
 
-For CAPI-managed clusters (spec.capi.enabled=true): modifies MachineDeployment
-replicas for scale-up, deletes specific Machine objects for decommission, or sets
-Machine reboot annotation - all handled natively by CAPI.
+Non-CAPI path (capi.enabled=false): blocks Conductor Job admission gate for the cluster during restricted periods.
 
-For management cluster (spec.capi.enabled=false): submits node-scale-up,
-node-decommission, or node-reboot conductor(mode: execute) Job.
+No Conductor Job is submitted by this CRD.
 
-Key spec fields: clusterRef, operation (scale-up, decommission, reboot),
-targetNodes, replicaCount (for scale-up).
+Key spec fields:
 
----
+| Field | Type | Required | Description |
+|-------|------|----------|-------------|
+| clusterRef | LocalObjectRef | yes | TalosCluster this maintenance gate controls. |
+| windows | []MaintenanceWindow | no | Maintenance windows during which operations are permitted. |
+| windows[].name | string | no | Optional label for this window. |
+| windows[].start | string | yes | Window start time in cron format (e.g. "0 2 * * 6" for 02:00 every Saturday UTC). |
+| windows[].durationMinutes | int32 | yes | Length of the maintenance window in minutes. |
+| windows[].timezone | string | no | IANA timezone for interpreting the cron schedule. Default UTC. |
+| blockOutsideWindows | bool | no | Block operations when no active window exists. Default false. |
 
-### ClusterMaintenance
-
-Scope: Namespaced - tenant-{cluster-name}
-Short name: cmaint
-
-Absorbs TalosNoMaintenance. Maintenance window gate.
-
-For CAPI-managed clusters (spec.capi.enabled=true): sets cluster.x-k8s.io/paused=true
-on the CAPI Cluster object when no active window exists and blockOutsideWindows=true.
-Pause halts all CAPI reconciliation until the window opens and the annotation is lifted.
-
-For management cluster (spec.capi.enabled=false): blocks conductor(mode: execute) Job admission gate for
-the cluster during restricted periods.
-
-Key spec fields: clusterRef, windows, blockOutsideWindows.
+Status fields: activeWindowName.
+Status condition types: Paused, WindowActive.
 
 ---
 
-## 6. Tenant Coordination CRDs
+### UpgradePolicy (shortName: upgp)
 
-### PlatformTenant, QueueProfile
+Governs Talos OS, Kubernetes, or combined stack upgrades. Dual-path CRD governed by capi.enabled on the owning TalosCluster.
 
-PlatformTenant and QueueProfile semantics, namespace placement, and gate conditions
-are unchanged. ClusterAssignment has been removed -- it was a pre-seam binding record
-with no role in the current seam operator family. Cilium bootstrap is now triggered
-directly by Platform via spec.capi.ciliumPackRef when the CAPI Cluster reaches
-Running state.
+CAPI path (capi.enabled=true): updates TalosControlPlane version and MachineDeployment rolling upgrade settings natively through CAPI machinery. No Conductor Job submitted.
 
-QueueProfile is scoped to Wrapper's quota profile only. The ClusterQueue and
-ResourceFlavor resources provisioned by Guardian from QueueProfile govern
-pack-deploy Job admission - cluster lifecycle operations no longer go through Kueue.
+Non-CAPI path (capi.enabled=false): submits talos-upgrade, kube-upgrade, or stack-upgrade Conductor executor Job.
 
-**LicenseKey has been removed.** Seam has no licensing tier, no JWT enforcement,
-and no cluster count limits.
+Named Conductor capabilities (non-CAPI path only): talos-upgrade, kube-upgrade, stack-upgrade.
 
----
+Key spec fields:
 
-## 7. Kueue Scope
+| Field | Type | Required | Description |
+|-------|------|----------|-------------|
+| clusterRef | LocalObjectRef | yes | TalosCluster this upgrade targets. |
+| upgradeType | string (talos, kubernetes, stack) | yes | Type of upgrade to perform. |
+| targetTalosVersion | string | no | Target Talos version. Required when upgradeType=talos or stack. |
+| targetKubernetesVersion | string | no | Target Kubernetes version. Required when upgradeType=kubernetes or stack. |
+| rollingStrategy | string (sequential, parallel) | no | Order in which nodes are upgraded. Default sequential. |
+| healthGateConditions | []string | no | Kubernetes condition types that must be True on each node before upgrade proceeds to the next node. |
 
-Kueue remains a management cluster prerequisite exclusively because Wrapper's
-pack-deploy Jobs require it. The ClusterQueue and ResourceFlavor resources
-provisioned by Guardian from QueueProfile govern pack-deploy Job admission.
-
-Cluster lifecycle operations (bootstrap, upgrade, scale, decommission) do not use
-Kueue. They are reconciled by CAPI controllers directly. The observability
-previously provided by Kueue Jobs is now provided by CAPI Cluster and Machine
-status conditions and events.
-
-Operational Jobs (etcd-backup, etcd-maintenance, pki-rotate, etcd-restore,
-hardening-apply, node-patch, credential-rotate, cluster-reset) submit directly to
-the default JobQueue without Kueue admission control. They are targeted, infrequent,
-and operator-gated operations that do not require Kueue's quota and scheduling machinery.
+Status condition types: Ready, Degraded, CAPIDelegated.
 
 ---
 
-## 8. CAPI RBAC and Guardian
+### HardeningProfile (shortName: hp)
 
-CAPI installs substantial RBAC: ClusterRoles and ClusterRoleBindings for each
-provider controller, ServiceAccounts, and webhook configurations. All of this
-must pass through Guardian's third-party RBAC intake protocol before CAPI
-controllers start.
+Reusable hardening ruleset. Configuration CR only. Does not directly trigger a Conductor Job. Jobs are submitted by NodeMaintenance (operation=hardening-apply) when it references this profile. Referenced by TalosCluster.spec.hardeningProfileRef for bootstrap-time hardening application.
 
-The enable phase order is:
-1. Guardian (CRD-only phase, webhook operational)
-2. cert-manager (RBAC via Guardian intake)
-3. Kueue (RBAC via Guardian intake)
-4. CNPG (RBAC via Guardian intake, Guardian transitions to phase 2)
-5. CAPI core (RBAC via Guardian intake)
-6. CABPT (RBAC via Guardian intake)
-7. metallb (RBAC via Guardian intake)
-8. local-path-provisioner (RBAC via Guardian intake)
-9. Platform (RBACProfile provisioned by Guardian, then controller starts)
-10. Wrapper (RBACProfile provisioned, then controller starts)
+Key spec fields:
 
-No CAPI component starts until Guardian has processed its RBACProfile and
-set provisioned=true.
+| Field | Type | Description |
+|-------|------|-------------|
+| machineConfigPatches | []string | JSON Patch operations applied to the rendered machineconfig. |
+| sysctlParams | map[string]string | Sysctl key/value pairs merged into the machineconfig sysctl section. |
+| description | string | Human-readable description. |
+
+Status condition types: Valid.
 
 ---
 
-## 9. MachineConfig Storage Contract
+### MaintenanceBundle (shortName: mb)
 
-**LOCKED INVARIANT - Platform Governor directive 2026-04-05.**
+Pre-compiled scheduling artifact produced by `compiler maintenance`. Carries pre-resolved scheduling context so neither Platform nor Conductor need to perform cluster queries at execution time.
 
-For native and imported Seam clusters (`spec.capi.enabled=false`), Platform operator
-is the sole owner of machineconfig generation and storage. This applies to the
-management cluster and to any cluster onboarded via the import path.
+The reconciler is a stub (F-P5 milestone). The type definition is delivered; reconciler implementation is deferred.
 
-**Secret naming convention:**
-Machineconfigs are stored as Kubernetes Secrets in the management cluster, one Secret
-per node, using the naming convention:
+Named Conductor capabilities: drain, upgrade, etcd-backup, machineconfig-rotation.
 
-    seam-mc-{cluster-name}-{node-name}
+Key spec fields:
 
-in the `seam-tenant-{cluster-name}` namespace.
+| Field | Type | Description |
+|-------|------|-------------|
+| clusterRef | LocalObjectRef | TalosCluster this bundle targets. |
+| operation | string (drain, upgrade, etcd-backup, machineconfig-rotation) | Maintenance operation type. |
+| maintenanceTargetNodes | []string | Pre-resolved list of target nodes, validated against the live cluster at compile time. |
+| operatorLeaderNode | string | Node hosting the platform operator leader pod at compile time. |
+| s3ConfigSecretRef | *corev1.SecretReference | Pre-resolved S3 configuration Secret. Never absent when the operation requires it. |
 
-**Provisioning by mode:**
-
-`spec.mode=bootstrap`: Platform generates machineconfig Secrets from `InfrastructureTalosCluster`
-spec at bootstrap time. The Compiler emits only the `InfrastructureTalosCluster` CR; it does
-not emit machineconfig Secrets for bootstrap clusters. Platform applies `HardeningProfile` patches
-on top of the generated base config when `spec.hardeningProfileRef` is set (PLATFORM-BL-HARDENINGPROFILE-MERGE,
-pending schema amendment to add node topology fields to `InfrastructureTalosClusterSpec`).
-Until that schema amendment lands, the Compiler bootstrap subcommand continues to emit machineconfig
-Secrets for management-cluster bootstrap to preserve the existing bootstrap Job path.
-
-`spec.mode=import`: Platform captures machineconfig Secrets from the running cluster via the Talos
-COSI API (`/system/state/config.yaml`) immediately after the kubeconfig Secret is generated. Platform
-uses the talosconfig Secret (compiler-emitted, admin-applied before the TalosCluster CR) to authenticate,
-lists nodes from the running cluster via kubeconfig, and reads the machineconfig from each node.
-The Compiler emits only the `InfrastructureTalosCluster` CR and the talosconfig Secret for import clusters.
-It does not emit machineconfig Secrets for import clusters. (PLATFORM-BL-MACHINECONFIG-IMPORT-CAPTURE tracks
-the platform-side implementation.)
-
-**Lifecycle:**
-After initial capture (import mode) or generation (bootstrap mode), Platform reconciles
-these Secrets when node configuration changes -- for example when a HardeningProfile is
-updated or a machineconfig patch is applied via NodeMaintenance.
-
-**Namespace authority:**
-CP-INV-004: Platform is the sole namespace creation authority for `seam-tenant-{cluster-name}`
-for bootstrap and CAPI-managed cluster modes. For mode=import, the Compiler bootstrap bundle
-includes a `seam-tenant-namespace.yaml` manifest so the admin can apply the namespace (and
-Secrets that live in it) before the TalosCluster CR in a single `kubectl apply -f` run.
-Platform's `ensureTenantNamespace` call in the import reconcile path is idempotent -- it
-creates the namespace if absent (handles re-reconcile or manual deletion) but does not race
-with the bootstrap bundle application. For mode=bootstrap and CAPI: Platform creates the
-namespace in the reconcile path with no bootstrap bundle assist needed.
-
-**Design rationale:**
-This mirrors the CAPI bootstrap provider secret pattern intentionally. The CAPI path
-stores machineconfigs as bootstrap data Secrets managed by CABPT. The native path
-stores them as Seam-named Secrets managed by Platform. The operational model is
-consistent regardless of provisioning path: a named Secret per node holds the node's
-current authoritative machineconfig.
-
-No other operator or Conductor capability handler owns these Secrets.
-A machineconfig Secret owned by Platform must never be modified by any other component.
-This invariant has no exceptions and requires a Platform Governor constitutional
-amendment to change.
+Status condition types: Ready, Pending, Degraded.
 
 ---
 
-## 10. Etcd Backup Destination Contract
+### TalosMachineConfigBackup (shortName: mcb)
 
-**LOCKED INVARIANT - Platform Governor directive 2026-04-05.**
+Triggers a machine config backup for all nodes of a cluster. The Conductor executor reads each node's running config via GetMachineConfig and uploads it to S3 at `{cluster}/machineconfigs/{TIMESTAMP}/{hostname}.yaml`.
 
-Platform operator resolves the S3 backup destination at RunnerConfig creation time -
-never deferred to Conductor or the Job. Resolution is deterministic, ordered, and
-fails fast with a structured condition rather than silently proceeding without a
-destination.
+Named Conductor capability: machineconfig-backup.
 
-**Resolution order (evaluated at RunnerConfig creation time):**
+Key spec fields: clusterRef, s3BackupSecretRef, s3Destination.
 
-1. **Explicit reference on TalosCluster CR**: if the TalosCluster spec carries an
-   explicit S3 config Secret reference (`spec.etcdBackupS3SecretRef`), Platform uses
-   that Secret. No further lookup is performed.
-
-2. **Platform-wide default Secret**: if no explicit reference is present, Platform
-   looks for a Secret named `seam-etcd-backup-config` in the `seam-system` namespace.
-   If found, it is used as the S3 configuration source.
-
-3. **Absent condition**: if neither the explicit reference nor the platform-wide
-   default Secret exists, Platform sets the condition `EtcdBackupDestinationAbsent`
-   on the EtcdMaintenance CR with `status=True` and does not emit a RunnerConfig.
-   The EtcdMaintenance CR remains in a pending state until a valid Secret is provided.
-   Silent failure is never permitted - the condition must always be set and observable.
-
-**Local PVC fallback (non-durable degraded mode):**
-A local PVC fallback is permitted as a last-resort, non-durable mode only. If the
-operator configuration explicitly enables PVC fallback, Platform sets the condition
-`EtcdBackupLocalFallback` on the EtcdMaintenance CR with `status=True`. The CR status
-must explicitly state: "Backup is non-durable - PVC-backed storage does not survive
-node failure or cluster destruction." PVC fallback is not a substitute for S3. It is
-a visible degraded mode, not a transparent default.
-
-**S3 path structure within the bucket:**
-
-    etcd-backup/{cluster-id}/
-
-where `{cluster-id}` is the TalosCluster UID, not the name. UIDs are immutable and
-globally unique across clusters. This ensures backup paths survive cluster rename and
-remain unambiguous when multiple clusters write to the same bucket.
-
-**Invariant boundary:**
-Conductor and the etcd-backup Job receive the resolved Secret reference via RunnerConfig.
-They perform no S3 destination resolution themselves. A Conductor execute-mode Job that
-independently resolves an S3 destination is an invariant violation.
-
-**S3 secret key contract (admin responsibility):**
-
-The admin creates the S3 credentials Secret before any EtcdMaintenance CR is submitted.
-The Secret may use either of two key naming conventions; both are accepted and normalized
-by the Platform reconciler before the executor Job is created:
-
-| Provider style | Key name | Normalized to |
-|---|---|---|
-| MinIO / Scality (camelCase) | `accessKeyID` | `AWS_ACCESS_KEY_ID` |
-| MinIO / Scality (camelCase) | `secretAccessKey` | `AWS_SECRET_ACCESS_KEY` |
-| MinIO / Scality (camelCase) | `region` | `S3_REGION` |
-| MinIO / Scality (camelCase) | `endpoint` | `S3_ENDPOINT` (optional) |
-| AWS SDK env var | `AWS_ACCESS_KEY_ID` | `AWS_ACCESS_KEY_ID` |
-| AWS SDK env var | `AWS_SECRET_ACCESS_KEY` | `AWS_SECRET_ACCESS_KEY` |
-| AWS SDK env var | `S3_REGION` | `S3_REGION` |
-| AWS SDK env var | `S3_ENDPOINT` | `S3_ENDPOINT` (optional) |
-
-`accessKeyID`, `secretAccessKey`, and `region` (or their AWS SDK equivalents) are
-required. `endpoint` / `S3_ENDPOINT` is optional and must be omitted for native AWS S3.
-If any required key is absent, reconcile halts with `EtcdBackupDestinationAbsent`.
-
-**Cross-namespace secret projection:**
-
-The source Secret may reside in `seam-system` while the executor Job runs in
-`seam-tenant-{cluster}`. Kubernetes does not permit `envFrom` across namespaces.
-The reconciler reads the source Secret, normalizes its keys to the canonical AWS SDK
-env var names listed above, and writes a projected copy named `{em.Name}-s3-env`
-into `em.Namespace`. The projected Secret carries an ownerReference to the
-EtcdMaintenance CR and is garbage-collected automatically when the CR is deleted.
-The executor Job mounts the projected Secret via `envFrom` so the Conductor binary
-reads `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`, `S3_REGION`, and optionally
-`S3_ENDPOINT` from its environment.
+Status condition types: Ready, Running, Degraded, S3DestinationAbsent.
 
 ---
 
-## 11. Cross-Domain Rules
+### TalosMachineConfigBackupSchedule (shortName: mcbs)
 
-Reads: security.ontai.dev/RBACProfile status (gate check).
-Reads: infrastructure.ontai.dev/InfrastructureClusterPack (validate Cilium pack reference in InfrastructureTalosCluster).
-Reads: infrastructure.ontai.dev/InfrastructurePackInstance (gate Cilium PackExecution on Ready).
-Owns: cluster.x-k8s.io/Cluster and all CAPI child objects for target clusters.
-Owns: SeamInfrastructureCluster, SeamInfrastructureMachine in tenant namespaces.
-Creates: tenant namespaces - sole authority.
-Never writes to security.ontai.dev or infrastructure.ontai.dev CRDs outside InfrastructureTalosCluster and InfrastructureRunnerConfig.
+Schedule controller. Creates TalosMachineConfigBackup CRs on a repeating interval. The schedule field accepts Go duration strings (e.g. "24h").
+
+No Conductor Job submitted directly. All actual work is delegated to the TalosMachineConfigBackup CRs this controller creates.
+
+Key spec fields: clusterRef, schedule, s3Destination, s3BackupSecretRef.
+
+Status fields: nextRunAt, lastRunAt, lastBackupName.
 
 ---
 
-## 12. Conductor Deployment Contract
+### TalosMachineConfigRestore (shortName: mcr)
 
-**LOCKED INVARIANT - Platform Governor directive 2026-04-05.**
+Triggers a machine config restore for target nodes of a cluster. The Conductor executor downloads each node's config from S3 at `{cluster}/machineconfigs/{backupTimestamp}/{hostname}.yaml` and applies it via ApplyConfiguration.
 
-Platform operator is responsible for deploying Conductor agent mode onto every tenant
-cluster it forms, as part of cluster formation reconciliation. This responsibility is
-exclusive - no other component deploys Conductor to tenant clusters.
+Named Conductor capability: machineconfig-restore.
 
-**When Platform deploys Conductor to a tenant cluster:**
-After TalosCluster formation reaches the readiness threshold and before marking the
-cluster fully Ready, Platform's TalosClusterReconciler creates a Conductor agent
-Deployment in ont-system on the target cluster. This Deployment is constructed using
-the target cluster's kubeconfig mounted from the tenant's kubeconfig Secret.
+Key spec fields:
 
-**Role stamp requirement:**
-The Conductor Deployment created by Platform for any tenant cluster **must** carry
-`role=tenant` as a first-class field on the Deployment. This is not an annotation,
-not an environment variable, and not a label. It is a named field.
+| Field | Type | Required | Description |
+|-------|------|----------|-------------|
+| clusterRef | LocalObjectRef | yes | TalosCluster whose nodes will be restored. |
+| backupTimestamp | string | yes | Timestamp of the backup to restore from. Format: 20060102T150405Z (UTC). Must match the timestamp component in the S3 path written by a prior machineconfig-backup. |
+| targetNodes | []string | no | Node hostnames to restore. All nodes when empty. |
+| s3SourceBucket | string | yes | S3 bucket containing the backup objects. |
+| s3BackupSecretRef | *corev1.SecretReference | no | S3 credentials Secret. Falls back to seam-etcd-backup-config in seam-system. |
 
-Conductor reads this field at startup to determine which loops to activate. An absent
-or incorrect role causes Conductor to exit with InvariantViolation. Platform is
-solely responsible for correct role stamping. See conductor-schema.md §15.
+Status fields: phase (Pending, Running, Succeeded, Failed, PartiallyFailed), restoredNodes.
+Status condition types: Ready, Running, Degraded, S3SourceAbsent.
 
-**Invariants:**
-- Platform creates exactly one Conductor Deployment per tenant cluster, in ont-system
-  on that cluster, using the cluster's kubeconfig Secret.
-- The Deployment is created with role=tenant. Any other value is a programming error.
-- Platform does not deploy Conductor to the management cluster. `compiler enable`
-  is the sole authority for the management cluster Conductor Deployment (role=management).
-- If the Conductor Deployment is deleted from a tenant cluster's ont-system, Platform
-  must recreate it on the next TalosClusterReconciler reconcile cycle.
-- The Conductor image tag used must match the RunnerConfig.agentImage for this cluster.
-  Platform reads agentImage from RunnerConfig before creating the Deployment.
+---
 
-**Import-mode cluster specifics:**
-For clusters with `spec.mode: import`, Platform drives an additional two-site onboarding
-sequence beyond the Conductor Deployment. The complete sequence is specified in
-guardian-schema.md §20 and includes:
+## 6. CAPI Integration Model
 
-1. Create seam-tenant-{clusterName} namespace on the management cluster (CP-INV-004).
-2. Store tenant kubeconfig Secret in seam-tenant-{clusterName}.
-3. Create ont-system namespace on the tenant cluster.
-4. Create conductor ServiceAccount in ont-system on the tenant cluster.
-5. Create conductor Deployment (role=tenant) in ont-system on the tenant cluster.
-6. Create conductor RBACProfile in ont-system on the tenant cluster (Seam operator
-   profile, rbacPolicyRef: management-policy, permissionSetRef: management-maximum).
-7. Observe PermissionSnapshotReceipt acknowledgement from the management conductor
-   (written to InfrastructureTalosCluster.status.conductorHandshake).
-8. Advance InfrastructureTalosCluster.status.phase to Operational on acknowledgement.
+### Seam Infrastructure Provider
 
-Platform sets InfrastructureTalosCluster.status.phase: ConductorPending when the
-Deployment is created. Phase does not advance until the gRPC handshake completes.
-See guardian-schema.md §20 for the full handshake protocol and PermissionSnapshot
-delivery sequence.
+The Seam Infrastructure Provider is a purpose-built platform component that implements the CAPI InfrastructureCluster and InfrastructureMachine contracts. It does not call any cloud API. It watches SeamInfrastructureCluster and SeamInfrastructureMachine objects and delivers machineconfigs to pre-provisioned Talos nodes on port 50000 using the talos goclient.
+
+The talos goclient is restricted to SeamInfrastructureClusterReconciler and SeamInfrastructureMachineReconciler only (CP-INV-001). All other reconcilers observe cluster state through CAPI Machine status conditions and Kubernetes node labels only (CP-INV-002).
+
+### CAPI object ownership
+
+Platform's TalosCluster reconciler creates and owns:
+
+- SeamInfrastructureCluster (infrastructure reference for the CAPI Cluster)
+- cluster.x-k8s.io/Cluster (owns TalosControlPlane and MachineDeployments)
+- TalosControlPlane (CABPT control plane management)
+- MachineDeployment per node role
+- TalosConfigTemplate (CABPT machineconfig generation template)
+- SeamInfrastructureMachineTemplate (template for SeamInfrastructureMachine per node)
+
+All created in seam-tenant-{cluster-name} and owned by TalosCluster via ownerReference (CP-INV-008).
+
+### Cilium CNI integration
+
+Every TalosConfigTemplate created by platform includes `cluster.network.cni.name: none` and Cilium BPF kernel parameters (CP-INV-009). After CAPI bootstraps the cluster, platform triggers a PackExecution for the Cilium PackDelivery referenced by spec.capi.ciliumPackRef. Nodes transition to Ready only after Cilium is up.
+
+CiliumPending on TalosCluster is not a degraded state (CP-INV-013). It is the expected state between CAPI cluster Running and Cilium PackInstance Ready.
+
+### SeamInfrastructureCluster fields
+
+Cluster-level CAPI infrastructure reference. One per cluster.
+
+Key spec fields: controlPlaneEndpoint.host (VIP or first control plane IP), controlPlaneEndpoint.port (default 6443).
+
+Status: ready=true after all control plane SeamInfrastructureMachine objects have status.ready=true.
+
+### SeamInfrastructureMachine fields
+
+Per-node CAPI infrastructure reference. One per node.
+
+Key spec fields: address (pre-provisioned node IP reachable on port 50000), port (default 50000), talosConfigSecretRef, nodeRole (controlplane or worker).
+
+Status fields: ready (true after machineconfig applied and node exits maintenance mode), machineConfigApplied, providerID (format: talos://{cluster-name}/{node-ip}).
+
+---
+
+## 7. Tenant Namespace Model
+
+Platform is the sole namespace creation authority for seam-tenant-{cluster-name} namespaces (CP-INV-004). No other operator or component creates these namespaces.
+
+Namespace provisioning by mode:
+
+- mode=bootstrap and capi.enabled=true: Platform creates the namespace in the reconcile path. No bootstrap bundle assist needed.
+- mode=import: Platform creates the namespace as part of the two-site onboarding sequence. The namespace creation is idempotent. The Compiler bootstrap bundle for import clusters includes a seam-tenant-namespace.yaml manifest so the admin can apply Secrets and the TalosCluster CR in a single kubectl apply run. Platform's ensureTenantNamespace call in the import reconcile path is an idempotent safety net.
+
+When the ClusterLog CR is created, it is placed in seam-tenant-{cluster-name} and named by the cluster name.
+
+MachineConfig Secrets for native and imported clusters follow the naming convention `seam-mc-{cluster-name}-{node-name}` in seam-tenant-{cluster-name}. Platform is the sole owner of these Secrets. No other operator or Conductor capability handler may modify them.
+
+---
+
+## 8. Etcd Backup S3 Resolution
+
+Platform resolves the S3 backup destination at RunnerConfig creation time. Conductor and the etcd-backup Job receive the resolved Secret reference via RunnerConfig and perform no S3 resolution themselves.
+
+Resolution order:
+
+1. Explicit reference on the EtcdMaintenance CR (spec.etcdBackupS3SecretRef): if present, use this Secret.
+2. Platform-wide default Secret (seam-etcd-backup-config in seam-system): if no explicit reference is present and this Secret exists, use it.
+3. Absent condition: if neither exists, platform sets EtcdBackupDestinationAbsent on the EtcdMaintenance CR with status=True and does not emit a RunnerConfig. Silent failure is never permitted.
+
+Local PVC fallback: permitted only as a visible degraded mode when spec.pvcFallbackEnabled=true. Platform sets EtcdBackupLocalFallback condition with status=True and the CR status explicitly states the backup is non-durable.
+
+S3 path structure within the bucket: `etcd-backup/{cluster-uid}/` where cluster-uid is the TalosCluster UID. UIDs are immutable and globally unique across clusters.
+
+S3 Secret key contract: Both MinIO/Scality camelCase keys (accessKeyID, secretAccessKey, region, endpoint) and AWS SDK env var names (AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY, S3_REGION, S3_ENDPOINT) are accepted. The reconciler normalizes to AWS SDK env var form and writes a projected Secret named `{em.Name}-s3-env` in em.Namespace owned by the EtcdMaintenance CR. The executor Job mounts this projected Secret via envFrom. Cross-namespace secret projection: source Secret may reside in seam-system while the executor Job runs in seam-tenant-{cluster}.
+
+---
+
+## 9. Conductor Capability Dispatch
+
+Platform generates a RunnerConfig using the shared runner library (CP-INV-003) and submits a Conductor executor Job. The RunnerConfig targets a named capability. The mapping from CRD to capability is:
+
+| CRD | Operation | Conductor capability |
+|-----|-----------|---------------------|
+| EtcdMaintenance | backup | etcd-backup |
+| EtcdMaintenance | restore | etcd-restore |
+| EtcdMaintenance | defrag | etcd-defrag |
+| NodeMaintenance | patch | node-patch |
+| NodeMaintenance | hardening-apply | hardening-apply |
+| NodeMaintenance | credential-rotate | credential-rotate |
+| NodeOperation | scale-up | node-scale-up (non-CAPI path) |
+| NodeOperation | decommission | node-decommission (non-CAPI path) |
+| NodeOperation | reboot | node-reboot (non-CAPI path) |
+| PKIRotation | (any) | pki-rotate |
+| ClusterReset | (any) | cluster-reset |
+| UpgradePolicy | talos | talos-upgrade (non-CAPI path) |
+| UpgradePolicy | kubernetes | kube-upgrade (non-CAPI path) |
+| UpgradePolicy | stack | stack-upgrade (non-CAPI path) |
+| TalosMachineConfigBackup | (any) | machineconfig-backup |
+| TalosMachineConfigRestore | (any) | machineconfig-restore |
+| MaintenanceBundle | drain | drain |
+| MaintenanceBundle | upgrade | upgrade |
+| MaintenanceBundle | etcd-backup | etcd-backup |
+| MaintenanceBundle | machineconfig-rotation | machineconfig-rotation |
+
+Dual-path CRDs (UpgradePolicy, NodeOperation, ClusterMaintenance) do NOT submit a Conductor Job on the CAPI path. Platform must check capi.enabled on the owning TalosCluster before deciding which path to take.
+
+Kueue is not used for any platform Job submission (CP-INV-010).
+
+---
+
+## 10. RunnerConfig Generation Protocol
+
+RunnerConfig is generated by platform using the shared runner library for all operational Job CRDs. It is never hand-coded (CP-INV-003). It is not generated for CAPI-managed lifecycle operations.
+
+The RunnerConfig carries the pre-resolved capability name, S3 configuration (for operations that require it), target cluster kubeconfig and talosconfig Secret references, target node list, operator leader node, and any operation-specific parameters.
+
+Platform reads the RunnerConfig.agentImage field to determine the Conductor image tag to use for the executor Job. The Conductor image tag must match the cluster's Talos version (INV-012).
+
+For import-mode clusters, Platform drives a two-site onboarding sequence that includes deploying Conductor agent mode (role=tenant) in ont-system on the tenant cluster. See guardian-schema.md for the full handshake protocol.
+
+---
+
+## 11. Conductor Deployment Contract
+
+Platform is exclusively responsible for deploying Conductor agent mode onto every tenant cluster it forms. This happens after TalosCluster formation reaches the readiness threshold and before marking the cluster fully Ready.
+
+- Platform creates exactly one Conductor Deployment per tenant cluster, in ont-system on that cluster.
+- The Deployment must carry role=tenant as a first-class field. An absent or incorrect role causes Conductor to exit with InvariantViolation.
+- Platform does not deploy Conductor to the management cluster. `compiler enable` is the sole authority for the management cluster Conductor Deployment (role=management).
+- If the Conductor Deployment is deleted from a tenant cluster's ont-system, Platform must recreate it on the next TalosClusterReconciler reconcile cycle.
+- The Conductor image tag must match RunnerConfig.agentImage for this cluster.
+
+---
+
+## 12. MachineConfig Storage Contract
+
+For native and imported clusters (capi.enabled=false), Platform is the sole owner of machineconfig generation and storage.
+
+Naming convention: `seam-mc-{cluster-name}-{node-name}` in seam-tenant-{cluster-name}.
+
+mode=bootstrap: Platform generates machineconfig Secrets from TalosClusterSpec at bootstrap time. Platform applies HardeningProfile patches on top of the base config when spec.hardeningProfileRef is set.
+
+mode=import: Platform captures machineconfig Secrets from the running cluster via the Talos COSI API (/system/state/config.yaml) immediately after kubeconfig Secret generation. Platform uses the talosconfig Secret to authenticate, lists nodes via kubeconfig, and reads the machineconfig from each node.
+
+No other operator or Conductor capability handler owns these Secrets. A machineconfig Secret owned by Platform must never be modified by any other component.
 
 ---
 
 ## 13. PKI Rotation Contract
 
-**PKI rotation automation -- session/17, 2026-05-02.**
+Imported Talos clusters carry two sets of short-lived certificates stored in Secrets: admin kubeconfig (Kubernetes client cert) and talosconfig client cert.
 
-Imported Talos clusters carry two sets of short-lived certificates stored in Secrets:
-- Admin kubeconfig (Kubernetes client cert, ~1 year TTL): `seam-mc-{cluster}-kubeconfig` in `seam-tenant-{cluster}`, key `value`.
-- Talosconfig client cert: `seam-mc-{cluster}-talosconfig` in `seam-tenant-{cluster}`, key `talosconfig`.
+Spec fields on TalosCluster: pkiRotationThresholdDays (int32, default 30, minimum 1).
 
-When these expire, the platform operator and Conductor executor lose the ability to connect to the cluster.
+Status fields on TalosCluster: pkiExpiryDate (*metav1.Time) -- earliest certificate expiry across both Secrets.
 
-**Spec fields (InfrastructureTalosCluster, seam-core):**
-- `spec.pkiRotationThresholdDays` (int32, default 30, minimum 1): days before cert expiry to auto-trigger PKI rotation.
+Auto-rotation: when pkiExpiryDate is within pkiRotationThresholdDays days, the reconciler creates a PKIRotation CR with label pki-trigger=auto. Idempotent: skips if a PKIRotation CR already exists for this cluster and is not yet complete or failed.
 
-**Status fields (InfrastructureTalosCluster, seam-core):**
-- `status.pkiExpiryDate` (*metav1.Time): earliest certificate expiry across both Secrets. Written by TalosCluster reconciler.
+On-demand rotation: annotation `platform.ontai.dev/rotate-pki=true` on TalosCluster. Reconciler creates a PKIRotation CR with label pki-trigger=manual, then clears the annotation via Patch.
 
-**Triggers:**
-1. Annotation `platform.ontai.dev/rotate-pki=true` on InfrastructureTalosCluster: on-demand rotation. The reconciler creates a PKIRotation CR with label `pki-trigger=manual` in `seam-tenant-{cluster}`, then clears the annotation via Patch.
-2. Auto-rotation: when `status.pkiExpiryDate` is within `spec.pkiRotationThresholdDays` days of the current time, the reconciler creates a PKIRotation CR with label `pki-trigger=auto`. Idempotent: skips if a PKIRotation CR for this cluster already exists and is not yet complete or failed.
-
-**Reconcile loop integration:**
-PKI expiry check runs in Step F of `Reconcile()` only for stable-Ready clusters (clusters that had `Ready=True` before the current reconcile pass). Step F does NOT run during the first-pass Ready transition to avoid overriding the clean result returned by routing functions.
-
-Stable-Ready clusters are requeued every 24 hours for daily expiry monitoring.
-
-**Conductor execute-mode behavior (pkiRotateHandler):**
-After the staged machine config apply succeeds, `pkiRotateHandler.Execute()` calls `TalosClient.Kubeconfig()` to generate a fresh kubeconfig and writes it to both `seam-mc-{cluster}-kubeconfig` and `target-cluster-kubeconfig` in `seam-tenant-{cluster}` via the dynamic client. Kubeconfig refresh is best-effort: if it fails, the operation result is still `Succeeded` because the staged config apply is the critical step. The failure is recorded in the step results with a note.
-
-**Implementation files:**
-- `platform/internal/controller/pki_cert_helpers.go`: cert expiry detection, Secret reading, PKIRotation CR creation.
-- `conductor/internal/capability/platform_security.go`: `pkiRotateHandler.Execute()` with kubeconfig refresh.
-- `conductor/internal/capability/clients.go`: `TalosNodeClient.Kubeconfig()` interface method.
-- `conductor/internal/capability/adapters.go`: `TalosClientAdapter.Kubeconfig()` adapter.
+PKI expiry check runs only for stable-Ready clusters. Stable-Ready clusters are requeued every 24 hours for daily expiry monitoring.
 
 ---
 
-*platform.ontai.dev schema - Platform*
-*Amendments:*
-*2026-03-30 - CAPI adopted for target cluster lifecycle. Seam Infrastructure Provider*
-*  introduced. SeamInfrastructureMachine and SeamInfrastructureCluster CRDs added.*
-*  TalosUpgrade, TalosKubeUpgrade, TalosStackUpgrade, TalosNodeScaleUp,*
-*  TalosNodeDecommission, TalosReboot replaced by CAPI equivalents.*
-*  Kueue scoped to Wrapper pack-deploy Jobs only.*
-*  TalosNoMaintenance integrated with CAPI pause mechanism.*
-*  Cilium CNI integration documented. CiliumPending condition added to TalosCluster.*
-*  Management cluster bootstrap unchanged - CAPI not applicable.*
+## 14. Cross-Domain Rules
 
-*2026-03-30 - Section 6 retitled "CRDs Delegated to CAPI for Target Clusters"*
-*  (Path B ruling). Six lifecycle CRDs retained with dual-path semantics:*
-*  CAPI-native for spec.capi.enabled=true (target clusters), direct conductor(mode: execute) Job via*
-*  OperationalJobReconciler for spec.capi.enabled=false (management cluster).*
-*  Named conductor capability references restored for all six entries.*
+Platform reads: guardian.ontai.dev/RBACProfile status (gate check before starting).
+Platform reads: dispatcher PackInstalled status (gate Cilium PackExecution on Ready).
+Platform owns: cluster.x-k8s.io/Cluster and all CAPI child objects for target clusters.
+Platform owns: SeamInfrastructureCluster, SeamInfrastructureMachine in tenant namespaces.
+Platform creates: seam-tenant-{cluster-name} namespaces (sole authority, CP-INV-004).
+Platform never writes to guardian.ontai.dev CRDs.
+Platform never writes to dispatcher.ontai.dev CRDs.
 
-*2026-04-03 - Operator rename: Platform (formerly platform), Guardian (formerly*
-*  guardian), Wrapper (formerly wrapper), Conductor [Compiler, Conductor (formerly conductor).*]
-*  CAPI infrastructure CRDs renamed: SeamInfrastructureCluster (formerly*
-*  SeamInfrastructureCluster), SeamInfrastructureMachine (formerly*
-*  SeamInfrastructureMachine). API group infrastructure.cluster.x-k8s.io unchanged.*
-*  TalosControlPlane and TalosWorkerConfig added as dual-mode CRDs with explicit*
-*  compile-time and runtime semantics documented. Sixteen day-two CRDs consolidated*
-*  into eight: EtcdMaintenance, NodeMaintenance, PKIRotation, ClusterReset,*
-*  HardeningProfile, UpgradePolicy, NodeOperation, ClusterMaintenance. LicenseKey*
-*  removed - Seam is fully open source with no licensing tier.*
+---
 
-*2026-04-05 - Section 9 "MachineConfig Storage Contract" added: locked invariant.*
-*  Platform is sole owner of machineconfig Secrets for native/imported clusters.*
-*  Naming convention seam-mc-{cluster-name}-{node-name} in seam-tenant-{cluster-name}.*
-*  Mirrors CAPI bootstrap provider pattern. No other component may modify these Secrets.*
-*  Section 10 "Etcd Backup Destination Contract" added: locked invariant.*
-*  S3 resolution hierarchy: explicit TalosCluster ref → seam-etcd-backup-config in*
-*  seam-system → EtcdBackupDestinationAbsent condition (no RunnerConfig emitted).*
-*  Local PVC fallback permitted only as visible degraded mode (EtcdBackupLocalFallback*
-*  condition, non-durable status explicit). S3 path: etcd-backup/{cluster-uid}/.*
-*  Conductor never performs S3 destination resolution. Section 11 renumbered from 9.*
+## 15. Decision Records
 
-*2026-04-05 - Section 12 "Conductor Deployment Contract" added: locked invariant.*
-*  Platform operator is exclusively responsible for deploying Conductor agent mode*
-*  onto every tenant cluster it forms. Deployment created in ont-system on target*
-*  cluster using cluster's kubeconfig Secret. role=tenant must be stamped as a*
-*  first-class field. Absent/incorrect role causes InvariantViolation exit in Conductor.*
-*  Platform does not deploy Conductor to the management cluster - compiler enable owns*
-*  that Deployment (role=management). Platform must recreate Deployment on deletion.*
-*  Conductor image tag must match RunnerConfig.agentImage for the cluster.*
+**Decision H -- TalosCluster is the Seam root CR.** All CAPI objects for target clusters are children of TalosCluster via ownerReference. CAPI objects do not exist without a TalosCluster parent.
 
-*2026-04-26 - Section 12 extended: import-mode cluster specifics added. For*
-*  spec.mode=import clusters, Platform drives a two-site onboarding sequence including*
-*  namespace creation on both clusters, conductor RBACProfile creation in ont-system*
-*  (Seam operator profile referencing management-policy/management-maximum), and*
-*  phase advancement on PermissionSnapshotReceipt acknowledgement. Full sequence*
-*  specified in guardian-schema.md §20.*
+**Decision I -- Deletion of TalosCluster never destroys a cluster.** Kubernetes garbage collection cascades to owned CAPI objects, which triggers CAPI's own deletion reconciliation, but this does not factory reset nodes. ClusterReset is the only destruction path (INV-015).
 
-*2026-04-26 - Section 9 corrected: mode-specific machineconfig provisioning contract*
-*  added. mode=import: Platform captures machineconfigs from running cluster via Talos*
-*  COSI API after kubeconfig generation (PLATFORM-BL-MACHINECONFIG-IMPORT-CAPTURE).*
-*  mode=bootstrap: Platform generates machineconfigs from InfrastructureTalosCluster*
-*  spec (pending schema amendment PLATFORM-BL-HARDENINGPROFILE-MERGE for node topology).*
-*  Namespace authority corrected: CP-INV-004 applies to bootstrap/CAPI modes.*
-*  For mode=import, Compiler bootstrap bundle includes seam-tenant-namespace.yaml so*
-*  the admin can apply Secrets and TalosCluster CR in a single kubectl apply run.*
-*  ensureTenantNamespace in the import reconcile path is idempotent safety net only.*
+**Decision J -- CiliumPending is not degraded.** The window between CAPI cluster Running and Cilium PackInstance Ready is expected. Nodes are NotReady during this window. The MachineHealthCheck tolerance window must be configured to avoid spurious remediation during Cilium installation (CP-INV-013).
 
-*2026-05-02 - Section 10 extended: S3 secret key contract and cross-namespace projection*
-*  added. Admin creates seam-etcd-backup-config in seam-system before submitting any*
-*  EtcdMaintenance CR. Both provider key conventions accepted: MinIO/Scality camelCase*
-*  (accessKeyID, secretAccessKey, region, endpoint) and AWS SDK env var names*
-*  (AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY, S3_REGION, S3_ENDPOINT). Reconciler*
-*  normalizes to AWS SDK env var form and writes a projected secret {em.Name}-s3-env*
-*  in em.Namespace owned by the EtcdMaintenance CR. Executor Job mounts via envFrom.*
-*  s3_env_secret.go added to platform/internal/controller.*
+**Decision K -- Kueue is not used for any platform operation.** Operational runner Jobs submit directly. Kueue governs dispatcher pack-deploy Jobs exclusively. This applies permanently; the decision is locked (CP-INV-010).
+
+**Decision L -- S3 destination is resolved at RunnerConfig creation time.** Conductor never performs S3 resolution. A Conductor execute-mode Job that independently resolves an S3 destination is an invariant violation.
+
+**Decision M -- Platform is the sole Conductor deployer for tenant clusters.** No other component deploys Conductor to tenant clusters. Role must be stamped as role=tenant. Incorrect or absent role is an InvariantViolation (platform-schema.md §11).
+
+---
+
+*platform.ontai.dev schema -- platform operator*
+*Amended 2026-05-13: Full rewrite. seam-core references corrected to seam. TalosCluster and ClusterLog placed under seam.ontai.dev. All platform.ontai.dev types documented from current Go sources. Kueue scope corrected (dispatcher, not platform). wrapper references corrected to dispatcher. All stale type names removed.*
