@@ -316,7 +316,7 @@ func TestTalosCluster_VersionUpgrade_CompletesCondition(t *testing.T) {
 
 // TestUpgradePolicy_PatchesObservedTalosVersion verifies that when an UpgradePolicy
 // for a talos upgrade completes successfully, the reconciler patches
-// InfrastructureTalosCluster.status.observedTalosVersion to the target version.
+// TalosCluster.status.observedTalosVersion to the target version.
 func TestUpgradePolicy_PatchesObservedTalosVersion(t *testing.T) {
 	scheme := buildDay2Scheme(t)
 

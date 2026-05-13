@@ -1,7 +1,7 @@
 // Package controller_test -- CAPI derived lineage label unit tests.
 //
 // Tests that SetDescendantLabels is called on all four CAPI objects created by
-// reconcileCAPIPath. The DescendantReconciler in seam-core reads these labels to
+// reconcileCAPIPath. The DescendantReconciler in seam reads these labels to
 // append DescendantEntry records to the TalosCluster InfrastructureLineageIndex.
 // PLATFORM-BL-CAPI-DERIVED-LINEAGE.
 package controller_test

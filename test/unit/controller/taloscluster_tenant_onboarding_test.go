@@ -1,7 +1,7 @@
 // Package controller_test tests the tenant-cluster onboarding helpers.
 //
 // These tests verify the bootstrap-window RBAC setup (EnsureRemoteConductorRBAC)
-// and the InfrastructureTalosCluster CR copy (EnsureRemoteTalosClusterCopy) that
+// and the TalosCluster CR copy (EnsureRemoteTalosClusterCopy) that
 // platform applies to the tenant cluster as part of the T-19 import path.
 //
 // Both functions operate against remote cluster clients (kubernetes.Interface and
@@ -176,7 +176,7 @@ func TestEnsureRemoteConductorRBAC_LabelsManagedByPlatform(t *testing.T) {
 // --- EnsureRemoteTalosClusterCopy tests ---
 
 // TestEnsureRemoteTalosClusterCopy_CreatesCR verifies that EnsureRemoteTalosClusterCopy
-// creates an InfrastructureTalosCluster CR in ont-system on the tenant cluster with
+// creates a TalosCluster CR in ont-system on the tenant cluster with
 // the spec fields copied from the management cluster TalosCluster. Decision H.
 func TestEnsureRemoteTalosClusterCopy_CreatesCR(t *testing.T) {
 	tc := buildTenantTC("ccs-dev")
@@ -238,9 +238,9 @@ func TestEnsureRemoteTalosClusterCopy_Idempotent(t *testing.T) {
 }
 
 // TestEnsureRemoteTalosClusterCopy_CRDNotYetInstalled verifies that if the
-// InfrastructureTalosCluster CRD is not yet installed on the tenant cluster
+// TalosCluster CRD is not yet installed on the tenant cluster
 // (dynamic client returns NotFound on Create), the function returns nil rather
-// than an error. SC-INV-003: seam-core enable bundle may not yet be applied.
+// than an error. SC-INV-003: seam enable bundle may not yet be applied.
 // The next reconcile retries when the CRD is available.
 func TestEnsureRemoteTalosClusterCopy_CRDNotYetInstalled(t *testing.T) {
 	tc := buildTenantTC("ccs-dev")
