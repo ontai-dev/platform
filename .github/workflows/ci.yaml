@@ -15,11 +15,17 @@ jobs:
         with:
           path: platform
 
-      - name: Checkout seam-core (replace dep)
+      - name: Checkout seam (replace dep)
         uses: actions/checkout@v4
         with:
-          repository: ontai-dev/seam-core
-          path: seam-core
+          repository: ontai-dev/seam
+          path: seam
+
+      - name: Checkout seam-sdk (replace dep)
+        uses: actions/checkout@v4
+        with:
+          repository: ontai-dev/seam-sdk
+          path: seam-sdk
 
       - name: Checkout conductor (replace dep)
         uses: actions/checkout@v4
