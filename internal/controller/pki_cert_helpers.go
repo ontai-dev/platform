@@ -4,7 +4,7 @@ package controller
 //
 // The reconciler reads the kubeconfig and talosconfig Secrets for an imported
 // cluster, parses the embedded X.509 certificates, and writes the earliest expiry
-// into InfrastructureTalosCluster.status.pkiExpiryDate. When the expiry is within
+// into TalosCluster.status.pkiExpiryDate. When the expiry is within
 // spec.pkiRotationThresholdDays of the current time, a PKIRotation CR is created
 // automatically. platform-schema.md §13.
 
@@ -26,7 +26,6 @@ import (
 	"sigs.k8s.io/yaml"
 
 	platformv1alpha1 "github.com/ontai-dev/platform/api/v1alpha1"
-	seamcorev1alpha1 "github.com/ontai-dev/seam-core/api/v1alpha1"
 )
 
 // defaultPKIThreshold is the default number of days before cert expiry to
@@ -197,7 +196,7 @@ func readSecretAndParseExpiry(
 // syncPKIExpiry calls detectClusterPKIExpiry, writes the result to
 // tc.Status.PkiExpiryDate (modifying in place), and returns rotationNeeded=true
 // when the expiry is within the configured threshold. platform-schema.md §13.
-func syncPKIExpiry(ctx context.Context, c client.Client, tc *seamcorev1alpha1.InfrastructureTalosCluster) (bool, error) {
+func syncPKIExpiry(ctx context.Context, c client.Client, tc *platformv1alpha1.TalosCluster) (bool, error) {
 	expiry, err := detectClusterPKIExpiry(ctx, c, tc.Name)
 	if err != nil {
 		return false, err
@@ -225,7 +224,7 @@ func syncPKIExpiry(ctx context.Context, c client.Client, tc *seamcorev1alpha1.In
 // by an approaching cert expiry. It is idempotent: if a PKIRotation CR for this
 // cluster already exists and is not yet complete, no duplicate is created.
 // platform-schema.md §13.
-func ensureAutoRotationPKI(ctx context.Context, c client.Client, _ *runtime.Scheme, tc *seamcorev1alpha1.InfrastructureTalosCluster) error {
+func ensureAutoRotationPKI(ctx context.Context, c client.Client, _ *runtime.Scheme, tc *platformv1alpha1.TalosCluster) error {
 	ns := importSecretsNamespace(tc.Name)
 
 	existing := &platformv1alpha1.PKIRotationList{}
@@ -272,7 +271,7 @@ func ensureAutoRotationPKI(ctx context.Context, c client.Client, _ *runtime.Sche
 // annotation-triggered rotation. The annotation platform.ontai.dev/rotate-pki=true
 // has already been detected by the caller; this function creates the CR.
 // The caller removes the annotation after this returns. platform-schema.md §13.
-func ensureAnnotationRotationPKI(ctx context.Context, c client.Client, _ *runtime.Scheme, tc *seamcorev1alpha1.InfrastructureTalosCluster) error {
+func ensureAnnotationRotationPKI(ctx context.Context, c client.Client, _ *runtime.Scheme, tc *platformv1alpha1.TalosCluster) error {
 	ns := importSecretsNamespace(tc.Name)
 
 	ts := time.Now().UTC().Format("20060102t150405")

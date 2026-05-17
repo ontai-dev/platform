@@ -32,7 +32,6 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
 	platformv1alpha1 "github.com/ontai-dev/platform/api/v1alpha1"
-	seamcorev1alpha1 "github.com/ontai-dev/seam-core/api/v1alpha1"
 )
 
 const (
@@ -420,7 +419,7 @@ func (r *UpgradePolicyReconciler) patchObservedTalosVersion(ctx context.Context,
 	if clusterNS == "" {
 		clusterNS = up.Namespace
 	}
-	tc := &seamcorev1alpha1.InfrastructureTalosCluster{}
+	tc := &platformv1alpha1.TalosCluster{}
 	if err := r.Client.Get(ctx, types.NamespacedName{
 		Name:      up.Spec.ClusterRef.Name,
 		Namespace: clusterNS,
@@ -428,7 +427,7 @@ func (r *UpgradePolicyReconciler) patchObservedTalosVersion(ctx context.Context,
 		if apierrors.IsNotFound(err) {
 			return nil
 		}
-		return fmt.Errorf("patchObservedTalosVersion: get InfrastructureTalosCluster: %w", err)
+		return fmt.Errorf("patchObservedTalosVersion: get TalosCluster: %w", err)
 	}
 	patch := client.MergeFrom(tc.DeepCopy())
 	tc.Status.ObservedTalosVersion = version
@@ -442,7 +441,7 @@ func (r *UpgradePolicyReconciler) isManagementCluster(ctx context.Context, up *p
 	if clusterNS == "" {
 		clusterNS = up.Namespace
 	}
-	tc := &seamcorev1alpha1.InfrastructureTalosCluster{}
+	tc := &platformv1alpha1.TalosCluster{}
 	if err := r.Client.Get(ctx, types.NamespacedName{
 		Name:      up.Spec.ClusterRef.Name,
 		Namespace: clusterNS,
@@ -450,9 +449,9 @@ func (r *UpgradePolicyReconciler) isManagementCluster(ctx context.Context, up *p
 		if apierrors.IsNotFound(err) {
 			return false, nil
 		}
-		return false, fmt.Errorf("isManagementCluster: get InfrastructureTalosCluster: %w", err)
+		return false, fmt.Errorf("isManagementCluster: get TalosCluster: %w", err)
 	}
-	return tc.Spec.Role == seamcorev1alpha1.InfrastructureTalosClusterRoleManagement, nil
+	return tc.Spec.Role == platformv1alpha1.TalosClusterRoleManagement, nil
 }
 
 // addLeaderNodeEnv appends LEADER_NODE to the first container's env of a Job.

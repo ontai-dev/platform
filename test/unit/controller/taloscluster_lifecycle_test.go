@@ -318,7 +318,7 @@ func TestTalosClusterReconcile_ManagementBootstrapJobSubmitted(t *testing.T) {
 }
 
 // TestTalosClusterReconcile_ManagementBootstrapComplete verifies that when the
-// InfrastructureTalosClusterOperationResult CR reports status=Succeeded, the reconciler
+// ClusterLog CR reports status=Succeeded, the reconciler
 // transitions the TalosCluster to Ready=True and clears the Bootstrapping condition.
 // platform-design.md §5.
 func TestTalosClusterReconcile_ManagementBootstrapComplete(t *testing.T) {

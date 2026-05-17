@@ -20,9 +20,11 @@ import (
 
 	infrav1alpha1 "github.com/ontai-dev/platform/api/infrastructure/v1alpha1"
 	platformv1alpha1 "github.com/ontai-dev/platform/api/v1alpha1"
+	seamplatformv1alpha1 "github.com/ontai-dev/platform/api/seam/v1alpha1"
 	"github.com/ontai-dev/platform/internal/controller"
-	seamcorev1alpha1 "github.com/ontai-dev/seam-core/api/v1alpha1"
+	seamcorev1alpha1 "github.com/ontai-dev/seam/api/v1alpha1"
 )
+
 
 // fakeRecorder returns a buffered fake event recorder for use in tests.
 func fakeRecorder() clientevents.EventRecorder {
@@ -42,6 +44,9 @@ func buildDay2Scheme(t *testing.T) *runtime.Scheme {
 	}
 	if err := infrav1alpha1.AddToScheme(s); err != nil {
 		t.Fatalf("add infrav1alpha1 scheme: %v", err)
+	}
+	if err := seamplatformv1alpha1.AddToScheme(s); err != nil {
+		t.Fatalf("add seamplatformv1alpha1 scheme: %v", err)
 	}
 	if err := seamcorev1alpha1.AddToScheme(s); err != nil {
 		t.Fatalf("add seamcorev1alpha1 scheme: %v", err)
@@ -64,21 +69,21 @@ func clusterRC(clusterName string, capabilities ...string) *controller.Operation
 	return rc
 }
 
-// successResultTCOR builds an InfrastructureTalosClusterOperationResult CR indicating success.
-// One TCOR per cluster: named clusterRef in seam-tenant-{clusterRef}. The jobName is the
+// successResultTCOR builds a ClusterLog CR indicating success.
+// One ClusterLog per cluster: named clusterRef in seam-tenant-{clusterRef}. The jobName is the
 // Operations map key (OPERATION_RESULT_CR env value set by the platform reconciler).
-func successResultTCOR(clusterRef, jobName string) *seamcorev1alpha1.InfrastructureTalosClusterOperationResult {
-	return &seamcorev1alpha1.InfrastructureTalosClusterOperationResult{
+func successResultTCOR(clusterRef, jobName string) *seamplatformv1alpha1.ClusterLog {
+	return &seamplatformv1alpha1.ClusterLog{
 		ObjectMeta: metav1.ObjectMeta{Name: clusterRef, Namespace: "seam-tenant-" + clusterRef},
-		Spec: seamcorev1alpha1.InfrastructureTalosClusterOperationResultSpec{
+		Spec: seamplatformv1alpha1.ClusterLogSpec{
 			ClusterRef:   clusterRef,
 			TalosVersion: "v1.9.3",
 			Revision:     1,
-			Operations: map[string]seamcorev1alpha1.TalosClusterOperationRecord{
+			Operations: map[string]seamplatformv1alpha1.OperationRecord{
 				jobName: {
 					Capability: "test-capability",
 					JobRef:     jobName,
-					Status:     seamcorev1alpha1.TalosClusterResultSucceeded,
+					Status:     seamplatformv1alpha1.ResultSucceeded,
 					Message:    "operation completed",
 				},
 			},
@@ -86,21 +91,21 @@ func successResultTCOR(clusterRef, jobName string) *seamcorev1alpha1.Infrastruct
 	}
 }
 
-// failedResultTCOR builds an InfrastructureTalosClusterOperationResult CR indicating failure.
-func failedResultTCOR(clusterRef, jobName, message string) *seamcorev1alpha1.InfrastructureTalosClusterOperationResult {
-	return &seamcorev1alpha1.InfrastructureTalosClusterOperationResult{
+// failedResultTCOR builds a ClusterLog CR indicating failure.
+func failedResultTCOR(clusterRef, jobName, message string) *seamplatformv1alpha1.ClusterLog {
+	return &seamplatformv1alpha1.ClusterLog{
 		ObjectMeta: metav1.ObjectMeta{Name: clusterRef, Namespace: "seam-tenant-" + clusterRef},
-		Spec: seamcorev1alpha1.InfrastructureTalosClusterOperationResultSpec{
+		Spec: seamplatformv1alpha1.ClusterLogSpec{
 			ClusterRef:   clusterRef,
 			TalosVersion: "v1.9.3",
 			Revision:     1,
-			Operations: map[string]seamcorev1alpha1.TalosClusterOperationRecord{
+			Operations: map[string]seamplatformv1alpha1.OperationRecord{
 				jobName: {
 					Capability: "test-capability",
 					JobRef:     jobName,
-					Status:     seamcorev1alpha1.TalosClusterResultFailed,
+					Status:     seamplatformv1alpha1.ResultFailed,
 					Message:    message,
-					FailureReason: &seamcorev1alpha1.TalosClusterOperationFailureReason{
+					FailureReason: &seamplatformv1alpha1.OperationFailureReason{
 						Category: "ExecutionFailure",
 						Reason:   message,
 					},

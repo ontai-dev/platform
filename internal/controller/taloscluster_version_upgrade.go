@@ -5,10 +5,13 @@ package controller
 //
 // Version upgrade path:
 //   - spec.versionUpgrade=true on a Ready cluster auto-creates an UpgradePolicy CR.
+//   - Upgrade type derives from which version fields are set:
+//     talosVersion only → UpgradeTypeTalos; kubernetesVersion only → UpgradeTypeKubernetes;
+//     both → UpgradeTypeStack (sequential Talos then k8s).
 //   - The UpgradePolicy reconciler drives the Conductor Job.
 //   - On completion, UpgradePolicy reconciler patches status.observedTalosVersion.
-//   - TalosClusterReconciler detects UpgradePolicy Ready=True and clears
-//     spec.versionUpgrade via spec patch, setting VersionUpgradePending=False.
+//   - TalosClusterReconciler detects UpgradePolicy Ready=True and sets
+//     VersionUpgradePending=False.
 //
 // Anti-regression:
 //   - If spec.talosVersion < status.observedTalosVersion, the reconciler sets
@@ -109,67 +112,95 @@ func (r *TalosClusterReconciler) reconcileVersionUpgrade(ctx context.Context, tc
 		return false, ctrl.Result{}, nil
 	}
 
-	// spec.versionUpgrade=true: validate that talosVersion is set.
-	if tc.Spec.TalosVersion == "" {
+	// Determine which version fields are set.
+	hasTalos := tc.Spec.TalosVersion != ""
+	hasKube := tc.Spec.KubernetesVersion != ""
+
+	// At least one target version must be present.
+	if !hasTalos && !hasKube {
 		platformv1alpha1.SetCondition(
 			&tc.Status.Conditions,
 			platformv1alpha1.ConditionTypePhaseFailed,
 			metav1.ConditionTrue,
 			platformv1alpha1.ReasonTalosVersionRequired,
-			"spec.versionUpgrade=true requires spec.talosVersion to be set to the target version.",
+			"spec.versionUpgrade=true requires spec.talosVersion, spec.kubernetesVersion, or both.",
 			tc.Generation,
 		)
 		return true, ctrl.Result{}, nil
 	}
 
-	// Anti-regression: if the specified version would downgrade, block.
-	if checkVersionRegression(tc) {
+	// Anti-regression guard applies only when a Talos version change is requested.
+	if hasTalos && checkVersionRegression(tc) {
 		return true, ctrl.Result{}, nil
 	}
 
+	// Derive upgrade type from which fields are populated.
+	var upgradeType platformv1alpha1.UpgradeType
+	switch {
+	case hasTalos && hasKube:
+		upgradeType = platformv1alpha1.UpgradeTypeStack
+	case hasTalos:
+		upgradeType = platformv1alpha1.UpgradeTypeTalos
+	default:
+		upgradeType = platformv1alpha1.UpgradeTypeKubernetes
+	}
+
 	upName := tc.Name + versionUpgradeSuffix
+	// UpgradePolicy lives in the tenant namespace so the Conductor executor Job
+	// that processes it runs in the same namespace as the platform-executor SA
+	// and the talosconfig Secret (both provisioned by ensureTenantExecutorResources
+	// and ensureExecutorTalosconfig respectively).
+	upNamespace := "seam-tenant-" + tc.Name
 
 	// Check if the UpgradePolicy already exists.
 	existing := &platformv1alpha1.UpgradePolicy{}
-	err = r.Client.Get(ctx, types.NamespacedName{Name: upName, Namespace: tc.Namespace}, existing)
+	err = r.Client.Get(ctx, types.NamespacedName{Name: upName, Namespace: upNamespace}, existing)
 	if err != nil && !apierrors.IsNotFound(err) {
 		return true, ctrl.Result{}, fmt.Errorf("reconcileVersionUpgrade: get UpgradePolicy: %w", err)
 	}
 
 	if apierrors.IsNotFound(err) {
-		// Create the UpgradePolicy.
+		upSpec := platformv1alpha1.UpgradePolicySpec{
+			ClusterRef:      platformv1alpha1.LocalObjectRef{Name: tc.Name, Namespace: tc.Namespace},
+			UpgradeType:     upgradeType,
+			RollingStrategy: platformv1alpha1.RollingStrategySequential,
+		}
+		if hasTalos {
+			upSpec.TargetTalosVersion = tc.Spec.TalosVersion
+		}
+		if hasKube {
+			upSpec.TargetKubernetesVersion = tc.Spec.KubernetesVersion
+		}
 		up := &platformv1alpha1.UpgradePolicy{
 			ObjectMeta: metav1.ObjectMeta{
 				Name:      upName,
-				Namespace: tc.Namespace,
+				Namespace: upNamespace,
 				Labels: map[string]string{
 					labelVersionUpgradeOwned:    "true",
 					"platform.ontai.dev/cluster": tc.Name,
 				},
 			},
-			Spec: platformv1alpha1.UpgradePolicySpec{
-				ClusterRef:         platformv1alpha1.LocalObjectRef{Name: tc.Name, Namespace: tc.Namespace},
-				UpgradeType:        platformv1alpha1.UpgradeTypeTalos,
-				TargetTalosVersion: tc.Spec.TalosVersion,
-				RollingStrategy:    platformv1alpha1.RollingStrategySequential,
-			},
+			Spec: upSpec,
 		}
 		if err := r.Client.Create(ctx, up); err != nil {
 			return true, ctrl.Result{}, fmt.Errorf("reconcileVersionUpgrade: create UpgradePolicy: %w", err)
 		}
+		msg := fmt.Sprintf("UpgradePolicy %s created for %s upgrade (talos=%s kubernetes=%s).",
+			upName, upgradeType, tc.Spec.TalosVersion, tc.Spec.KubernetesVersion)
 		platformv1alpha1.SetCondition(
 			&tc.Status.Conditions,
 			platformv1alpha1.ConditionTypeVersionUpgradePending,
 			metav1.ConditionTrue,
 			platformv1alpha1.ReasonVersionUpgradeSubmitted,
-			fmt.Sprintf("UpgradePolicy %s created for Talos version upgrade to %s.", upName, tc.Spec.TalosVersion),
+			msg,
 			tc.Generation,
 		)
 		r.Recorder.Eventf(tc, nil, "Normal", "VersionUpgradeSubmitted", "VersionUpgradeSubmitted",
-			"Created UpgradePolicy %s to upgrade cluster %s to Talos %s",
-			upName, tc.Name, tc.Spec.TalosVersion)
+			"Created UpgradePolicy %s/%s for cluster %s (%s)", upNamespace, upName, tc.Name, upgradeType)
 		logger.Info("created UpgradePolicy for spec.versionUpgrade",
-			"cluster", tc.Name, "upgradePolicyName", upName, "targetVersion", tc.Spec.TalosVersion)
+			"cluster", tc.Name, "upgradePolicyName", upName, "upgradePolicyNamespace", upNamespace,
+			"upgradeType", upgradeType,
+			"talosVersion", tc.Spec.TalosVersion, "kubernetesVersion", tc.Spec.KubernetesVersion)
 		return true, ctrl.Result{RequeueAfter: operationalJobPollInterval}, nil
 	}
 
@@ -199,13 +230,12 @@ func (r *TalosClusterReconciler) reconcileVersionUpgrade(ctx context.Context, tc
 		platformv1alpha1.ConditionTypeVersionUpgradePending,
 		metav1.ConditionFalse,
 		platformv1alpha1.ReasonVersionUpgradeComplete,
-		fmt.Sprintf("UpgradePolicy %s completed. Cluster upgraded to Talos %s.", upName, tc.Spec.TalosVersion),
+		fmt.Sprintf("UpgradePolicy %s completed (%s).", upName, upgradeType),
 		tc.Generation,
 	)
 	r.Recorder.Eventf(tc, nil, "Normal", "VersionUpgradeComplete", "VersionUpgradeComplete",
-		"Cluster %s upgraded to Talos %s via UpgradePolicy %s",
-		tc.Name, tc.Spec.TalosVersion, upName)
+		"Cluster %s completed %s upgrade via UpgradePolicy %s", tc.Name, upgradeType, upName)
 	logger.Info("version upgrade complete via UpgradePolicy",
-		"cluster", tc.Name, "version", tc.Spec.TalosVersion)
+		"cluster", tc.Name, "upgradeType", upgradeType)
 	return true, ctrl.Result{}, nil
 }

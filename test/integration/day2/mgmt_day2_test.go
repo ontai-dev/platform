@@ -24,9 +24,10 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 
-	seamcorev1alpha1 "github.com/ontai-dev/seam-core/api/v1alpha1"
 	platformv1alpha1 "github.com/ontai-dev/platform/api/v1alpha1"
+	seamplatformv1alpha1 "github.com/ontai-dev/platform/api/seam/v1alpha1"
 	"github.com/ontai-dev/platform/internal/controller"
+	seamcorev1alpha1 "github.com/ontai-dev/seam/api/v1alpha1"
 )
 
 // ── helpers ──────────────────────────────────────────────────────────────────
@@ -41,6 +42,9 @@ func buildDay2IntegrationScheme(t *testing.T) *runtime.Scheme {
 	}
 	if err := platformv1alpha1.AddToScheme(s); err != nil {
 		t.Fatalf("add platformv1alpha1 scheme: %v", err)
+	}
+	if err := seamplatformv1alpha1.AddToScheme(s); err != nil {
+		t.Fatalf("add seamplatformv1alpha1 scheme: %v", err)
 	}
 	if err := seamcorev1alpha1.AddToScheme(s); err != nil {
 		t.Fatalf("add seamcorev1alpha1 scheme: %v", err)

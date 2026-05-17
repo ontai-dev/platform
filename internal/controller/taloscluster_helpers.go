@@ -24,7 +24,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 
 	platformv1alpha1 "github.com/ontai-dev/platform/api/v1alpha1"
-	"github.com/ontai-dev/seam-core/pkg/lineage"
+	"github.com/ontai-dev/seam/pkg/lineage"
 )
 
 const (
@@ -913,14 +913,15 @@ func EnsureRemoteConductorRBAC(ctx context.Context, k8s kubernetes.Interface) er
 				Verbs:     []string{"get", "list", "watch", "create", "update", "patch", "delete"},
 			},
 			{
-				APIGroups: []string{"infrastructure.ontai.dev"},
-				Resources: []string{"infrastructuretalosclusters/status"},
-				Verbs:     []string{"update", "patch"},
+				// TalosCluster (seam.ontai.dev) read access for drift detection on tenant cluster.
+				APIGroups: []string{"seam.ontai.dev"},
+				Resources: []string{"talosclusters", "talosclusters/status"},
+				Verbs:     []string{"get", "list", "watch", "create", "update", "patch"},
 			},
 			{
-				// RBACProfilePullLoop and RBACPolicyPullLoop SSA-patch security.ontai.dev
+				// RBACProfilePullLoop and RBACPolicyPullLoop SSA-patch guardian.ontai.dev
 				// resources into ont-system. Needs create/update/patch in addition to read.
-				APIGroups: []string{"security.ontai.dev"},
+				APIGroups: []string{"guardian.ontai.dev"},
 				Resources: []string{"*"},
 				Verbs:     []string{"get", "list", "watch", "create", "update", "patch"},
 			},
@@ -1006,9 +1007,9 @@ func EnsureRemoteConductorRBAC(ctx context.Context, k8s kubernetes.Interface) er
 // SC-INV-003: seam-core CRDs are installed before all operators.
 func EnsureRemoteTalosClusterCopy(ctx context.Context, dynClient dynamic.Interface, tc *platformv1alpha1.TalosCluster) error {
 	gvr := schema.GroupVersionResource{
-		Group:    "infrastructure.ontai.dev",
+		Group:    "seam.ontai.dev",
 		Version:  "v1alpha1",
-		Resource: "infrastructuretalosclusters",
+		Resource: "talosclusters",
 	}
 
 	// Idempotency: skip if the CR already exists.
@@ -1022,8 +1023,8 @@ func EnsureRemoteTalosClusterCopy(ctx context.Context, dynClient dynamic.Interfa
 
 	obj := &unstructured.Unstructured{
 		Object: map[string]interface{}{
-			"apiVersion": "infrastructure.ontai.dev/v1alpha1",
-			"kind":       "InfrastructureTalosCluster",
+			"apiVersion": "seam.ontai.dev/v1alpha1",
+			"kind":       "TalosCluster",
 			"metadata": map[string]interface{}{
 				"name":      tc.Name,
 				"namespace": conductorAgentNamespace,
@@ -1051,7 +1052,7 @@ func EnsureRemoteTalosClusterCopy(ctx context.Context, dynClient dynamic.Interfa
 		if apierrors.IsNotFound(err) {
 			return nil
 		}
-		return fmt.Errorf("ensureRemoteTalosClusterCopy: create InfrastructureTalosCluster on %s: %w", tc.Name, err)
+		return fmt.Errorf("ensureRemoteTalosClusterCopy: create TalosCluster on %s: %w", tc.Name, err)
 	}
 	return nil
 }
@@ -1465,34 +1466,34 @@ func (r *TalosClusterReconciler) ensureLocalQueue(
 	return nil
 }
 
-// rbacPolicyGVK is the GVK for guardian RBACPolicy (security.ontai.dev/v1alpha1).
+// rbacPolicyGVK is the GVK for guardian RBACPolicy (guardian.ontai.dev/v1alpha1).
 var rbacPolicyGVK = schema.GroupVersionKind{
-	Group:   "security.ontai.dev",
+	Group:   "guardian.ontai.dev",
 	Version: "v1alpha1",
 	Kind:    "RBACPolicy",
 }
 
-// rbacProfileGVK is the GVK for guardian RBACProfile (security.ontai.dev/v1alpha1).
+// rbacProfileGVK is the GVK for guardian RBACProfile (guardian.ontai.dev/v1alpha1).
 var rbacProfileGVK = schema.GroupVersionKind{
-	Group:   "security.ontai.dev",
+	Group:   "guardian.ontai.dev",
 	Version: "v1alpha1",
 	Kind:    "RBACProfile",
 }
 
-// packExecutionTenantGVK is the GVK for InfrastructurePackExecution CRs in
-// the tenant namespace. Owned by seam-core. Decision G.
+// packExecutionTenantGVK is the GVK for PackExecution CRs in
+// the tenant namespace. Owned by wrapper. MIGRATION-3.2.
 var packExecutionTenantGVK = schema.GroupVersionKind{
-	Group:   "infrastructure.ontai.dev",
+	Group:   "seam.ontai.dev",
 	Version: "v1alpha1",
-	Kind:    "InfrastructurePackExecution",
+	Kind:    "PackExecution",
 }
 
-// packInstanceTenantGVK is the GVK for InfrastructurePackInstance CRs in
-// the tenant namespace. Owned by seam-core. Decision G.
+// packInstanceTenantGVK is the GVK for PackInstalled CRs in
+// the tenant namespace. Owned by wrapper. MIGRATION-3.2.
 var packInstanceTenantGVK = schema.GroupVersionKind{
-	Group:   "infrastructure.ontai.dev",
+	Group:   "seam.ontai.dev",
 	Version: "v1alpha1",
-	Kind:    "InfrastructurePackInstance",
+	Kind:    "PackInstalled",
 }
 
 // rbacPolicyNamespace is the namespace where the platform-wide RBACPolicy lives.
@@ -1777,7 +1778,7 @@ func (r *TalosClusterReconciler) ensureWrapperRunnerResources(ctx context.Contex
 				{APIGroups: []string{"autoscaling"}, Resources: []string{"horizontalpodautoscalers"}, Verbs: []string{"get", "list", "watch", "create", "update", "patch", "delete"}},
 				{APIGroups: []string{"infrastructure.ontai.dev"}, Resources: []string{"infrastructurepackexecutions", "infrastructureclusterpacks", "infrastructurepackinstances"}, Verbs: []string{"get", "list", "watch"}},
 				{APIGroups: []string{"infrastructure.ontai.dev"}, Resources: []string{"infrastructurerunnerconfigs"}, Verbs: []string{"get", "list", "watch", "patch", "update"}},
-				{APIGroups: []string{"security.ontai.dev"}, Resources: []string{"rbacprofiles"}, Verbs: []string{"get", "list", "watch"}},
+				{APIGroups: []string{"guardian.ontai.dev"}, Resources: []string{"rbacprofiles"}, Verbs: []string{"get", "list", "watch"}},
 				{APIGroups: []string{"infrastructure.ontai.dev"}, Resources: []string{"packoperationresults"}, Verbs: []string{"get", "list", "watch", "create", "update", "patch", "delete"}},
 			},
 		}

@@ -24,7 +24,7 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
-	seamcorev1alpha1 "github.com/ontai-dev/seam-core/api/v1alpha1"
+	seamplatformv1alpha1 "github.com/ontai-dev/platform/api/seam/v1alpha1"
 )
 
 const (
@@ -154,7 +154,7 @@ func tenantNS(clusterRef string) string {
 // Returns (false, false, "") when the TCOR does not yet exist or the
 // record has not been written yet — the Job is still running.
 func readOperationRecord(ctx context.Context, c client.Client, clusterRef, jobName string) (complete, failed bool, message string) {
-	tcor := &seamcorev1alpha1.InfrastructureTalosClusterOperationResult{}
+	tcor := &seamplatformv1alpha1.ClusterLog{}
 	if err := c.Get(ctx, types.NamespacedName{Name: clusterRef, Namespace: tenantNS(clusterRef)}, tcor); err != nil {
 		return false, false, ""
 	}
@@ -163,9 +163,9 @@ func readOperationRecord(ctx context.Context, c client.Client, clusterRef, jobNa
 		return false, false, ""
 	}
 	switch rec.Status {
-	case seamcorev1alpha1.TalosClusterResultSucceeded:
+	case seamplatformv1alpha1.ResultSucceeded:
 		return true, false, rec.Message
-	case seamcorev1alpha1.TalosClusterResultFailed:
+	case seamplatformv1alpha1.ResultFailed:
 		msg := rec.Message
 		if rec.FailureReason != nil && rec.FailureReason.Reason != "" {
 			msg = rec.FailureReason.Reason
@@ -179,19 +179,19 @@ func readOperationRecord(ctx context.Context, c client.Client, clusterRef, jobNa
 // does not yet exist. Called by ensureTenantExecutorResources on cluster admission.
 func ensureTCOR(ctx context.Context, c client.Client, clusterRef, talosVersion string) error {
 	ns := tenantNS(clusterRef)
-	tcor := &seamcorev1alpha1.InfrastructureTalosClusterOperationResult{}
+	tcor := &seamplatformv1alpha1.ClusterLog{}
 	if err := c.Get(ctx, types.NamespacedName{Name: clusterRef, Namespace: ns}, tcor); err == nil {
 		return nil
 	} else if !apierrors.IsNotFound(err) {
 		return fmt.Errorf("ensureTCOR: get TCOR %s/%s: %w", ns, clusterRef, err)
 	}
-	tcor = &seamcorev1alpha1.InfrastructureTalosClusterOperationResult{
+	tcor = &seamplatformv1alpha1.ClusterLog{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      clusterRef,
 			Namespace: ns,
 			Labels:    map[string]string{"platform.ontai.dev/cluster": clusterRef},
 		},
-		Spec: seamcorev1alpha1.InfrastructureTalosClusterOperationResultSpec{
+		Spec: seamplatformv1alpha1.ClusterLogSpec{
 			ClusterRef:   clusterRef,
 			TalosVersion: talosVersion,
 			Revision:     1,
@@ -208,7 +208,7 @@ func ensureTCOR(ctx context.Context, c client.Client, clusterRef, talosVersion s
 // Called by UpgradePolicyReconciler after a successful talosVersion upgrade.
 func bumpTCORRevision(ctx context.Context, c client.Client, clusterRef, newTalosVersion string) error {
 	ns := tenantNS(clusterRef)
-	tcor := &seamcorev1alpha1.InfrastructureTalosClusterOperationResult{}
+	tcor := &seamplatformv1alpha1.ClusterLog{}
 	if err := c.Get(ctx, types.NamespacedName{Name: clusterRef, Namespace: ns}, tcor); err != nil {
 		if apierrors.IsNotFound(err) {
 			return ensureTCOR(ctx, c, clusterRef, newTalosVersion)

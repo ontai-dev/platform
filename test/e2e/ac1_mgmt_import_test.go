@@ -24,7 +24,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 
-	e2ehelpers "github.com/ontai-dev/seam-core/pkg/e2e"
+	e2ehelpers "github.com/ontai-dev/seam/pkg/e2e"
 )
 
 var (

@@ -4,13 +4,16 @@ go 1.25.3
 
 replace github.com/ontai-dev/conductor => ../conductor
 
-replace github.com/ontai-dev/seam-core => ../seam-core
+replace github.com/ontai-dev/seam => ../seam
+
+replace github.com/ontai-dev/seam-sdk => ../seam-sdk
 
 require (
 	github.com/Masterminds/semver/v3 v3.4.0
 	github.com/onsi/ginkgo/v2 v2.27.2
 	github.com/onsi/gomega v1.38.2
-	github.com/ontai-dev/seam-core v0.1.0-alpha.0.20260425084313-fa4bedc389f6
+	github.com/ontai-dev/seam v0.0.0-00010101000000-000000000000
+	github.com/ontai-dev/seam-sdk v0.0.0-00010101000000-000000000000
 	github.com/siderolabs/talos/pkg/machinery v1.12.6
 	k8s.io/api v0.35.3
 	k8s.io/apimachinery v0.35.3

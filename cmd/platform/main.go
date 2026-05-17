@@ -19,7 +19,8 @@ import (
 
 	infrav1alpha1 "github.com/ontai-dev/platform/api/infrastructure/v1alpha1"
 	platformv1alpha1 "github.com/ontai-dev/platform/api/v1alpha1"
-	seamcorev1alpha1 "github.com/ontai-dev/seam-core/api/v1alpha1"
+	seamplatformv1alpha1 "github.com/ontai-dev/platform/api/seam/v1alpha1"
+	seamcorev1alpha1 "github.com/ontai-dev/seam/api/v1alpha1"
 	"github.com/ontai-dev/platform/internal/controller"
 )
 
@@ -29,8 +30,9 @@ func init() {
 	utilruntime.Must(clientgoscheme.AddToScheme(scheme))
 	utilruntime.Must(platformv1alpha1.AddToScheme(scheme))
 	utilruntime.Must(infrav1alpha1.AddToScheme(scheme))
-	// TalosCluster and RunnerConfig types are now owned by seam-core.
-	// infrastructure.ontai.dev/v1alpha1. T-2B-8.
+	// TalosCluster and ClusterLog are owned by platform (seam.ontai.dev/v1alpha1). MIGRATION-3.1, MIGRATION-3.2.
+	utilruntime.Must(seamplatformv1alpha1.AddToScheme(scheme))
+	// RunnerConfig and DriftSignal remain in seam-core.
 	utilruntime.Must(seamcorev1alpha1.AddToScheme(scheme))
 }
 
