@@ -78,10 +78,15 @@ func (r *PKIRotationReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 		)
 	}
 
-	// If already complete, do nothing.
+	// If already complete, self-delete after the day-2 TTL; requeue until then.
 	readyCond := platformv1alpha1.FindCondition(pkir.Status.Conditions, platformv1alpha1.ConditionTypePKIRotationReady)
 	if readyCond != nil && readyCond.Status == metav1.ConditionTrue {
-		return ctrl.Result{}, nil
+		if expired, after := day2TTLExpired(readyCond.LastTransitionTime.Time); expired {
+			_ = r.Client.Delete(ctx, pkir)
+			return ctrl.Result{}, nil
+		} else {
+			return ctrl.Result{RequeueAfter: after}, nil
+		}
 	}
 
 	// Gate: read the cluster RunnerConfig from ont-system and verify capability.

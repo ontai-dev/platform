@@ -41,6 +41,11 @@ const (
 	// The reconciler reads the OperationResult before this expires.
 	operationalJobTTL = int32(600)
 
+	// day2OperationTTL is the time-to-live for a completed day-2 operation CR.
+	// Reconcilers self-delete the CR this long after its ready condition transitions
+	// to True. ClusterLog retains the result permanently.
+	day2OperationTTL = 6 * time.Hour
+
 	// operationalJobBackoffLimit enforces INV-018: gate failures are permanent.
 	operationalJobBackoffLimit = int32(0)
 
@@ -361,4 +366,16 @@ func getOperationalRunnerConfig(ctx context.Context, c client.Client, namespace,
 		return nil, fmt.Errorf("get RunnerConfig %s/%s: %w", namespace, name, err)
 	}
 	return rc, nil
+}
+
+// day2TTLExpired reports whether the day-2 operation TTL has elapsed since completionTime.
+// When true the caller should delete the CR and return ctrl.Result{}.
+// When false the caller should requeue at the returned RequeueAfter so the reconciler
+// wakes up exactly when the TTL expires.
+func day2TTLExpired(completionTime time.Time) (expired bool, requeueAfter time.Duration) {
+	remaining := time.Until(completionTime.Add(day2OperationTTL))
+	if remaining <= 0 {
+		return true, 0
+	}
+	return false, remaining
 }

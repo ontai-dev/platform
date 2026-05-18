@@ -84,14 +84,24 @@ func (r *MaintenanceBundleReconciler) Reconcile(ctx context.Context, req ctrl.Re
 		)
 	}
 
-	// If already complete (Ready or Degraded), do nothing — one-shot CR.
+	// If already complete (Ready or Degraded), self-delete after the day-2 TTL.
 	readyCond := platformv1alpha1.FindCondition(mb.Status.Conditions, platformv1alpha1.ConditionTypeMaintenanceBundleReady)
 	if readyCond != nil && readyCond.Status == metav1.ConditionTrue {
-		return ctrl.Result{}, nil
+		if expired, after := day2TTLExpired(readyCond.LastTransitionTime.Time); expired {
+			_ = r.Client.Delete(ctx, mb)
+			return ctrl.Result{}, nil
+		} else {
+			return ctrl.Result{RequeueAfter: after}, nil
+		}
 	}
 	degradedCond := platformv1alpha1.FindCondition(mb.Status.Conditions, platformv1alpha1.ConditionTypeMaintenanceBundleDegraded)
 	if degradedCond != nil && degradedCond.Status == metav1.ConditionTrue {
-		return ctrl.Result{}, nil
+		if expired, after := day2TTLExpired(degradedCond.LastTransitionTime.Time); expired {
+			_ = r.Client.Delete(ctx, mb)
+			return ctrl.Result{}, nil
+		} else {
+			return ctrl.Result{RequeueAfter: after}, nil
+		}
 	}
 
 	// Map the bundle operation to a Conductor capability name.
