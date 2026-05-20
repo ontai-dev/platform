@@ -11,21 +11,44 @@ import (
 
 // Type aliases -- struct definitions live in platform/api/seam/v1alpha1.
 // These preserve the platformv1alpha1 package interface for all reconcilers without source edits.
-type (
-	TalosCluster           = seamv1alpha1.TalosCluster
-	TalosClusterList       = seamv1alpha1.TalosClusterList
-	TalosClusterSpec       = seamv1alpha1.TalosClusterSpec
-	TalosClusterStatus     = seamv1alpha1.TalosClusterStatus
-	TalosClusterMode       = seamv1alpha1.TalosClusterMode
-	TalosClusterRole       = seamv1alpha1.TalosClusterRole
-	TalosClusterOrigin     = seamv1alpha1.TalosClusterOrigin
-	InfrastructureProvider = seamv1alpha1.InfrastructureProvider
-	CAPIConfig             = seamv1alpha1.CAPIConfig
-	CAPIControlPlaneConfig = seamv1alpha1.CAPIControlPlaneConfig
-	CAPIWorkerPool         = seamv1alpha1.CAPIWorkerPool
-	CAPICiliumPackRef      = seamv1alpha1.CAPICiliumPackRef
-	LocalObjectRef         = seamv1alpha1.LocalObjectRef
-)
+// +kubebuilder:object:generate=false
+type TalosCluster = seamv1alpha1.TalosCluster
+
+// +kubebuilder:object:generate=false
+type TalosClusterList = seamv1alpha1.TalosClusterList
+
+// +kubebuilder:object:generate=false
+type TalosClusterSpec = seamv1alpha1.TalosClusterSpec
+
+// +kubebuilder:object:generate=false
+type TalosClusterStatus = seamv1alpha1.TalosClusterStatus
+
+// +kubebuilder:object:generate=false
+type TalosClusterMode = seamv1alpha1.TalosClusterMode
+
+// +kubebuilder:object:generate=false
+type TalosClusterRole = seamv1alpha1.TalosClusterRole
+
+// +kubebuilder:object:generate=false
+type TalosClusterOrigin = seamv1alpha1.TalosClusterOrigin
+
+// +kubebuilder:object:generate=false
+type InfrastructureProvider = seamv1alpha1.InfrastructureProvider
+
+// +kubebuilder:object:generate=false
+type CAPIConfig = seamv1alpha1.CAPIConfig
+
+// +kubebuilder:object:generate=false
+type CAPIControlPlaneConfig = seamv1alpha1.CAPIControlPlaneConfig
+
+// +kubebuilder:object:generate=false
+type CAPIWorkerPool = seamv1alpha1.CAPIWorkerPool
+
+// +kubebuilder:object:generate=false
+type CAPICiliumPackRef = seamv1alpha1.CAPICiliumPackRef
+
+// +kubebuilder:object:generate=false
+type LocalObjectRef = seamv1alpha1.LocalObjectRef
 
 // Mode constants.
 const (
