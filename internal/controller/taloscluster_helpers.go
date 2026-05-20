@@ -47,12 +47,7 @@ const (
 
 	// conductorExecuteImageName is the base image name for the Conductor executor
 	// binary (debian-slim, used for executor Jobs). conductor-schema.md §3, Decision 12.
-	conductorExecuteImageName = "conductor-execute"
-
-	// devRevision is the image tag used for lab/development builds.
-	// Production releases use {talosVersion} for executor and agent images.
-	// conductor-schema.md §3, INV-011, INV-023.
-	devRevision = "dev"
+	conductorExecuteImageName = "conductor-exec"
 
 	// conductorRegistryEnv is the env var name for overriding the conductor image registry.
 	conductorRegistryEnv = "CONDUCTOR_REGISTRY"
@@ -67,14 +62,10 @@ const (
 // without error — the PhaseFailed condition is already written to tc.Status.
 var errTalosVersionRequired = errors.New("spec.talosVersion is required for conductor image derivation")
 
-// executorImageTag returns the conductor-execute (or conductor agent) image tag.
-// In dev/lab (devRevision=="dev"): returns "dev" regardless of talosVersion.
-// In production: returns talosVersion so the executor tracks the cluster's Talos version.
-// conductor-schema.md §3, INV-011, INV-023.
+// executorImageTag returns the conductor-exec image tag. Always returns talosVersion
+// so the executor tracks the cluster's Talos version in both lab and production.
+// conductor-schema.md §3, INV-011 (conductor exec uses conductor:<talos-version>).
 func executorImageTag(talosVersion string) string {
-	if devRevision == "dev" {
-		return devRevision
-	}
 	return talosVersion
 }
 
@@ -135,12 +126,11 @@ func (r *TalosClusterReconciler) getBootstrapRunnerConfig(ctx context.Context, c
 // ensureBootstrapRunnerConfig creates the RunnerConfig CR in bootstrapRunnerConfigNamespace
 // (ont-system) for a management cluster bootstrap or import if it does not already exist.
 // Name equals TalosCluster.Name so Conductor can locate it by cluster-ref flag value.
-// RunnerImage uses conductorExecuteImageName (conductor-execute) with a tag derived from
-// tc.Spec.TalosVersion per INV-012 and conductor-schema.md §3:
+// RunnerImage uses conductorExecuteImageName (conductor-exec) with the Talos version tag
+// per INV-012, INV-011, and conductor-schema.md §3:
 //
-//	{CONDUCTOR_REGISTRY}/conductor-execute:{tag}
+//	{CONDUCTOR_REGISTRY}/conductor-exec:{talosVersion}
 //
-// In dev/lab: tag = "dev". In production: tag = tc.Spec.TalosVersion.
 // If TalosVersion is empty, sets ConditionTypePhaseFailed on tc and returns
 // errTalosVersionRequired — the caller must return ctrl.Result{}, nil.
 // Idempotent — returns nil when RunnerConfig already present.
