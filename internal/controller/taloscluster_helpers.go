@@ -1617,8 +1617,8 @@ func (r *TalosClusterReconciler) ensureExecutorTalosconfig(ctx context.Context, 
 
 // ensureTenantExecutorResources creates the platform-executor ServiceAccount,
 // Role, and RoleBinding in seam-tenant-{clusterName} so that day-2 Conductor
-// executor Jobs can write InfrastructureTalosClusterOperationResult CRs and
-// read platform CRDs (NodeOperation, NodeMaintenance, etc.) in that namespace.
+// executor Jobs can write ClusterLog CRs and read platform CRDs (NodeOperation,
+// NodeMaintenance, etc.) in that namespace.
 // CP-INV-003, CP-INV-004: RBAC is Guardian-governed; this creates the minimal
 // namespace-scoped resources required for executor Job pods.
 func (r *TalosClusterReconciler) ensureTenantExecutorResources(ctx context.Context, tc *platformv1alpha1.TalosCluster) error {
@@ -1641,6 +1641,23 @@ func (r *TalosClusterReconciler) ensureTenantExecutorResources(ctx context.Conte
 		}
 	}
 
+	executorRules := []rbacv1.PolicyRule{
+		{
+			APIGroups: []string{"seam.ontai.dev"},
+			Resources: []string{"clusterlogs"},
+			Verbs:     []string{"get", "create", "update", "patch"},
+		},
+		{
+			APIGroups: []string{"platform.ontai.dev"},
+			Resources: []string{"etcdmaintenances", "hardeningprofiles", "nodemaintenances", "nodeoperations", "pkirotations", "upgradepolicies"},
+			Verbs:     []string{"get", "list", "watch"},
+		},
+		{
+			APIGroups: []string{""},
+			Resources: []string{"secrets"},
+			Verbs:     []string{"get", "create", "update", "patch"},
+		},
+	}
 	role := &rbacv1.Role{}
 	if err := r.Client.Get(ctx, types.NamespacedName{Name: "platform-executor", Namespace: tenantNS}, role); err != nil {
 		if !apierrors.IsNotFound(err) {
@@ -1652,26 +1669,15 @@ func (r *TalosClusterReconciler) ensureTenantExecutorResources(ctx context.Conte
 				Namespace: tenantNS,
 				Labels:    map[string]string{"platform.ontai.dev/cluster": tc.Name},
 			},
-			Rules: []rbacv1.PolicyRule{
-				{
-					APIGroups: []string{"infrastructure.ontai.dev"},
-					Resources: []string{"infrastructuretalosclusteroperationresults"},
-					Verbs:     []string{"get", "create", "update", "patch"},
-				},
-				{
-					APIGroups: []string{"platform.ontai.dev"},
-					Resources: []string{"etcdmaintenances", "hardeningprofiles", "nodemaintenances", "nodeoperations", "pkirotations", "upgradepolicies"},
-					Verbs:     []string{"get", "list", "watch"},
-				},
-				{
-					APIGroups: []string{""},
-					Resources: []string{"secrets"},
-					Verbs:     []string{"get", "create", "update", "patch"},
-				},
-			},
+			Rules: executorRules,
 		}
 		if err := r.Client.Create(ctx, role); err != nil && !apierrors.IsAlreadyExists(err) {
 			return fmt.Errorf("ensureTenantExecutorResources: create Role: %w", err)
+		}
+	} else {
+		role.Rules = executorRules
+		if err := r.Client.Update(ctx, role); err != nil {
+			return fmt.Errorf("ensureTenantExecutorResources: update Role: %w", err)
 		}
 	}
 
