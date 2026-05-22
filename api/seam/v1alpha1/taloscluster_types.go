@@ -6,6 +6,44 @@ import (
 	"github.com/ontai-dev/seam/pkg/lineage"
 )
 
+// TalosCluster health and intervention condition type constants.
+// Written by ClusterNodeHealthLoop in conductor agent mode.
+const (
+	// ConditionTypeNodeHealthSummary is True when all nodes are Ready.
+	// False when any node is Degraded or Unreachable.
+	// Written by conductor ClusterNodeHealthLoop. RECON-B1.
+	ConditionTypeNodeHealthSummary = "NodeHealthSummary"
+
+	// ConditionTypeHumanInterventionRequired is True when the cluster has entered a state
+	// that conductor cannot resolve autonomously regardless of AutonomyLevel.
+	// Examples: control plane quorum loss, multiple nodes simultaneously degraded.
+	// Written by conductor ClusterNodeHealthLoop. RECON-B3 Tier 3.
+	ConditionTypeHumanInterventionRequired = "HumanInterventionRequired"
+
+	// ConditionTypeCapacitySaturation is True when any node exceeds the CPU or memory
+	// utilisation threshold for the configured consecutive check window.
+	// Written by conductor ClusterNodeHealthLoop. RECON-C6.
+	ConditionTypeCapacitySaturation = "CapacitySaturation"
+
+	// ConditionTypeDiskPressure is True when any node's ephemeral or STATE partition
+	// exceeds the critical disk usage threshold. Written by conductor ClusterNodeHealthLoop. RECON-C7.
+	ConditionTypeDiskPressure = "DiskPressure"
+)
+
+// Reason constants for health-related TalosCluster conditions.
+const (
+	ReasonAllNodesReady            = "AllNodesReady"
+	ReasonNodesDegraded            = "NodesDegraded"
+	ReasonNodesUnreachable         = "NodesUnreachable"
+	ReasonControlPlaneQuorumAtRisk = "ControlPlaneQuorumAtRisk"
+	ReasonHumanInterventionNeeded  = "HumanInterventionNeeded"
+	ReasonPKIExpiryApproaching     = "PKIExpiryApproaching"
+)
+
+// NodeHealthAnnotation is the TalosCluster annotation key for the per-node JSON health summary.
+// Written by ClusterNodeHealthLoop. Format: {"nodes":[{"name":"...","ip":"...","state":"..."}]}.
+const NodeHealthAnnotation = "platform.ontai.dev/node-health-summary"
+
 // TalosClusterMode declares whether the cluster is bootstrapped or imported.
 // +kubebuilder:validation:Enum=bootstrap;import
 type TalosClusterMode string
