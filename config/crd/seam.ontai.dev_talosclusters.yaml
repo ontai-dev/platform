@@ -4,8 +4,6 @@ kind: CustomResourceDefinition
 metadata:
   annotations:
     controller-gen.kubebuilder.io/version: v0.16.1
-  labels:
-    infrastructure.ontai.dev/lineage-root: "true"
   name: talosclusters.seam.ontai.dev
 spec:
   group: seam.ontai.dev
@@ -61,14 +59,12 @@ spec:
               platform-schema.md §4.
             properties:
               capi:
-                description: CAPI holds CAPI integration settings. When absent, the
-                  cluster uses direct bootstrap.
+                description: CAPI holds CAPI integration settings. When absent, direct
+                  bootstrap is used.
                 properties:
                   ciliumPackRef:
-                    description: |-
-                      CiliumPackRef references the cluster-specific Cilium PackDelivery.
-                      Applied as the first pack after the CAPI cluster reaches Running state.
-                      platform-schema.md §2.3.
+                    description: CiliumPackRef references the cluster-specific Cilium
+                      PackDelivery.
                     properties:
                       name:
                         description: Name is the PackDelivery CR name for the Cilium
@@ -92,19 +88,21 @@ spec:
                         type: integer
                     type: object
                   enabled:
-                    description: Enabled determines whether this TalosCluster uses the CAPI path.
+                    description: Enabled determines whether this TalosCluster uses
+                      the CAPI path.
                     type: boolean
                   kubernetesVersion:
                     description: KubernetesVersion is the Kubernetes version for TalosControlPlane.
                     type: string
                   talosVersion:
-                    description: |-
-                      TalosVersion is the Talos version to use for TalosConfigTemplate generation.
+                    description: TalosVersion is the Talos version to use for TalosConfigTemplate
+                      generation.
                     type: string
                   workers:
                     description: Workers is the list of worker node pools.
                     items:
-                      description: CAPIWorkerPool declares a worker node pool for a CAPI-managed target cluster.
+                      description: CAPIWorkerPool declares a worker node pool for
+                        a CAPI-managed target cluster.
                       properties:
                         name:
                           description: Name is the pool identifier. Used as the MachineDeployment
@@ -130,7 +128,8 @@ spec:
                 - enabled
                 type: object
               clusterEndpoint:
-                description: ClusterEndpoint is the cluster VIP or primary API endpoint IP.
+                description: ClusterEndpoint is the cluster VIP or primary API endpoint
+                  IP.
                 type: string
               hardeningProfileRef:
                 description: |-
@@ -158,14 +157,13 @@ spec:
                   - capi
                   - screen
                 default: native
-                description: |-
-                  InfrastructureProvider declares the infrastructure provider backing this cluster.
-                  Defaults to native when absent. The only reserved future value is screen (INV-021).
+                description: InfrastructureProvider declares the infrastructure provider
+                  backing this cluster.
                 type: string
               kubeconfigSecretRef:
                 description: |-
-                  KubeconfigSecretRef is the name of the Secret containing the kubeconfig for this cluster.
-                  Required on mode=import. Not used when CAPI manages the cluster lifecycle.
+                  KubeconfigSecretRef is the name of the Secret containing the kubeconfig.
+                  Required on mode=import. Not used when CAPI manages the lifecycle.
                 type: string
               kubernetesVersion:
                 description: |-
@@ -175,8 +173,8 @@ spec:
                   UpgradeTypeStack policy (sequential Talos then Kubernetes upgrade).
                 type: string
               lineage:
-                description: Lineage is the sealed causal chain record for this root
-                  declaration. Immutable after creation.
+                description: Lineage is the sealed causal chain record. Immutable
+                  after creation.
                 properties:
                   creatingOperator:
                     description: |-
@@ -257,7 +255,8 @@ spec:
                   scratch or imported.
                 type: string
               nodeAddresses:
-                description: NodeAddresses is the list of node IPs for DSNSReconciler A-record population.
+                description: NodeAddresses is the list of node IPs for DSNSReconciler
+                  A-record population.
                 items:
                   type: string
                 type: array
@@ -281,19 +280,20 @@ spec:
                   Mandatory on mode=import.
                 type: string
               talosVersion:
-                description: TalosVersion is the Talos OS version for this cluster. INV-012.
+                description: TalosVersion is the Talos OS version for this cluster.
+                  INV-012.
                 type: string
               talosconfigSecretRef:
                 description: TalosconfigSecretRef is the name of the Secret containing
-                  the talosconfig for this cluster.
+                  the talosconfig.
                 type: string
               versionUpgrade:
                 description: |-
                   VersionUpgrade, when set to true, triggers a cluster-level rolling upgrade.
                   Upgrade type is derived from which version fields are set:
-                    talosVersion only: UpgradeTypeTalos
-                    kubernetesVersion only: UpgradeTypeKubernetes
-                    both: UpgradeTypeStack (sequential Talos then k8s)
+                    - talosVersion only: UpgradeTypeTalos
+                    - kubernetesVersion only: UpgradeTypeKubernetes
+                    - both: UpgradeTypeStack (sequential Talos then k8s)
                 type: boolean
             required:
             - mode
@@ -382,7 +382,8 @@ spec:
                 format: int64
                 type: integer
               observedTalosVersion:
-                description: ObservedTalosVersion is the Talos version last confirmed running.
+                description: ObservedTalosVersion is the Talos version last confirmed
+                  running.
                 type: string
               origin:
                 description: Origin records how this cluster came under Seam governance.
