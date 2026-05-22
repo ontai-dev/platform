@@ -14,6 +14,9 @@ const (
 	// ConditionTypeMachineConfigSyncDegraded indicates the sync Job failed.
 	ConditionTypeMachineConfigSyncDegraded = "Degraded"
 
+	// ConditionTypeMachineConfigSyncRunning indicates a Conductor executor Job is in flight.
+	ConditionTypeMachineConfigSyncRunning = "Running"
+
 	// ConditionTypeMachineConfigSyncLineageSynced indicates the LineageRecord descendant
 	// entry for this sync has been written.
 	ConditionTypeMachineConfigSyncLineageSynced = "LineageSynced"
