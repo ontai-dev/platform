@@ -15,7 +15,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 
 	platformv1alpha1 "github.com/ontai-dev/platform/api/v1alpha1"
-	seamcorev1alpha1 "github.com/ontai-dev/seam-core/api/v1alpha1"
+	seamplatformv1alpha1 "github.com/ontai-dev/platform/api/seam/v1alpha1"
 )
 
 // buildHelperTestScheme constructs a runtime.Scheme with all types required for
@@ -26,13 +26,23 @@ func buildHelperTestScheme(t *testing.T) *runtime.Scheme {
 	if err := clientgoscheme.AddToScheme(s); err != nil {
 		t.Fatalf("add clientgo scheme: %v", err)
 	}
-	// seamcorev1alpha1 registers InfrastructurePackExecution, InfrastructurePackInstance,
-	// InfrastructureTalosCluster (TalosCluster alias), and DriftSignal under
-	// infrastructure.ontai.dev/v1alpha1. Do not re-register these as unstructured.
-	if err := seamcorev1alpha1.AddToScheme(s); err != nil {
-		t.Fatalf("add seamcorev1alpha1 scheme: %v", err)
+	// seamplatformv1alpha1 registers TalosCluster under seam.ontai.dev/v1alpha1.
+	if err := seamplatformv1alpha1.AddToScheme(s); err != nil {
+		t.Fatalf("add seamplatformv1alpha1 scheme: %v", err)
 	}
-	// security.ontai.dev types (RBACPolicy, RBACProfile) are not in seam-core;
+	// PackExecution and PackInstalled are owned by wrapper (seam.ontai.dev/v1alpha1).
+	// Register as unstructured so the fake client can store/retrieve them.
+	s.AddKnownTypeWithName(packExecutionTenantGVK, &unstructured.Unstructured{})
+	s.AddKnownTypeWithName(
+		packExecutionTenantGVK.GroupVersion().WithKind(packExecutionTenantGVK.Kind+"List"),
+		&unstructured.UnstructuredList{},
+	)
+	s.AddKnownTypeWithName(packInstanceTenantGVK, &unstructured.Unstructured{})
+	s.AddKnownTypeWithName(
+		packInstanceTenantGVK.GroupVersion().WithKind(packInstanceTenantGVK.Kind+"List"),
+		&unstructured.UnstructuredList{},
+	)
+	// guardian.ontai.dev types (RBACPolicy, RBACProfile) are not in seam-core;
 	// register as unstructured so the fake client can list/patch them.
 	s.AddKnownTypeWithName(rbacPolicyGVK, &unstructured.Unstructured{})
 	s.AddKnownTypeWithName(
@@ -47,28 +57,24 @@ func buildHelperTestScheme(t *testing.T) *runtime.Scheme {
 	return s
 }
 
-// fakePackExecution builds a minimal InfrastructurePackExecution typed object.
-// The fake client stores it by GVK; the reconciler can list/delete it as unstructured.
-func fakePackExecution(name, ns string) *seamcorev1alpha1.InfrastructurePackExecution {
-	return &seamcorev1alpha1.InfrastructurePackExecution{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:            name,
-			Namespace:       ns,
-			ResourceVersion: "1",
-		},
-	}
+// fakePackExecution builds a minimal PackExecution unstructured object.
+func fakePackExecution(name, ns string) *unstructured.Unstructured {
+	obj := &unstructured.Unstructured{}
+	obj.SetGroupVersionKind(packExecutionTenantGVK)
+	obj.SetName(name)
+	obj.SetNamespace(ns)
+	obj.SetResourceVersion("1")
+	return obj
 }
 
-// fakePackInstance builds a minimal InfrastructurePackInstance typed object.
-// The fake client stores it by GVK; the reconciler can list/delete it as unstructured.
-func fakePackInstance(name, ns string) *seamcorev1alpha1.InfrastructurePackInstance {
-	return &seamcorev1alpha1.InfrastructurePackInstance{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:            name,
-			Namespace:       ns,
-			ResourceVersion: "1",
-		},
-	}
+// fakePackInstance builds a minimal PackInstalled unstructured object.
+func fakePackInstance(name, ns string) *unstructured.Unstructured {
+	obj := &unstructured.Unstructured{}
+	obj.SetGroupVersionKind(packInstanceTenantGVK)
+	obj.SetName(name)
+	obj.SetNamespace(ns)
+	obj.SetResourceVersion("1")
+	return obj
 }
 
 // fakeRBACPolicy builds a minimal guardian RBACPolicy unstructured object with
@@ -158,15 +164,17 @@ func TestHandleTalosClusterDeletion_DecisionHCascade_DeletesPackExecutions(t *te
 	}
 
 	// PackExecution must be deleted.
-	peGet := &seamcorev1alpha1.InfrastructurePackExecution{}
+	peGet := &unstructured.Unstructured{}
+	peGet.SetGroupVersionKind(packExecutionTenantGVK)
 	if err := c.Get(context.Background(), types.NamespacedName{Name: "nginx-pack-exec", Namespace: tenantNS}, peGet); err == nil {
 		t.Error("expected PackExecution to be deleted but it still exists")
 	}
 
-	// PackInstance must be deleted.
-	piGet := &seamcorev1alpha1.InfrastructurePackInstance{}
+	// PackInstalled must be deleted.
+	piGet := &unstructured.Unstructured{}
+	piGet.SetGroupVersionKind(packInstanceTenantGVK)
 	if err := c.Get(context.Background(), types.NamespacedName{Name: "nginx-pack-inst", Namespace: tenantNS}, piGet); err == nil {
-		t.Error("expected PackInstance to be deleted but it still exists")
+		t.Error("expected PackInstalled to be deleted but it still exists")
 	}
 
 	// finalizerDecisionHCascade must be removed. The fake client GC's the object once

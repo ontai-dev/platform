@@ -21,7 +21,7 @@ import (
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 
-	e2ehelpers "github.com/ontai-dev/seam-core/pkg/e2e"
+	e2ehelpers "github.com/ontai-dev/seam/pkg/e2e"
 )
 
 // Suite-level cluster clients, initialized in BeforeSuite.

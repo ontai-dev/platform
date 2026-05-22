@@ -16,19 +16,23 @@ import (
 	ctrllog "sigs.k8s.io/controller-runtime/pkg/log"
 
 	platformv1alpha1 "github.com/ontai-dev/platform/api/v1alpha1"
-	seamcorev1alpha1 "github.com/ontai-dev/seam-core/api/v1alpha1"
+	seamplatformv1alpha1 "github.com/ontai-dev/platform/api/seam/v1alpha1"
+	seamcorev1alpha1 "github.com/ontai-dev/seam/api/v1alpha1"
 )
 
 // DriftSignalReconciler handles cluster-state DriftSignals written by conductor role=tenant.
 //
-// Two signal kinds are handled:
+// Three signal kinds are handled:
 //
 //   - InfrastructureRunnerConfig (T-23): conductor detected RunnerConfig persistently absent.
 //     Response: annotate TalosCluster to trigger RunnerConfig recreation.
 //
-//   - InfrastructureTalosCluster: conductor detected Talos version drift (out-of-band upgrade
-//     on the tenant cluster). Response: patch TalosCluster.status.observedTalosVersion,
-//     write a synthetic out-of-band TCOR record, bump TCOR revision epoch to observed version.
+//   - InfrastructureTalosCluster (name prefix "drift-version-"): Talos OS version drift.
+//     Response: patch TalosCluster.status.observedTalosVersion, write out-of-band TCOR
+//     record, bump TCOR epoch, create corrective UpgradePolicy (type=talos).
+//
+//   - InfrastructureTalosCluster (name prefix "drift-k8s-version-"): Kubernetes version drift.
+//     Response: create corrective UpgradePolicy (type=kubernetes) targeting spec.kubernetesVersion.
 //
 // conductor DriftSignalHandler skips InfrastructureTalosCluster kind signals; they are
 // owned exclusively by this reconciler.
@@ -40,7 +44,7 @@ type DriftSignalReconciler struct {
 //
 // +kubebuilder:rbac:groups=infrastructure.ontai.dev,resources=driftsignals,verbs=get;list;watch;update;patch
 // +kubebuilder:rbac:groups=infrastructure.ontai.dev,resources=infrastructuretalosclusters,verbs=get;list;watch;update;patch
-// +kubebuilder:rbac:groups=infrastructure.ontai.dev,resources=infrastructuretalosclusteroperationresults,verbs=get;list;watch;update;patch
+// +kubebuilder:rbac:groups=seam.ontai.dev,resources=clusterlogs,verbs=get;list;watch;update;patch
 func (r *DriftSignalReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
 	log := ctrllog.FromContext(ctx).WithValues("driftsignal", req.NamespacedName)
 
@@ -65,7 +69,10 @@ func (r *DriftSignalReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 	switch ds.Spec.AffectedCRRef.Kind {
 	case "InfrastructureRunnerConfig":
 		return r.handleRunnerConfigDrift(ctx, log, ds, clusterName)
-	case "InfrastructureTalosCluster":
+	case "TalosCluster":
+		if strings.HasPrefix(ds.Name, "drift-k8s-version-") {
+			return r.handleKubernetesVersionDrift(ctx, log, ds, clusterName)
+		}
 		return r.handleTalosVersionDrift(ctx, log, ds, clusterName)
 	default:
 		// Other kinds are handled by conductor DriftSignalHandler (pack drift).
@@ -189,26 +196,26 @@ func (r *DriftSignalReconciler) patchObservedTalosVersion(ctx context.Context, t
 // included in the archived revision.
 func (r *DriftSignalReconciler) appendOutOfBandTCORRecord(ctx context.Context, clusterName, specVersion, observedVersion string) error {
 	ns := tenantNS(clusterName)
-	tcor := &seamcorev1alpha1.InfrastructureTalosClusterOperationResult{}
+	tcor := &seamplatformv1alpha1.ClusterLog{}
 	if err := r.Client.Get(ctx, types.NamespacedName{Name: clusterName, Namespace: ns}, tcor); err != nil {
 		if apierrors.IsNotFound(err) {
-			// TCOR does not exist yet -- nothing to append to; bumpTCORRevision will create it.
+			// ClusterLog does not exist yet -- nothing to append to; bumpTCORRevision will create it.
 			return nil
 		}
-		return fmt.Errorf("get TCOR %s/%s: %w", ns, clusterName, err)
+		return fmt.Errorf("get ClusterLog %s/%s: %w", ns, clusterName, err)
 	}
 
 	patch := client.MergeFrom(tcor.DeepCopy())
 	if tcor.Spec.Operations == nil {
-		tcor.Spec.Operations = map[string]seamcorev1alpha1.TalosClusterOperationRecord{}
+		tcor.Spec.Operations = map[string]seamplatformv1alpha1.OperationRecord{}
 	}
 	now := metav1.Now()
 	recordKey := fmt.Sprintf("out-of-band-%d", now.UnixNano())
-	tcor.Spec.Operations[recordKey] = seamcorev1alpha1.TalosClusterOperationRecord{
+	tcor.Spec.Operations[recordKey] = seamplatformv1alpha1.OperationRecord{
 		Capability:  "talos-version-drift",
 		StartedAt:   &now,
 		CompletedAt: &now,
-		Status:      seamcorev1alpha1.TalosClusterResultSucceeded,
+		Status:      seamplatformv1alpha1.ResultSucceeded,
 		Message:     fmt.Sprintf("talos version changed outside ONT management: %s -> %s", specVersion, observedVersion),
 	}
 	tcor.Spec.OperationCount = int64(len(tcor.Spec.Operations))
@@ -260,6 +267,55 @@ func (r *DriftSignalReconciler) ensureCorrectiveUpgradePolicy(ctx context.Contex
 	}
 	if err := r.Client.Create(ctx, up); err != nil && !apierrors.IsAlreadyExists(err) {
 		return fmt.Errorf("create UpgradePolicy drift-version-%s: %w", clusterName, err)
+	}
+	return nil
+}
+
+// handleKubernetesVersionDrift handles DriftSignals emitted by KubernetesVersionDriftLoop.
+// It creates a corrective UpgradePolicy (type=kubernetes) targeting the declared
+// spec.kubernetesVersion so UpgradePolicyReconciler can submit a kube-upgrade executor Job.
+func (r *DriftSignalReconciler) handleKubernetesVersionDrift(ctx context.Context, log logr.Logger, ds *seamcorev1alpha1.DriftSignal, clusterName string) (ctrl.Result, error) {
+	log.Info("handling Kubernetes version drift",
+		"cluster", clusterName, "driftReason", ds.Spec.DriftReason)
+
+	tc, err := r.getTalosCluster(ctx, clusterName)
+	if err != nil {
+		return ctrl.Result{}, err
+	}
+	if tc == nil {
+		log.Info("TalosCluster not found -- marking queued to stop retries", "cluster", clusterName)
+		return ctrl.Result{}, r.advanceDriftSignalToQueued(ctx, ds)
+	}
+
+	if err := r.ensureCorrectiveKubeUpgradePolicy(ctx, clusterName, tc.Spec.KubernetesVersion); err != nil {
+		return ctrl.Result{}, fmt.Errorf("DriftSignalReconciler: ensure corrective kube UpgradePolicy %s: %w", clusterName, err)
+	}
+	log.Info("corrective kube UpgradePolicy ensured",
+		"cluster", clusterName, "targetVersion", tc.Spec.KubernetesVersion)
+
+	return ctrl.Result{}, r.advanceDriftSignalToQueued(ctx, ds)
+}
+
+// ensureCorrectiveKubeUpgradePolicy creates an UpgradePolicy in seam-tenant-{cluster} to
+// bring the cluster back to specVersion (the declared spec.kubernetesVersion). Idempotent.
+func (r *DriftSignalReconciler) ensureCorrectiveKubeUpgradePolicy(ctx context.Context, clusterName, specVersion string) error {
+	ns := tenantNS(clusterName)
+	up := &platformv1alpha1.UpgradePolicy{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "drift-k8s-version-" + clusterName,
+			Namespace: ns,
+		},
+		Spec: platformv1alpha1.UpgradePolicySpec{
+			ClusterRef: platformv1alpha1.LocalObjectRef{
+				Name:      clusterName,
+				Namespace: rbacProfileNamespace,
+			},
+			UpgradeType:             platformv1alpha1.UpgradeTypeKubernetes,
+			TargetKubernetesVersion: specVersion,
+		},
+	}
+	if err := r.Client.Create(ctx, up); err != nil && !apierrors.IsAlreadyExists(err) {
+		return fmt.Errorf("create UpgradePolicy drift-k8s-version-%s: %w", clusterName, err)
 	}
 	return nil
 }

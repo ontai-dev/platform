@@ -93,10 +93,15 @@ func (r *EtcdMaintenanceReconciler) Reconcile(ctx context.Context, req ctrl.Requ
 		)
 	}
 
-	// If already complete, do nothing — this is a one-shot CR.
+	// If already complete, self-delete after the day-2 TTL; requeue until then.
 	readyCond := platformv1alpha1.FindCondition(em.Status.Conditions, platformv1alpha1.ConditionTypeEtcdMaintenanceReady)
 	if readyCond != nil && readyCond.Status == metav1.ConditionTrue {
-		return ctrl.Result{}, nil
+		if expired, after := day2TTLExpired(readyCond.LastTransitionTime.Time); expired {
+			_ = r.Client.Delete(ctx, em)
+			return ctrl.Result{}, nil
+		} else {
+			return ctrl.Result{RequeueAfter: after}, nil
+		}
 	}
 
 	// Determine the Conductor capability for this operation.

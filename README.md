@@ -1,139 +1,125 @@
 # platform
 
-**Seam Platform operator**
-**API Group:** `platform.ontai.dev` (ONT-native), `infrastructure.cluster.x-k8s.io` (CAPI)
-**Image:** `registry.ontai.dev/ontai-dev/platform:<semver>`
+Platform is the CAPI management plane operator and ONT-native Infrastructure Provider for Talos. It owns the complete lifecycle of Talos clusters under Seam governance and all day-2 operational CRDs.
 
----
+## API Groups
 
-## What this repository is
+### seam.ontai.dev/v1alpha1
 
-`platform` is the CAPI management plane operator and the ONT-native Infrastructure
-Provider for Talos. It owns the complete lifecycle of Talos clusters and all tenant
-coordination.
+| Kind | Short | Scope | Purpose |
+|------|-------|-------|---------|
+| TalosCluster | tc | Namespaced | Root CR for every cluster under Seam governance |
+| ClusterLog | clog | Namespaced | Accumulated day-2 operation history per cluster per revision |
 
----
+These types are defined in `api/seam/v1alpha1/`. TalosCluster and ClusterLog live under `seam.ontai.dev`, not `platform.ontai.dev`.
 
-## CRDs
+### platform.ontai.dev/v1alpha1
 
-### ONT-native (`platform.ontai.dev`)
+| Kind | Short | Scope | Purpose |
+|------|-------|-------|---------|
+| EtcdMaintenance | em | Namespaced | Etcd backup, restore, and defrag operations |
+| TalosEtcdBackupSchedule | etcdbs | Namespaced | Recurring etcd backup schedule (creates EtcdMaintenance CRs) |
+| NodeMaintenance | nm | Namespaced | Node-level patch, hardening-apply, credential-rotate |
+| NodeOperation | nop | Namespaced | Node scale-up, decommission, reboot |
+| PKIRotation | pkir | Namespaced | Cluster PKI certificate rotation |
+| ClusterReset | crst | Namespaced | Destructive factory reset (human gate required) |
+| ClusterMaintenance | cmaint | Namespaced | Maintenance window gate with CAPI pause integration |
+| UpgradePolicy | upgp | Namespaced | Talos OS, Kubernetes, or combined stack upgrades |
+| HardeningProfile | hp | Namespaced | Reusable hardening ruleset (configuration CR, not a Job trigger) |
+| MaintenanceBundle | mb | Namespaced | Pre-compiled scheduling artifact from `compiler maintenance` |
+| TalosMachineConfigBackup | mcb | Namespaced | Node machine config backup to S3 |
+| TalosMachineConfigBackupSchedule | mcbs | Namespaced | Recurring machine config backup schedule |
+| TalosMachineConfigRestore | mcr | Namespaced | Node machine config restore from S3 |
 
-| Kind | Role |
-|---|---|
-| `TalosCluster` | Root declaration for a Talos target cluster (CAPI composition root) |
-| `TalosClusterReset` | Affirmative CR for cluster destruction with human approval gate |
-| `TalosBackup` | Operational runner Job for etcd snapshot backup |
-| `TalosEtcdMaintenance` | Operational runner Job for etcd defragmentation and compaction |
-| `TalosPKIRotation` | Operational runner Job for PKI certificate rotation |
-| `TalosRecovery` | Operational runner Job for cluster recovery from etcd snapshot |
-| `TalosHardeningApply` | Operational runner Job for CIS benchmark hardening |
-| `TalosNodePatch` | Operational runner Job for targeted node configuration patch |
-| `TalosNodeOperation` | Operational runner Job for node cordon, drain, and reboot sequences |
-| `TalosCredentialRotation` | Operational runner Job for credential rotation |
-| `ClusterMaintenance` | Operational runner Job for scheduled maintenance windows |
-| `UpgradePolicy` | Declared upgrade policy for a cluster or node pool |
-| `HardeningProfile` | Declared hardening target profile |
-| `MaintenanceBundle` | Aggregate maintenance intent record |
+### infrastructure.cluster.x-k8s.io (CAPI -- frozen)
 
-### CAPI Infrastructure Provider (`infrastructure.cluster.x-k8s.io`)
+| Kind | Purpose |
+|------|---------|
+| SeamInfrastructureCluster | Cluster-level CAPI infrastructure reference |
+| SeamInfrastructureMachine | Per-node CAPI infrastructure reference |
 
-| Kind | Role |
-|---|---|
-| `SeamInfrastructureCluster` | CAPI InfrastructureCluster implementation for Talos |
-| `SeamInfrastructureMachine` | CAPI InfrastructureMachine implementation for Talos nodes |
+These implement the CAPI InfrastructureCluster and InfrastructureMachine contracts. Schema is frozen and out of scope for platform development.
 
 ---
 
 ## Architecture
 
-Platform operates in three modes.
+Platform operates in three modes simultaneously on the management cluster.
 
-**CAPI composition (target cluster lifecycle):**
-`TalosCluster` is the root object. The platform reconciler creates and owns CAPI
-objects (`Cluster`, `TalosControlPlane`, `MachineDeployment`, `SeamInfrastructureCluster`,
-`SeamInfrastructureMachine`) as children of `TalosCluster`. The Seam Infrastructure
-Provider reconcilers deliver machineconfigs to pre-provisioned nodes on port 50000
-via the talos goclient.
+### CAPI target cluster lifecycle
 
-**Direct bootstrap Job (management cluster):**
-The ONT bootstrap path via conductor Jobs is used for management cluster bootstrap.
-CAPI is not involved in management cluster provisioning.
+For `spec.capi.enabled=true` TalosCluster CRs, Platform creates and owns CAPI objects (SeamInfrastructureCluster, cluster.x-k8s.io/Cluster, TalosControlPlane, MachineDeployment, TalosConfigTemplate, SeamInfrastructureMachineTemplate) in the tenant namespace via ownerReference (CP-INV-008). CAPI controllers reconcile those objects to actual cluster state through the Seam Infrastructure Provider.
 
-**Operational runner Jobs (Talos operational CRDs):**
-Seven CRDs (`TalosBackup`, `TalosEtcdMaintenance`, `TalosPKIRotation`, `TalosRecovery`,
-`TalosHardeningApply`, `TalosNodePatch`, `TalosCredentialRotation`) submit conductor
-executor Jobs directly. Kueue is not used for any platform operation.
+The Seam Infrastructure Provider (SeamInfrastructureClusterReconciler and SeamInfrastructureMachineReconciler) is the only part of Platform that uses the talos goclient. It watches SeamInfrastructureMachine objects and delivers CABPT-rendered machineconfigs to pre-provisioned Talos nodes on port 50000.
 
-**Tenant coordination:**
-Platform creates `seam-tenant-{cluster-name}` namespaces. It is the sole namespace
-creation authority. Tenant coordination CRDs (`UpgradePolicy`, `HardeningProfile`,
-`MaintenanceBundle`) are pure record-keeping reconcilers with no runner Jobs.
+Dual-path CRDs (UpgradePolicy, NodeOperation, ClusterMaintenance) delegate to CAPI native machinery on this path. No Conductor Job is submitted for CAPI-managed lifecycle operations.
+
+### Direct bootstrap management cluster
+
+For the management cluster TalosCluster CR (`spec.capi.enabled=false`), CAPI is not used. Management cluster bootstrap is Seam-native: the Compiler generates machineconfigs, Platform submits a bootstrap Conductor Job, and the cluster forms without CAPI intermediation.
+
+All operational CRDs apply to the management cluster via direct Conductor executor Job submission regardless of `capi.enabled`.
+
+### Operational runner Jobs
+
+For operational CRDs (EtcdMaintenance, NodeMaintenance, PKIRotation, ClusterReset, and the non-CAPI paths of UpgradePolicy and NodeOperation), Platform generates a RunnerConfig using the shared runner library and submits a Conductor executor Job directly. Kueue is not involved (CP-INV-010). Jobs submit directly without Kueue admission control.
 
 ---
 
 ## Key invariants
 
-- The talos goclient is restricted exclusively to `SeamInfrastructureClusterReconciler`
-  and `SeamInfrastructureMachineReconciler`. All other reconcilers have zero talos
-  goclient access.
-- `TalosCluster` deletion never triggers cluster destruction. `TalosClusterReset`
-  is the only destruction path, and requires `ontai.dev/reset-approved=true`.
-- Kueue is not used for any operation in platform.
-- Platform installs after guardian reaches `provisioned=true` on its `RBACProfile`.
+**talos goclient restriction (CP-INV-001):** The talos goclient is restricted to SeamInfrastructureClusterReconciler and SeamInfrastructureMachineReconciler only. Every other reconciler in Platform has zero talos goclient access.
+
+**TalosCluster deletion never destroys a cluster (INV-015):** Deleting a TalosCluster CR cascades to owned CAPI objects through Kubernetes garbage collection but does not factory reset any node. ClusterReset is the only path to physical cluster destruction.
+
+**Kueue is not used (CP-INV-010):** Platform does not use Kueue for any operation. Operational runner Jobs submit directly. Kueue governs dispatcher pack-deploy Jobs exclusively.
+
+**RunnerConfig is generated by the operator (CP-INV-003):** RunnerConfig is always generated by Platform using the shared runner library. It is never hand-coded and is not generated for CAPI-managed lifecycle operations.
+
+**ClusterReset requires human approval (CP-INV-006):** The `ontai.dev/reset-approved=true` annotation must be present on the ClusterReset CR before any reconciliation proceeds.
+
+**Tenant namespaces (CP-INV-004):** Platform is the sole authority for creating `seam-tenant-{cluster-name}` namespaces.
+
+**Cilium install order (CP-INV-009, CP-INV-013):** Every TalosConfigTemplate includes `cluster.network.cni.name: none` and Cilium BPF kernel parameters. CiliumPending on TalosCluster is not a degraded state; it is the expected state between CAPI cluster Running and Cilium PackInstance Ready.
+
+**Install gate (CP-INV-012):** Platform installs after Guardian reaches operational state and its RBACProfile reaches `provisioned=true`.
+
+**Leader election (CP-INV-007):** Leader election is required. Lease name: `platform-leader`. Lease namespace: `seam-system`.
 
 ---
 
-## Building
+## Build and test
 
-```sh
-go build ./cmd/platform
+```
+make build
+make test
+make e2e          # requires MGMT_KUBECONFIG
+make docker-build IMAGE_REGISTRY=10.20.0.1:5000/ontai-dev
+make docker-push  IMAGE_REGISTRY=10.20.0.1:5000/ontai-dev
 ```
 
-The binary is built into a distroless container image:
-
-```sh
-docker build -t registry.ontai.dev/ontai-dev/platform:<semver> .
-```
+Operator Deployments and enable bundles always reference `:dev` in lab and development environments (INV-023).
 
 ---
 
-## Testing
+## Schema
 
-```sh
-go test ./test/unit/...
-```
+Primary schema reference: `docs/platform-schema.md`
 
----
+Supporting references:
 
-## Schema and design reference
-
-- `docs/platform-schema.md` - API contract, field definitions, status conditions
-- `platform-design.md` - Implementation architecture and reconciler design
+- `~/ontai/seam/docs/seam-schema.md` -- RunnerConfig and TalosCluster CRD schema
+- `~/ontai/conductor/docs/conductor-schema.md` -- Conductor capabilities and Job protocol
+- `~/ontai/guardian/docs/guardian-schema.md` -- RBACProfile gate and enable phase order
+- `~/ontai/dispatcher/docs/dispatcher-schema.md` -- PackInstalled gate for Cilium
 
 ---
 
-## Status
+## Issues
 
-Alpha. Deployed and tested on management cluster (ccs-mgmt).
-Tenant cluster onboarding is not yet verified end to end.
-See [docs/platform-schema.md](./docs/platform-schema.md)
-for current capability and known gaps.
-
-CRDs are deployed and reconciling on the live management cluster.
-The schema specification is published at:
-https://schema.ontai.dev/v1alpha1/
-
-## Contributing
-
-Read [CONTRIBUTING.md](./CONTRIBUTING.md) before opening a pull
-request. Every new reconciliation behavior requires a written
-specification and senior engineer sign-off before any code is
-written.
-
-File issues at https://github.com/ontai-dev/platform/issues.
-For security issues contact security@ontai.dev directly.
+https://github.com/ontai-dev/platform/issues
 
 ---
 
-*platform - Seam Platform Operator*
-*Apache License, Version 2.0*
+platform - Seam Platform Operator
+Apache License, Version 2.0

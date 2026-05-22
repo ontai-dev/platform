@@ -24,7 +24,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 
 	platformv1alpha1 "github.com/ontai-dev/platform/api/v1alpha1"
-	"github.com/ontai-dev/seam-core/pkg/lineage"
+	"github.com/ontai-dev/seam/pkg/lineage"
 )
 
 const (
@@ -47,12 +47,7 @@ const (
 
 	// conductorExecuteImageName is the base image name for the Conductor executor
 	// binary (debian-slim, used for executor Jobs). conductor-schema.md §3, Decision 12.
-	conductorExecuteImageName = "conductor-execute"
-
-	// devRevision is the image tag used for lab/development builds.
-	// Production releases use {talosVersion} for executor and agent images.
-	// conductor-schema.md §3, INV-011, INV-023.
-	devRevision = "dev"
+	conductorExecuteImageName = "conductor-exec"
 
 	// conductorRegistryEnv is the env var name for overriding the conductor image registry.
 	conductorRegistryEnv = "CONDUCTOR_REGISTRY"
@@ -67,14 +62,10 @@ const (
 // without error — the PhaseFailed condition is already written to tc.Status.
 var errTalosVersionRequired = errors.New("spec.talosVersion is required for conductor image derivation")
 
-// executorImageTag returns the conductor-execute (or conductor agent) image tag.
-// In dev/lab (devRevision=="dev"): returns "dev" regardless of talosVersion.
-// In production: returns talosVersion so the executor tracks the cluster's Talos version.
-// conductor-schema.md §3, INV-011, INV-023.
+// executorImageTag returns the conductor-exec image tag. Always returns talosVersion
+// so the executor tracks the cluster's Talos version in both lab and production.
+// conductor-schema.md §3, INV-011 (conductor exec uses conductor:<talos-version>).
 func executorImageTag(talosVersion string) string {
-	if devRevision == "dev" {
-		return devRevision
-	}
 	return talosVersion
 }
 
@@ -135,12 +126,11 @@ func (r *TalosClusterReconciler) getBootstrapRunnerConfig(ctx context.Context, c
 // ensureBootstrapRunnerConfig creates the RunnerConfig CR in bootstrapRunnerConfigNamespace
 // (ont-system) for a management cluster bootstrap or import if it does not already exist.
 // Name equals TalosCluster.Name so Conductor can locate it by cluster-ref flag value.
-// RunnerImage uses conductorExecuteImageName (conductor-execute) with a tag derived from
-// tc.Spec.TalosVersion per INV-012 and conductor-schema.md §3:
+// RunnerImage uses conductorExecuteImageName (conductor-exec) with the Talos version tag
+// per INV-012, INV-011, and conductor-schema.md §3:
 //
-//	{CONDUCTOR_REGISTRY}/conductor-execute:{tag}
+//	{CONDUCTOR_REGISTRY}/conductor-exec:{talosVersion}
 //
-// In dev/lab: tag = "dev". In production: tag = tc.Spec.TalosVersion.
 // If TalosVersion is empty, sets ConditionTypePhaseFailed on tc and returns
 // errTalosVersionRequired — the caller must return ctrl.Result{}, nil.
 // Idempotent — returns nil when RunnerConfig already present.
@@ -913,14 +903,15 @@ func EnsureRemoteConductorRBAC(ctx context.Context, k8s kubernetes.Interface) er
 				Verbs:     []string{"get", "list", "watch", "create", "update", "patch", "delete"},
 			},
 			{
-				APIGroups: []string{"infrastructure.ontai.dev"},
-				Resources: []string{"infrastructuretalosclusters/status"},
-				Verbs:     []string{"update", "patch"},
+				// TalosCluster (seam.ontai.dev) read access for drift detection on tenant cluster.
+				APIGroups: []string{"seam.ontai.dev"},
+				Resources: []string{"talosclusters", "talosclusters/status"},
+				Verbs:     []string{"get", "list", "watch", "create", "update", "patch"},
 			},
 			{
-				// RBACProfilePullLoop and RBACPolicyPullLoop SSA-patch security.ontai.dev
+				// RBACProfilePullLoop and RBACPolicyPullLoop SSA-patch guardian.ontai.dev
 				// resources into ont-system. Needs create/update/patch in addition to read.
-				APIGroups: []string{"security.ontai.dev"},
+				APIGroups: []string{"guardian.ontai.dev"},
 				Resources: []string{"*"},
 				Verbs:     []string{"get", "list", "watch", "create", "update", "patch"},
 			},
@@ -1006,9 +997,9 @@ func EnsureRemoteConductorRBAC(ctx context.Context, k8s kubernetes.Interface) er
 // SC-INV-003: seam-core CRDs are installed before all operators.
 func EnsureRemoteTalosClusterCopy(ctx context.Context, dynClient dynamic.Interface, tc *platformv1alpha1.TalosCluster) error {
 	gvr := schema.GroupVersionResource{
-		Group:    "infrastructure.ontai.dev",
+		Group:    "seam.ontai.dev",
 		Version:  "v1alpha1",
-		Resource: "infrastructuretalosclusters",
+		Resource: "talosclusters",
 	}
 
 	// Idempotency: skip if the CR already exists.
@@ -1022,8 +1013,8 @@ func EnsureRemoteTalosClusterCopy(ctx context.Context, dynClient dynamic.Interfa
 
 	obj := &unstructured.Unstructured{
 		Object: map[string]interface{}{
-			"apiVersion": "infrastructure.ontai.dev/v1alpha1",
-			"kind":       "InfrastructureTalosCluster",
+			"apiVersion": "seam.ontai.dev/v1alpha1",
+			"kind":       "TalosCluster",
 			"metadata": map[string]interface{}{
 				"name":      tc.Name,
 				"namespace": conductorAgentNamespace,
@@ -1051,7 +1042,7 @@ func EnsureRemoteTalosClusterCopy(ctx context.Context, dynClient dynamic.Interfa
 		if apierrors.IsNotFound(err) {
 			return nil
 		}
-		return fmt.Errorf("ensureRemoteTalosClusterCopy: create InfrastructureTalosCluster on %s: %w", tc.Name, err)
+		return fmt.Errorf("ensureRemoteTalosClusterCopy: create TalosCluster on %s: %w", tc.Name, err)
 	}
 	return nil
 }
@@ -1465,34 +1456,34 @@ func (r *TalosClusterReconciler) ensureLocalQueue(
 	return nil
 }
 
-// rbacPolicyGVK is the GVK for guardian RBACPolicy (security.ontai.dev/v1alpha1).
+// rbacPolicyGVK is the GVK for guardian RBACPolicy (guardian.ontai.dev/v1alpha1).
 var rbacPolicyGVK = schema.GroupVersionKind{
-	Group:   "security.ontai.dev",
+	Group:   "guardian.ontai.dev",
 	Version: "v1alpha1",
 	Kind:    "RBACPolicy",
 }
 
-// rbacProfileGVK is the GVK for guardian RBACProfile (security.ontai.dev/v1alpha1).
+// rbacProfileGVK is the GVK for guardian RBACProfile (guardian.ontai.dev/v1alpha1).
 var rbacProfileGVK = schema.GroupVersionKind{
-	Group:   "security.ontai.dev",
+	Group:   "guardian.ontai.dev",
 	Version: "v1alpha1",
 	Kind:    "RBACProfile",
 }
 
-// packExecutionTenantGVK is the GVK for InfrastructurePackExecution CRs in
-// the tenant namespace. Owned by seam-core. Decision G.
+// packExecutionTenantGVK is the GVK for PackExecution CRs in
+// the tenant namespace. Owned by wrapper. MIGRATION-3.2.
 var packExecutionTenantGVK = schema.GroupVersionKind{
-	Group:   "infrastructure.ontai.dev",
+	Group:   "seam.ontai.dev",
 	Version: "v1alpha1",
-	Kind:    "InfrastructurePackExecution",
+	Kind:    "PackExecution",
 }
 
-// packInstanceTenantGVK is the GVK for InfrastructurePackInstance CRs in
-// the tenant namespace. Owned by seam-core. Decision G.
+// packInstanceTenantGVK is the GVK for PackInstalled CRs in
+// the tenant namespace. Owned by wrapper. MIGRATION-3.2.
 var packInstanceTenantGVK = schema.GroupVersionKind{
-	Group:   "infrastructure.ontai.dev",
+	Group:   "seam.ontai.dev",
 	Version: "v1alpha1",
-	Kind:    "InfrastructurePackInstance",
+	Kind:    "PackInstalled",
 }
 
 // rbacPolicyNamespace is the namespace where the platform-wide RBACPolicy lives.
@@ -1626,8 +1617,8 @@ func (r *TalosClusterReconciler) ensureExecutorTalosconfig(ctx context.Context, 
 
 // ensureTenantExecutorResources creates the platform-executor ServiceAccount,
 // Role, and RoleBinding in seam-tenant-{clusterName} so that day-2 Conductor
-// executor Jobs can write InfrastructureTalosClusterOperationResult CRs and
-// read platform CRDs (NodeOperation, NodeMaintenance, etc.) in that namespace.
+// executor Jobs can write ClusterLog CRs and read platform CRDs (NodeOperation,
+// NodeMaintenance, etc.) in that namespace.
 // CP-INV-003, CP-INV-004: RBAC is Guardian-governed; this creates the minimal
 // namespace-scoped resources required for executor Job pods.
 func (r *TalosClusterReconciler) ensureTenantExecutorResources(ctx context.Context, tc *platformv1alpha1.TalosCluster) error {
@@ -1650,6 +1641,23 @@ func (r *TalosClusterReconciler) ensureTenantExecutorResources(ctx context.Conte
 		}
 	}
 
+	executorRules := []rbacv1.PolicyRule{
+		{
+			APIGroups: []string{"seam.ontai.dev"},
+			Resources: []string{"clusterlogs"},
+			Verbs:     []string{"get", "create", "update", "patch"},
+		},
+		{
+			APIGroups: []string{"platform.ontai.dev"},
+			Resources: []string{"etcdmaintenances", "hardeningprofiles", "nodemaintenances", "nodeoperations", "pkirotations", "upgradepolicies"},
+			Verbs:     []string{"get", "list", "watch"},
+		},
+		{
+			APIGroups: []string{""},
+			Resources: []string{"secrets"},
+			Verbs:     []string{"get", "create", "update", "patch"},
+		},
+	}
 	role := &rbacv1.Role{}
 	if err := r.Client.Get(ctx, types.NamespacedName{Name: "platform-executor", Namespace: tenantNS}, role); err != nil {
 		if !apierrors.IsNotFound(err) {
@@ -1661,26 +1669,15 @@ func (r *TalosClusterReconciler) ensureTenantExecutorResources(ctx context.Conte
 				Namespace: tenantNS,
 				Labels:    map[string]string{"platform.ontai.dev/cluster": tc.Name},
 			},
-			Rules: []rbacv1.PolicyRule{
-				{
-					APIGroups: []string{"infrastructure.ontai.dev"},
-					Resources: []string{"infrastructuretalosclusteroperationresults"},
-					Verbs:     []string{"get", "create", "update", "patch"},
-				},
-				{
-					APIGroups: []string{"platform.ontai.dev"},
-					Resources: []string{"etcdmaintenances", "hardeningprofiles", "nodemaintenances", "nodeoperations", "pkirotations", "upgradepolicies"},
-					Verbs:     []string{"get", "list", "watch"},
-				},
-				{
-					APIGroups: []string{""},
-					Resources: []string{"secrets"},
-					Verbs:     []string{"get", "create", "update", "patch"},
-				},
-			},
+			Rules: executorRules,
 		}
 		if err := r.Client.Create(ctx, role); err != nil && !apierrors.IsAlreadyExists(err) {
 			return fmt.Errorf("ensureTenantExecutorResources: create Role: %w", err)
+		}
+	} else {
+		role.Rules = executorRules
+		if err := r.Client.Update(ctx, role); err != nil {
+			return fmt.Errorf("ensureTenantExecutorResources: update Role: %w", err)
 		}
 	}
 
@@ -1777,7 +1774,7 @@ func (r *TalosClusterReconciler) ensureWrapperRunnerResources(ctx context.Contex
 				{APIGroups: []string{"autoscaling"}, Resources: []string{"horizontalpodautoscalers"}, Verbs: []string{"get", "list", "watch", "create", "update", "patch", "delete"}},
 				{APIGroups: []string{"infrastructure.ontai.dev"}, Resources: []string{"infrastructurepackexecutions", "infrastructureclusterpacks", "infrastructurepackinstances"}, Verbs: []string{"get", "list", "watch"}},
 				{APIGroups: []string{"infrastructure.ontai.dev"}, Resources: []string{"infrastructurerunnerconfigs"}, Verbs: []string{"get", "list", "watch", "patch", "update"}},
-				{APIGroups: []string{"security.ontai.dev"}, Resources: []string{"rbacprofiles"}, Verbs: []string{"get", "list", "watch"}},
+				{APIGroups: []string{"guardian.ontai.dev"}, Resources: []string{"rbacprofiles"}, Verbs: []string{"get", "list", "watch"}},
 				{APIGroups: []string{"infrastructure.ontai.dev"}, Resources: []string{"packoperationresults"}, Verbs: []string{"get", "list", "watch", "create", "update", "patch", "delete"}},
 			},
 		}

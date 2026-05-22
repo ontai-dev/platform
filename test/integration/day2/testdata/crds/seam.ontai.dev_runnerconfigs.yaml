@@ -4,16 +4,16 @@ kind: CustomResourceDefinition
 metadata:
   annotations:
     controller-gen.kubebuilder.io/version: v0.16.1
-  name: infrastructurerunnerconfigs.infrastructure.ontai.dev
+  name: runnerconfigs.seam.ontai.dev
 spec:
-  group: infrastructure.ontai.dev
+  group: seam.ontai.dev
   names:
-    kind: InfrastructureRunnerConfig
-    listKind: InfrastructureRunnerConfigList
-    plural: infrastructurerunnerconfigs
+    kind: RunnerConfig
+    listKind: RunnerConfigList
+    plural: runnerconfigs
     shortNames:
-    - irc
-    singular: infrastructurerunnerconfig
+    - rc
+    singular: runnerconfig
   scope: Namespaced
   versions:
   - additionalPrinterColumns:
@@ -27,9 +27,9 @@ spec:
     schema:
       openAPIV3Schema:
         description: |-
-          InfrastructureRunnerConfig is the seam-core CRD for Conductor agent runtime configuration.
+          RunnerConfig is the seam-core CRD for Conductor agent runtime configuration.
           Owned by seam-core; authored exclusively by the platform operator. INV-009.
-          conductor-schema.md.
+          conductor-schema.md. MIGRATION-3.8.
         properties:
           apiVersion:
             description: |-
@@ -50,7 +50,7 @@ spec:
             type: object
           spec:
             description: |-
-              InfrastructureRunnerConfigSpec is the operator-generated operational contract for a
+              RunnerConfigSpec is the operator-generated operational contract for a
               specific cluster. Generated at runtime by platform using the runner shared library.
               Never human-authored. INV-009, INV-010. conductor-schema.md.
             properties:
@@ -170,7 +170,7 @@ spec:
             type: object
           status:
             description: |-
-              InfrastructureRunnerConfigStatus is written exclusively by the Conductor agent leader.
+              RunnerConfigStatus is written exclusively by the Conductor agent leader.
               CR-INV-006.
             properties:
               agentLeader:

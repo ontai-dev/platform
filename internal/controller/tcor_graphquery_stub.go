@@ -14,14 +14,14 @@ import (
 
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
-	seamcorev1alpha1 "github.com/ontai-dev/seam-core/api/v1alpha1"
+	seamplatformv1alpha1 "github.com/ontai-dev/platform/api/seam/v1alpha1"
 )
 
 // stubDumpTCORRevisionToGraphQueryDB archives the completed revision of a cluster
-// TCOR before its Operations list is cleared on talosVersion upgrade.
+// ClusterLog before its Operations list is cleared on talosVersion upgrade.
 // When the GraphQuery DB service is implemented, this stub will be replaced by
 // a real gRPC or HTTP write to the persistence layer.
-func stubDumpTCORRevisionToGraphQueryDB(ctx context.Context, clusterRef string, revision int64, talosVersion string, ops map[string]seamcorev1alpha1.TalosClusterOperationRecord) {
+func stubDumpTCORRevisionToGraphQueryDB(ctx context.Context, clusterRef string, revision int64, talosVersion string, ops map[string]seamplatformv1alpha1.OperationRecord) {
 	logger := log.FromContext(ctx)
 	logger.V(1).Info("stub: would archive TCOR revision to GraphQuery DB",
 		"cluster", clusterRef,

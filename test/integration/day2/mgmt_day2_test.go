@@ -24,9 +24,10 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 
-	seamcorev1alpha1 "github.com/ontai-dev/seam-core/api/v1alpha1"
 	platformv1alpha1 "github.com/ontai-dev/platform/api/v1alpha1"
+	seamplatformv1alpha1 "github.com/ontai-dev/platform/api/seam/v1alpha1"
 	"github.com/ontai-dev/platform/internal/controller"
+	seamcorev1alpha1 "github.com/ontai-dev/seam/api/v1alpha1"
 )
 
 // ── helpers ──────────────────────────────────────────────────────────────────
@@ -41,6 +42,9 @@ func buildDay2IntegrationScheme(t *testing.T) *runtime.Scheme {
 	}
 	if err := platformv1alpha1.AddToScheme(s); err != nil {
 		t.Fatalf("add platformv1alpha1 scheme: %v", err)
+	}
+	if err := seamplatformv1alpha1.AddToScheme(s); err != nil {
+		t.Fatalf("add seamplatformv1alpha1 scheme: %v", err)
 	}
 	if err := seamcorev1alpha1.AddToScheme(s); err != nil {
 		t.Fatalf("add seamcorev1alpha1 scheme: %v", err)
@@ -84,10 +88,6 @@ func perOpS3Secret(name, ns string) *corev1.Secret {
 // it on WithObjects (not registered with WithStatusSubresource). All day-2 reconcilers
 // gate on this object before submitting a Conductor executor Job.
 func fakeClusterRC(clusterName string, caps ...string) *controller.OperationalRunnerConfig {
-	capEntries := make([]controller.CapabilityEntry, len(caps))
-	for i, c := range caps {
-		capEntries[i] = controller.CapabilityEntry{Name: c, Version: "1.0.0"}
-	}
 	rc := &controller.OperationalRunnerConfig{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      clusterName,
@@ -98,7 +98,11 @@ func fakeClusterRC(clusterName string, caps ...string) *controller.OperationalRu
 			RunnerImage: "ghcr.io/ontai-dev/conductor-execute:dev",
 		},
 	}
-	rc.Status.Capabilities = capEntries
+	entries := make([]seamcorev1alpha1.RunnerCapabilityEntry, len(caps))
+	for i, name := range caps {
+		entries[i] = seamcorev1alpha1.RunnerCapabilityEntry{Name: name}
+	}
+	rc.Status.Capabilities = entries
 	return rc
 }
 

@@ -6,6 +6,7 @@
 package main
 
 import (
+	"context"
 	"flag"
 	"os"
 
@@ -13,14 +14,17 @@ import (
 	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
 	ctrl "sigs.k8s.io/controller-runtime"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/healthz"
 	"sigs.k8s.io/controller-runtime/pkg/log/zap"
 	metricsserver "sigs.k8s.io/controller-runtime/pkg/metrics/server"
 
 	infrav1alpha1 "github.com/ontai-dev/platform/api/infrastructure/v1alpha1"
 	platformv1alpha1 "github.com/ontai-dev/platform/api/v1alpha1"
-	seamcorev1alpha1 "github.com/ontai-dev/seam-core/api/v1alpha1"
+	seamplatformv1alpha1 "github.com/ontai-dev/platform/api/seam/v1alpha1"
+	seamcorev1alpha1 "github.com/ontai-dev/seam/api/v1alpha1"
 	"github.com/ontai-dev/platform/internal/controller"
+	"github.com/ontai-dev/platform/internal/identity"
 )
 
 var scheme = runtime.NewScheme()
@@ -29,8 +33,9 @@ func init() {
 	utilruntime.Must(clientgoscheme.AddToScheme(scheme))
 	utilruntime.Must(platformv1alpha1.AddToScheme(scheme))
 	utilruntime.Must(infrav1alpha1.AddToScheme(scheme))
-	// TalosCluster and RunnerConfig types are now owned by seam-core.
-	// infrastructure.ontai.dev/v1alpha1. T-2B-8.
+	// TalosCluster and ClusterLog are owned by platform (seam.ontai.dev/v1alpha1). MIGRATION-3.1, MIGRATION-3.2.
+	utilruntime.Must(seamplatformv1alpha1.AddToScheme(scheme))
+	// RunnerConfig and DriftSignal remain in seam-core.
 	utilruntime.Must(seamcorev1alpha1.AddToScheme(scheme))
 }
 
@@ -63,9 +68,20 @@ func main() {
 	ctrl.SetLogger(zap.New(zap.UseFlagOptions(&opts)))
 	setupLog := ctrl.Log.WithName("setup")
 
+	cfg := ctrl.GetConfigOrDie()
+	startupClient, err := client.New(cfg, client.Options{Scheme: scheme})
+	if err != nil {
+		setupLog.Error(err, "unable to create startup client")
+		os.Exit(1)
+	}
+	if err := identity.EnsureSeamMembership(context.Background(), startupClient); err != nil {
+		setupLog.Error(err, "unable to ensure SeamMembership")
+		os.Exit(1)
+	}
+
 	// CP-INV-007: leader election required. Lease name: platform-leader.
 	// Lease namespace: seam-system (canonical operator namespace).
-	mgr, err := ctrl.NewManager(ctrl.GetConfigOrDie(), ctrl.Options{
+	mgr, err := ctrl.NewManager(cfg, ctrl.Options{
 		Scheme:                  scheme,
 		Metrics:                 metricsserver.Options{BindAddress: metricsAddr},
 		HealthProbeBindAddress:  healthProbeAddr,
@@ -243,6 +259,16 @@ func main() {
 		Scheme: mgr.GetScheme(),
 	}).SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "unable to create controller", "controller", "EtcdBackupSchedule")
+		os.Exit(1)
+	}
+
+	if err := (&controller.MachineConfigSyncReconciler{
+		Client:    mgr.GetClient(),
+		APIReader: mgr.GetAPIReader(),
+		Scheme:    mgr.GetScheme(),
+		Recorder:  mgr.GetEventRecorder("machineconfigsync-controller"),
+	}).SetupWithManager(mgr); err != nil {
+		setupLog.Error(err, "unable to create controller", "controller", "MachineConfigSync")
 		os.Exit(1)
 	}
 

@@ -10,7 +10,8 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 
 	platformv1alpha1 "github.com/ontai-dev/platform/api/v1alpha1"
-	seamcorev1alpha1 "github.com/ontai-dev/seam-core/api/v1alpha1"
+	seamplatformv1alpha1 "github.com/ontai-dev/platform/api/seam/v1alpha1"
+	seamcorev1alpha1 "github.com/ontai-dev/seam/api/v1alpha1"
 )
 
 // buildHardeningTestScheme registers all types needed for ensureBootstrapHardening tests.
@@ -19,6 +20,9 @@ func buildHardeningTestScheme(t *testing.T) *runtime.Scheme {
 	s := runtime.NewScheme()
 	if err := clientgoscheme.AddToScheme(s); err != nil {
 		t.Fatalf("add clientgo: %v", err)
+	}
+	if err := seamplatformv1alpha1.AddToScheme(s); err != nil {
+		t.Fatalf("add seamplatform: %v", err)
 	}
 	if err := seamcorev1alpha1.AddToScheme(s); err != nil {
 		t.Fatalf("add seamcore: %v", err)

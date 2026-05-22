@@ -7,15 +7,15 @@ package day2_e2e_test
 //   TENANT-PKI-ROTATE       -- PKIRotation CR reaches Ready=True; kubeconfig Secrets
 //                              refreshed in seam-tenant-{cluster}
 //   TENANT-PKI-CLUSTER-REACH -- After rotation, proves ccs-dev is reachable by
-//                              pushing a minimal single-manifest test ClusterPack and
-//                              waiting for InfrastructurePackExecution to reach
-//                              Succeeded=True using the refreshed kubeconfig
+//                              pushing a minimal single-manifest test PackDelivery and
+//                              waiting for PackExecution to reach Succeeded=True
+//                              using the refreshed kubeconfig
 //
 // The reachability test pushes two OCI tar.gz layers (empty RBAC + single ConfigMap
-// workload) to the lab registry, creates an InfrastructureClusterPack CR, and lets
-// the normal wrapper/signing/conductor-execute pipeline run. Succeeded=True on the
-// PackExecution proves the conductor-execute Job successfully connected to ccs-dev
-// using the kubeconfig written by pkiRotateHandler.
+// workload) to the lab registry, creates a PackDelivery CR, and lets the normal
+// wrapper/signing/conductor-execute pipeline run. Succeeded=True on the PackExecution
+// proves the conductor-execute Job successfully connected to ccs-dev using the
+// kubeconfig written by pkiRotateHandler.
 //
 // Required environment variables:
 //   MGMT_KUBECONFIG      -- path to management cluster kubeconfig (all tests skip if absent)
@@ -35,12 +35,17 @@ import (
 	. "github.com/onsi/gomega"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
+	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	platformv1alpha1 "github.com/ontai-dev/platform/api/v1alpha1"
-	seamcorev1alpha1 "github.com/ontai-dev/seam-core/api/v1alpha1"
 )
+
+// GVKs for wrapper types (seam.ontai.dev/v1alpha1). MIGRATION-3.2.
+var packDeliveryGVK = schema.GroupVersionKind{Group: "seam.ontai.dev", Version: "v1alpha1", Kind: "PackDelivery"}
+var packExecutionGVK = schema.GroupVersionKind{Group: "seam.ontai.dev", Version: "v1alpha1", Kind: "PackExecution"}
 
 // pkiRotationTimeout is the time budget for a PKI rotation Job to complete.
 // Rotation involves a staged machineconfig apply + Talos reboot coordination.
@@ -50,7 +55,7 @@ const pkiRotationTimeout = 10 * time.Minute
 // including waiting for the signing loop and Kueue scheduling.
 const packDeployTimeout = 10 * time.Minute
 
-// ── TENANT-PKI-ROTATE: full rotation lifecycle on import-mode cluster ─────────
+// -- TENANT-PKI-ROTATE: full rotation lifecycle on import-mode cluster
 
 var _ = Describe("TENANT-PKI-ROTATE: PKIRotation on import-mode cluster", func() {
 	It("PKIRotation CR reaches Ready=True and kubeconfig Secrets are refreshed for TENANT_CLUSTER_NAME", func() {
@@ -111,10 +116,10 @@ var _ = Describe("TENANT-PKI-ROTATE: PKIRotation on import-mode cluster", func()
 	})
 })
 
-// ── TENANT-PKI-CLUSTER-REACH: post-rotation ClusterPack probe ────────────────
+// -- TENANT-PKI-CLUSTER-REACH: post-rotation PackDelivery probe
 
-var _ = Describe("TENANT-PKI-CLUSTER-REACH: single-manifest ClusterPack proves cluster reachable after PKI rotation", func() {
-	It("minimal ClusterPack deploy to TENANT_CLUSTER_NAME reaches PackExecution Succeeded=True", func() {
+var _ = Describe("TENANT-PKI-CLUSTER-REACH: single-manifest PackDelivery proves cluster reachable after PKI rotation", func() {
+	It("minimal PackDelivery deploy to TENANT_CLUSTER_NAME reaches PackExecution Succeeded=True", func() {
 		cluster := tenantClusterName()
 		tenantNS := "seam-tenant-" + cluster
 
@@ -148,30 +153,35 @@ data:
 		workloadDigest, err := registry.PushArtifact(mgmtCtx, repo, "workload-v1", workloadBlob)
 		Expect(err).NotTo(HaveOccurred(), "push workload layer to registry")
 
-		// Create the ClusterPack CR. Wrapper watches ClusterPacks and creates a
-		// PackExecution for each entry in spec.targetClusters.
+		// Create the PackDelivery CR via unstructured (wrapper owns this type).
+		// Wrapper watches PackDeliveries and creates a PackExecution for each entry
+		// in spec.targetClusters. MIGRATION-3.2: was InfrastructureClusterPack.
 		registryURL := registryAddr + "/" + repo
-		cp := &seamcorev1alpha1.InfrastructureClusterPack{
-			ObjectMeta: metav1.ObjectMeta{
-				Name:      packName,
-				Namespace: tenantNS,
-			},
-			Spec: seamcorev1alpha1.InfrastructureClusterPackSpec{
-				Version: "v1.0.0-pki-probe",
-				RegistryRef: seamcorev1alpha1.InfrastructurePackRegistryRef{
-					URL:    registryURL,
-					Digest: rbacDigest,
+		cp := &unstructured.Unstructured{
+			Object: map[string]interface{}{
+				"apiVersion": "seam.ontai.dev/v1alpha1",
+				"kind":       "PackDelivery",
+				"metadata": map[string]interface{}{
+					"name":      packName,
+					"namespace": tenantNS,
 				},
-				BasePackName:   "pki-probe",
-				RBACDigest:     rbacDigest,
-				WorkloadDigest: workloadDigest,
-				TargetClusters: []string{cluster},
+				"spec": map[string]interface{}{
+					"version": "v1.0.0-pki-probe",
+					"registryRef": map[string]interface{}{
+						"url":    registryURL,
+						"digest": rbacDigest,
+					},
+					"basePackName":   "pki-probe",
+					"rbacDigest":     rbacDigest,
+					"workloadDigest": workloadDigest,
+					"targetClusters": []interface{}{cluster},
+				},
 			},
 		}
 		Expect(mgmtClient.Create(mgmtCtx, cp)).To(Succeed())
 		DeferCleanup(func() {
-			// Delete ClusterPack -- wrapper GC handles PackExecution and PackInstance.
-			latest := &seamcorev1alpha1.InfrastructureClusterPack{}
+			latest := &unstructured.Unstructured{}
+			latest.SetGroupVersionKind(packDeliveryGVK)
 			if err := mgmtClient.Get(mgmtCtx, types.NamespacedName{
 				Name: packName, Namespace: tenantNS,
 			}, latest); err == nil {
@@ -179,23 +189,25 @@ data:
 			}
 		})
 
-		// Wait for the management conductor signing loop to sign the ClusterPack.
-		// The pack-deploy flow requires status.signed=true before conductor-execute
-		// runs. The signing loop runs on the management cluster conductor leader.
+		// Wait for the management conductor signing loop to sign the PackDelivery.
+		// The pack-deploy flow requires status.signed=true before conductor-execute runs.
 		Eventually(func(g Gomega) {
-			got := &seamcorev1alpha1.InfrastructureClusterPack{}
+			got := &unstructured.Unstructured{}
+			got.SetGroupVersionKind(packDeliveryGVK)
 			g.Expect(mgmtClient.Get(mgmtCtx, types.NamespacedName{
 				Name: packName, Namespace: tenantNS,
 			}, got)).To(Succeed())
-			g.Expect(got.Status.Signed).To(BeTrue(),
-				"ClusterPack must be signed by the management conductor signing loop")
+			signed, _, _ := unstructured.NestedBool(got.Object, "status", "signed")
+			g.Expect(signed).To(BeTrue(),
+				"PackDelivery must be signed by the management conductor signing loop")
 		}, 3*time.Minute, pollInterval).Should(Succeed())
 
 		// Wait for wrapper to create the PackExecution.
-		// PackExecution name convention: {clusterPackName}-{clusterName}.
+		// PackExecution name convention: {packDeliveryName}-{clusterName}.
 		peName := packName + "-" + cluster
 		Eventually(func(g Gomega) {
-			pe := &seamcorev1alpha1.InfrastructurePackExecution{}
+			pe := &unstructured.Unstructured{}
+			pe.SetGroupVersionKind(packExecutionGVK)
 			g.Expect(mgmtClient.Get(mgmtCtx, types.NamespacedName{
 				Name: peName, Namespace: tenantNS,
 			}, pe)).To(Succeed(), "PackExecution %s not yet created by wrapper", peName)
@@ -205,28 +217,32 @@ data:
 		// This proves conductor-execute successfully connected to ccs-dev using the
 		// kubeconfig refreshed by pkiRotateHandler and applied the test ConfigMap.
 		Eventually(func(g Gomega) {
-			pe := &seamcorev1alpha1.InfrastructurePackExecution{}
+			pe := &unstructured.Unstructured{}
+			pe.SetGroupVersionKind(packExecutionGVK)
 			g.Expect(mgmtClient.Get(mgmtCtx, types.NamespacedName{
 				Name: peName, Namespace: tenantNS,
 			}, pe)).To(Succeed())
 
-			var succeededCond *metav1.Condition
-			for i := range pe.Status.Conditions {
-				if pe.Status.Conditions[i].Type == "Succeeded" {
-					succeededCond = &pe.Status.Conditions[i]
+			conds, _, _ := unstructured.NestedSlice(pe.Object, "status", "conditions")
+			var succeededStatus string
+			for _, c := range conds {
+				cm, ok := c.(map[string]interface{})
+				if !ok {
+					continue
+				}
+				if cm["type"] == "Succeeded" {
+					succeededStatus, _, _ = unstructured.NestedString(cm, "status")
 					break
 				}
 			}
-			g.Expect(succeededCond).NotTo(BeNil(),
-				"Succeeded condition not yet set on PackExecution %s", peName)
-			g.Expect(succeededCond.Status).To(Equal(metav1.ConditionTrue),
+			g.Expect(succeededStatus).To(Equal("True"),
 				"PackExecution Succeeded must be True -- ccs-dev is reachable with refreshed kubeconfig")
 		}, packDeployTimeout, pollInterval).Should(Succeed())
 	})
 })
 
 // buildTarGzManifest creates a tar.gz archive containing a single YAML file.
-// Used to construct minimal OCI layer blobs for test ClusterPacks.
+// Used to construct minimal OCI layer blobs for test PackDeliveries.
 func buildTarGzManifest(filename, content string) []byte {
 	var buf bytes.Buffer
 	gz := gzip.NewWriter(&buf)

@@ -85,11 +85,15 @@ func (r *MachineConfigRestoreReconciler) Reconcile(ctx context.Context, req ctrl
 		)
 	}
 
-	// Already complete -- one-shot CR.
+	// If already complete, self-delete after the day-2 TTL; requeue until then.
 	readyCond := platformv1alpha1.FindCondition(mcr.Status.Conditions, platformv1alpha1.ConditionTypeMachineConfigRestoreReady)
 	if readyCond != nil && readyCond.Status == metav1.ConditionTrue {
-		mcr.Status.Phase = "Succeeded"
-		return ctrl.Result{}, nil
+		if expired, after := day2TTLExpired(readyCond.LastTransitionTime.Time); expired {
+			_ = r.Client.Delete(ctx, mcr)
+			return ctrl.Result{}, nil
+		} else {
+			return ctrl.Result{RequeueAfter: after}, nil
+		}
 	}
 
 	// Gate: backupTimestamp must be non-empty.

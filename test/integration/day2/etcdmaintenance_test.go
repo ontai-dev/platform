@@ -16,6 +16,7 @@ import (
 
 	platformv1alpha1 "github.com/ontai-dev/platform/api/v1alpha1"
 	"github.com/ontai-dev/platform/internal/controller"
+	seamcorev1alpha1 "github.com/ontai-dev/seam/api/v1alpha1"
 )
 
 // buildClusterRC creates an OperationalRunnerConfig in ont-system with the given
@@ -36,11 +37,11 @@ func buildClusterRC(ctx context.Context, t *testing.T, clusterName string, capab
 	if err := testClient.Create(ctx, rc); err != nil {
 		t.Fatalf("create cluster RunnerConfig: %v", err)
 	}
-	caps := make([]controller.CapabilityEntry, len(capabilities))
-	for i, c := range capabilities {
-		caps[i] = controller.CapabilityEntry{Name: c, Version: "1.0.0"}
+	entries := make([]seamcorev1alpha1.RunnerCapabilityEntry, len(capabilities))
+	for i, name := range capabilities {
+		entries[i] = seamcorev1alpha1.RunnerCapabilityEntry{Name: name}
 	}
-	rc.Status.Capabilities = caps
+	rc.Status.Capabilities = entries
 	if err := testClient.Status().Update(ctx, rc); err != nil {
 		t.Fatalf("update cluster RunnerConfig status: %v", err)
 	}
