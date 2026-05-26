@@ -103,6 +103,46 @@ type UpgradePolicySpec struct {
 	Lineage *lineage.SealedCausalChain `json:"lineage,omitempty"`
 }
 
+// UpgradeProgressPhase is the phase of an in-progress upgrade operation.
+//
+// +kubebuilder:validation:Enum=upgrading;complete
+type UpgradeProgressPhase string
+
+const (
+	// UpgradeProgressPhaseUpgrading means the upgrade is actively processing nodes.
+	UpgradeProgressPhaseUpgrading UpgradeProgressPhase = "upgrading"
+
+	// UpgradeProgressPhaseComplete means all nodes finished successfully and the
+	// progress record is cleared on the next reconcile.
+	UpgradeProgressPhaseComplete UpgradeProgressPhase = "complete"
+)
+
+// UpgradeProgress records per-node checkpoint state for a rolling upgrade.
+// Written by the Conductor executor Job after each successful node step so
+// that a retry Job can resume from where the previous Job failed rather than
+// re-upgrading already-completed nodes. RECON-J6.
+type UpgradeProgress struct {
+	// CompletedNodes is the list of node IPs or names that have been successfully
+	// upgraded to the target version in this upgrade operation.
+	// +optional
+	CompletedNodes []string `json:"completedNodes,omitempty"`
+
+	// CurrentNode is the node IP or name currently being upgraded.
+	// Empty between node steps or when no upgrade is in progress.
+	// +optional
+	CurrentNode string `json:"currentNode,omitempty"`
+
+	// FailedNode is the node IP or name that caused the upgrade Job to fail.
+	// Set by the Conductor executor before returning failure so that the next
+	// retry Job knows which node to retry from.
+	// +optional
+	FailedNode string `json:"failedNode,omitempty"`
+
+	// Phase is the current phase of the upgrade operation.
+	// +optional
+	Phase UpgradeProgressPhase `json:"phase,omitempty"`
+}
+
 // UpgradePolicyStatus defines the observed state of UpgradePolicy.
 type UpgradePolicyStatus struct {
 	// ObservedGeneration is the generation of the spec last reconciled.
@@ -117,6 +157,13 @@ type UpgradePolicyStatus struct {
 	// OperationResult is the message from the Conductor OperationResult ConfigMap.
 	// +optional
 	OperationResult string `json:"operationResult,omitempty"`
+
+	// Progress tracks per-node checkpoint state for a rolling upgrade.
+	// Written by the Conductor executor Job after each successful node step.
+	// Cleared when all nodes complete or when the UpgradePolicy is superseded.
+	// RECON-J6: enables retry Jobs to skip already-completed nodes.
+	// +optional
+	Progress *UpgradeProgress `json:"progress,omitempty"`
 
 	// Conditions is the list of status conditions for this UpgradePolicy.
 	// Condition types: Ready, Degraded, CAPIDelegated, LineageSynced.
