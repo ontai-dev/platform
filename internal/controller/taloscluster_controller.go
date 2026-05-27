@@ -6,14 +6,20 @@ import (
 	"fmt"
 	"time"
 
+	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/types"
 	clientevents "k8s.io/client-go/tools/events"
 	"k8s.io/client-go/util/retry"
 	ctrl "sigs.k8s.io/controller-runtime"
+	"sigs.k8s.io/controller-runtime/pkg/builder"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/handler"
 	"sigs.k8s.io/controller-runtime/pkg/log"
+	"sigs.k8s.io/controller-runtime/pkg/predicate"
+	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
 	infrav1alpha1 "github.com/ontai-dev/platform/api/infrastructure/v1alpha1"
 	platformv1alpha1 "github.com/ontai-dev/platform/api/v1alpha1"
@@ -371,6 +377,14 @@ func (r *TalosClusterReconciler) reconcileDirectBootstrap(ctx context.Context, t
 		// and the operator can manually create the secrets later.
 		if mcErr := r.ensureMachineConfigSecrets(ctx, tc); mcErr != nil {
 			logger.Info("ensureMachineConfigSecrets: partial or full failure (non-fatal, import proceeds)",
+				"name", tc.Name, "error", mcErr.Error())
+		}
+
+		// RECON-A6: detect admin edits to machineconfig Secrets and trigger sync CRs.
+		// No-op when Secret content matches last sync hash (new import CRs not duplicated).
+		// Non-fatal: Secret watch may not be delivering a change on this reconcile pass.
+		if mcErr := r.reconcileMachineConfigSync(ctx, tc); mcErr != nil {
+			logger.Info("reconcileMachineConfigSync: error detecting secret changes (non-fatal)",
 				"name", tc.Name, "error", mcErr.Error())
 		}
 
@@ -864,8 +878,36 @@ func (r *TalosClusterReconciler) checkMachineReachability(ctx context.Context, t
 
 // SetupWithManager registers TalosClusterReconciler with the controller-runtime
 // manager. platform-design.md §2.1.
+//
+// RECON-A6: Watches machineconfig Secrets (labeled platform.ontai.dev/mc-class) and
+// maps them to TalosCluster reconcile requests via machineConfigSecretToTalosCluster.
+// This ensures that admin edits to machineconfig Secrets trigger reconcileMachineConfigSync
+// without requiring a TalosCluster spec change.
 func (r *TalosClusterReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	return ctrl.NewControllerManagedBy(mgr).
 		For(&platformv1alpha1.TalosCluster{}).
+		Watches(
+			&corev1.Secret{},
+			handler.EnqueueRequestsFromMapFunc(r.machineConfigSecretToTalosCluster),
+			builder.WithPredicates(predicate.NewPredicateFuncs(func(obj client.Object) bool {
+				_, hasMCClass := obj.GetLabels()[LabelMachineConfigClass]
+				return hasMCClass
+			})),
+		).
 		Complete(r)
+}
+
+// machineConfigSecretToTalosCluster maps a machineconfig Secret event to the
+// TalosCluster reconcile request for that cluster. The Secret must carry
+// LabelMachineConfigCluster to identify its owning cluster. RECON-A6.
+func (r *TalosClusterReconciler) machineConfigSecretToTalosCluster(
+	_ context.Context, obj client.Object,
+) []reconcile.Request {
+	clusterName := obj.GetLabels()[LabelMachineConfigCluster]
+	if clusterName == "" {
+		return nil
+	}
+	return []reconcile.Request{{
+		NamespacedName: types.NamespacedName{Name: clusterName, Namespace: "seam-system"},
+	}}
 }

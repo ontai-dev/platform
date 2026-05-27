@@ -26,6 +26,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 	ctrl "sigs.k8s.io/controller-runtime"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 	sigsyaml "sigs.k8s.io/yaml"
 
@@ -412,6 +413,96 @@ func (r *TalosClusterReconciler) createMachineConfigSyncCR(
 	}
 	log.FromContext(ctx).Info("ensureMachineConfigSecrets: created MachineConfigSync CR",
 		"cluster", clusterName, "class", class)
+	return nil
+}
+
+// reconcileMachineConfigSync detects content changes in machineconfig Secrets belonging
+// to tc and creates or replaces a MachineConfigSync CR to drive a new sync Job.
+//
+// Trigger condition: SHA-256(data.machineconfig) != platform.ontai.dev/sync-hash label.
+// This fires only when an admin has updated the Secret content since the last successful
+// sync. It is a no-op when content is unchanged (newHash == prevHash), avoiding duplicate
+// Jobs alongside the import-triggered MachineConfigSync CR.
+//
+// Watch-triggered CRs are named {cluster}-mc-sync-{class}, distinct from the import-
+// triggered {cluster}-mc-import-{class} CRs created by ensureMachineConfigSecrets.
+//
+// Called on every TalosClusterReconciler pass for imported clusters, both from periodic
+// requeues and from machineconfig Secret watch events.
+//
+// RECON-A6: Secret Watch auto-create MachineConfigSync on content change.
+func (r *TalosClusterReconciler) reconcileMachineConfigSync(ctx context.Context, tc *platformv1alpha1.TalosCluster) error {
+	ns := importSecretsNamespace(tc.Name)
+	logger := log.FromContext(ctx)
+
+	secretList := &corev1.SecretList{}
+	if err := r.Client.List(ctx, secretList,
+		client.InNamespace(ns),
+		client.MatchingLabels{LabelMachineConfigCluster: tc.Name},
+	); err != nil {
+		return fmt.Errorf("reconcileMachineConfigSync: list machineconfig secrets: %w", err)
+	}
+
+	for i := range secretList.Items {
+		secret := &secretList.Items[i]
+		class := secret.Labels[LabelMachineConfigClass]
+		if class == "" {
+			continue
+		}
+		configBytes := secret.Data[MachineConfigDataKey]
+		if len(configBytes) == 0 {
+			continue
+		}
+
+		// Trigger condition: content hash differs from the recorded sync hash.
+		sum := sha256.Sum256(configBytes)
+		newHash := hex.EncodeToString(sum[:])
+		prevHash := secret.Labels[LabelMachineConfigSyncHash]
+		if newHash == prevHash {
+			// Content unchanged since last sync attempt. No action needed.
+			continue
+		}
+
+		// Check for an existing watch-triggered MachineConfigSync CR.
+		crName := tc.Name + "-mc-sync-" + class
+		existing := &platformv1alpha1.MachineConfigSync{}
+		getErr := r.Client.Get(ctx, types.NamespacedName{Name: crName, Namespace: ns}, existing)
+		if getErr == nil {
+			// CR exists. If it already targets this content version, skip.
+			if existing.Status.ObservedHash == newHash {
+				continue
+			}
+			// Stale CR from a previous content version. Replace it.
+			if delErr := r.Client.Delete(ctx, existing); delErr != nil && !apierrors.IsNotFound(delErr) {
+				return fmt.Errorf("reconcileMachineConfigSync: delete stale CR %s/%s: %w", ns, crName, delErr)
+			}
+		} else if !apierrors.IsNotFound(getErr) {
+			return fmt.Errorf("reconcileMachineConfigSync: get CR %s/%s: %w", ns, crName, getErr)
+		}
+
+		// Mark Secret as pending so observers know a sync is imminent.
+		patch := secret.DeepCopy()
+		patch.Labels[LabelMachineConfigSyncStatus] = MachineConfigSyncStatusPending
+		patch.Labels[LabelMachineConfigSyncHash] = newHash
+		if pErr := r.Client.Update(ctx, patch); pErr != nil {
+			logger.Info("reconcileMachineConfigSync: failed to patch Secret labels (non-fatal)",
+				"secret", secret.Name, "error", pErr.Error())
+		}
+
+		newCR := &platformv1alpha1.MachineConfigSync{
+			ObjectMeta: metav1.ObjectMeta{Name: crName, Namespace: ns},
+			Spec: platformv1alpha1.MachineConfigSyncSpec{
+				ClusterRef: platformv1alpha1.LocalObjectRef{Name: tc.Name},
+				NodeClass:  class,
+				Reason:     "secret-content-changed",
+			},
+		}
+		if cErr := r.Client.Create(ctx, newCR); cErr != nil && !apierrors.IsAlreadyExists(cErr) {
+			return fmt.Errorf("reconcileMachineConfigSync: create CR %s/%s: %w", ns, crName, cErr)
+		}
+		logger.Info("reconcileMachineConfigSync: created MachineConfigSync CR for content change",
+			"cluster", tc.Name, "class", class)
+	}
 	return nil
 }
 

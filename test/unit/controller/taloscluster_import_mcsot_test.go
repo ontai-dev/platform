@@ -1,15 +1,17 @@
-// Package controller_test -- RECON-A2 unit tests for ensureMachineConfigSecrets.
+// Package controller_test -- RECON-A2 and RECON-A6 unit tests for MCSOT path.
 //
-// These tests verify the machineconfig source-of-truth (MCSOT) import path: reading
-// machineconfigs from Talos nodes, classifying them by machine.type, creating Secret
-// and MachineConfigSync CRs. All tests inject MachineConfigReaderFn to bypass the
-// real talos goclient.
+// RECON-A2: import flow machineconfig source-of-truth Secrets -- reading machineconfigs
+// from Talos nodes, classifying by machine.type, creating Secrets and MachineConfigSync CRs.
+// RECON-A6: Secret Watch content-change trigger -- reconcileMachineConfigSync detects
+// admin edits to machineconfig Secrets and creates watch-triggered MachineConfigSync CRs.
 //
-// RECON-A2: Import flow -- create source-of-truth Secrets after kubeconfig.
+// All tests use the fake client and inject MachineConfigReaderFn where needed.
 package controller_test
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"fmt"
 	"testing"
 
@@ -23,6 +25,51 @@ import (
 	platformv1alpha1 "github.com/ontai-dev/platform/api/v1alpha1"
 	"github.com/ontai-dev/platform/internal/controller"
 )
+
+// computeTestHash returns the hex SHA-256 of b. Used to build pre-existing Secret
+// labels that match or differ from test content in RECON-A6 tests.
+func computeTestHash(b []byte) string {
+	sum := sha256.Sum256(b)
+	return hex.EncodeToString(sum[:])
+}
+
+// buildMachineConfigSecretSynced creates a pre-existing machineconfig Secret that
+// appears fully synced (sync-status=synced, sync-hash matches content).
+// Used in RECON-A6 tests to simulate a Secret that has not changed since last sync.
+func buildMachineConfigSecretSynced(clusterName, class string, content []byte) *corev1.Secret {
+	return &corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      controller.MachineConfigSecretName(clusterName, class),
+			Namespace: "seam-tenant-" + clusterName,
+			Labels: map[string]string{
+				controller.LabelMachineConfigCluster:    clusterName,
+				controller.LabelMachineConfigClass:      class,
+				controller.LabelMachineConfigSyncStatus: controller.MachineConfigSyncStatusSynced,
+				controller.LabelMachineConfigSyncHash:   computeTestHash(content),
+			},
+		},
+		Data: map[string][]byte{controller.MachineConfigDataKey: content},
+	}
+}
+
+// buildMachineConfigSecretChanged creates a pre-existing machineconfig Secret where
+// the content hash does not match the sync-hash label -- simulating an admin edit.
+// Used in RECON-A6 tests to verify that reconcileMachineConfigSync creates a sync CR.
+func buildMachineConfigSecretChanged(clusterName, class string, oldContent, newContent []byte) *corev1.Secret {
+	return &corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      controller.MachineConfigSecretName(clusterName, class),
+			Namespace: "seam-tenant-" + clusterName,
+			Labels: map[string]string{
+				controller.LabelMachineConfigCluster:    clusterName,
+				controller.LabelMachineConfigClass:      class,
+				controller.LabelMachineConfigSyncStatus: controller.MachineConfigSyncStatusSynced,
+				controller.LabelMachineConfigSyncHash:   computeTestHash(oldContent), // stale hash
+			},
+		},
+		Data: map[string][]byte{controller.MachineConfigDataKey: newContent}, // new content
+	}
+}
 
 // buildFakeTalosconfigSecretWithEndpoints returns a talosconfig Secret with the given
 // node endpoint IPs. Used for RECON-A2 tests where ensureMachineConfigSecrets must
@@ -345,5 +392,148 @@ func TestMCSOT_ImportMode_AllEndpointsFailIsNonFatal(t *testing.T) {
 	readyCond := platformv1alpha1.FindCondition(got.Status.Conditions, platformv1alpha1.ConditionTypeReady)
 	if readyCond == nil || readyCond.Status != metav1.ConditionTrue {
 		t.Errorf("TalosCluster must still be Ready when MCSOT fails; cond=%v", readyCond)
+	}
+}
+
+// --- RECON-A6: Secret Watch content-change trigger tests ---
+
+// TestMCSOT_SecretWatch_ContentChangeCreatesSyncCR verifies that when a machineconfig
+// Secret's content hash differs from the sync-hash label (admin edit), a watch-triggered
+// MachineConfigSync CR is created with reason="secret-content-changed".
+// RECON-A6.
+func TestMCSOT_SecretWatch_ContentChangeCreatesSyncCR(t *testing.T) {
+	const cluster = "a6-change"
+	scheme := buildDay2Scheme(t)
+	tc := buildImportTalosCluster(cluster, "seam-system")
+	talosSecret := buildFakeTalosconfigSecretWithEndpoints(cluster, []string{})
+	oldContent := []byte("machine:\n  type: controlplane\n# version 1\n")
+	newContent := []byte("machine:\n  type: controlplane\n# version 2\n")
+	mcSecret := buildMachineConfigSecretChanged(cluster, controller.MachineConfigClassControlPlane, oldContent, newContent)
+
+	c := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithObjects(tc, talosSecret, mcSecret).
+		WithStatusSubresource(tc).
+		Build()
+	r := &controller.TalosClusterReconciler{
+		Client:                c,
+		Scheme:                scheme,
+		Recorder:              clientevents.NewFakeRecorder(16),
+		KubeconfigGeneratorFn: fakeKubeconfigGenerator,
+		MachineConfigReaderFn: fakeErrorReader("no real nodes"),
+	}
+
+	if _, err := r.Reconcile(context.Background(), ctrl.Request{
+		NamespacedName: types.NamespacedName{Name: cluster, Namespace: "seam-system"},
+	}); err != nil {
+		t.Fatalf("Reconcile: %v", err)
+	}
+
+	ns := "seam-tenant-" + cluster
+	crName := cluster + "-mc-sync-" + controller.MachineConfigClassControlPlane
+	mcs := &platformv1alpha1.MachineConfigSync{}
+	if err := c.Get(context.Background(), types.NamespacedName{Name: crName, Namespace: ns}, mcs); err != nil {
+		t.Fatalf("watch-triggered MachineConfigSync CR not found: %v", err)
+	}
+	if mcs.Spec.Reason != "secret-content-changed" {
+		t.Errorf("Reason = %q, want secret-content-changed", mcs.Spec.Reason)
+	}
+	if mcs.Spec.NodeClass != controller.MachineConfigClassControlPlane {
+		t.Errorf("NodeClass = %q, want %q", mcs.Spec.NodeClass, controller.MachineConfigClassControlPlane)
+	}
+}
+
+// TestMCSOT_SecretWatch_NoChangeDoesNotCreateSyncCR verifies that when a machineconfig
+// Secret's content hash matches the sync-hash label, no watch-triggered MachineConfigSync
+// CR is created (content unchanged since last sync).
+// RECON-A6 idempotency.
+func TestMCSOT_SecretWatch_NoChangeDoesNotCreateSyncCR(t *testing.T) {
+	const cluster = "a6-nochange"
+	scheme := buildDay2Scheme(t)
+	tc := buildImportTalosCluster(cluster, "seam-system")
+	talosSecret := buildFakeTalosconfigSecretWithEndpoints(cluster, []string{})
+	content := []byte("machine:\n  type: controlplane\n")
+	mcSecret := buildMachineConfigSecretSynced(cluster, controller.MachineConfigClassControlPlane, content)
+
+	c := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithObjects(tc, talosSecret, mcSecret).
+		WithStatusSubresource(tc).
+		Build()
+	r := &controller.TalosClusterReconciler{
+		Client:                c,
+		Scheme:                scheme,
+		Recorder:              clientevents.NewFakeRecorder(16),
+		KubeconfigGeneratorFn: fakeKubeconfigGenerator,
+		MachineConfigReaderFn: fakeErrorReader("no real nodes"),
+	}
+
+	if _, err := r.Reconcile(context.Background(), ctrl.Request{
+		NamespacedName: types.NamespacedName{Name: cluster, Namespace: "seam-system"},
+	}); err != nil {
+		t.Fatalf("Reconcile: %v", err)
+	}
+
+	ns := "seam-tenant-" + cluster
+	crName := cluster + "-mc-sync-" + controller.MachineConfigClassControlPlane
+	mcs := &platformv1alpha1.MachineConfigSync{}
+	err := c.Get(context.Background(), types.NamespacedName{Name: crName, Namespace: ns}, mcs)
+	if err == nil {
+		t.Errorf("expected no watch-triggered MachineConfigSync CR when content unchanged, got one")
+	}
+}
+
+// TestMCSOT_SecretWatch_StaleCRReplacedOnRehash verifies that when a watch-triggered
+// MachineConfigSync CR already exists for a PREVIOUS content version (observedHash !=
+// newHash), the stale CR is deleted and a fresh one is created for the new content.
+// RECON-A6 replace-stale behavior.
+func TestMCSOT_SecretWatch_StaleCRReplacedOnRehash(t *testing.T) {
+	const cluster = "a6-stale"
+	scheme := buildDay2Scheme(t)
+	tc := buildImportTalosCluster(cluster, "seam-system")
+	talosSecret := buildFakeTalosconfigSecretWithEndpoints(cluster, []string{})
+
+	oldContent := []byte("machine:\n  type: controlplane\n# v1\n")
+	newContent := []byte("machine:\n  type: controlplane\n# v2\n")
+	mcSecret := buildMachineConfigSecretChanged(cluster, controller.MachineConfigClassControlPlane, oldContent, newContent)
+
+	ns := "seam-tenant-" + cluster
+	crName := cluster + "-mc-sync-" + controller.MachineConfigClassControlPlane
+	// Pre-existing stale CR targeting the old content hash.
+	staleCR := &platformv1alpha1.MachineConfigSync{
+		ObjectMeta: metav1.ObjectMeta{Name: crName, Namespace: ns},
+		Spec: platformv1alpha1.MachineConfigSyncSpec{
+			ClusterRef: platformv1alpha1.LocalObjectRef{Name: cluster},
+			NodeClass:  controller.MachineConfigClassControlPlane,
+			Reason:     "secret-content-changed",
+		},
+	}
+
+	c := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithObjects(tc, talosSecret, mcSecret, staleCR).
+		WithStatusSubresource(tc, staleCR).
+		Build()
+	r := &controller.TalosClusterReconciler{
+		Client:                c,
+		Scheme:                scheme,
+		Recorder:              clientevents.NewFakeRecorder(16),
+		KubeconfigGeneratorFn: fakeKubeconfigGenerator,
+		MachineConfigReaderFn: fakeErrorReader("no real nodes"),
+	}
+
+	if _, err := r.Reconcile(context.Background(), ctrl.Request{
+		NamespacedName: types.NamespacedName{Name: cluster, Namespace: "seam-system"},
+	}); err != nil {
+		t.Fatalf("Reconcile: %v", err)
+	}
+
+	// Stale CR was replaced -- a fresh CR with the same name now exists.
+	freshCR := &platformv1alpha1.MachineConfigSync{}
+	if err := c.Get(context.Background(), types.NamespacedName{Name: crName, Namespace: ns}, freshCR); err != nil {
+		t.Fatalf("fresh MachineConfigSync CR not found after stale replacement: %v", err)
+	}
+	if freshCR.Spec.Reason != "secret-content-changed" {
+		t.Errorf("fresh CR Reason = %q, want secret-content-changed", freshCR.Spec.Reason)
 	}
 }
