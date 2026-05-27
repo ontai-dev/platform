@@ -16,6 +16,7 @@ import (
 
 	platformv1alpha1 "github.com/ontai-dev/platform/api/v1alpha1"
 	seamplatformv1alpha1 "github.com/ontai-dev/platform/api/seam/v1alpha1"
+	seamcorev1alpha1 "github.com/ontai-dev/seam/api/v1alpha1"
 )
 
 // buildHelperTestScheme constructs a runtime.Scheme with all types required for
@@ -29,6 +30,10 @@ func buildHelperTestScheme(t *testing.T) *runtime.Scheme {
 	// seamplatformv1alpha1 registers TalosCluster under seam.ontai.dev/v1alpha1.
 	if err := seamplatformv1alpha1.AddToScheme(s); err != nil {
 		t.Fatalf("add seamplatformv1alpha1 scheme: %v", err)
+	}
+	// seamcorev1alpha1 registers RunnerConfig and other seam cross-operator CRDs.
+	if err := seamcorev1alpha1.AddToScheme(s); err != nil {
+		t.Fatalf("add seamcorev1alpha1 scheme: %v", err)
 	}
 	// PackExecution and PackInstalled are owned by wrapper (seam.ontai.dev/v1alpha1).
 	// Register as unstructured so the fake client can store/retrieve them.
@@ -355,3 +360,155 @@ func TestRemoveFromUnstructuredStringSlice_NotFound(t *testing.T) {
 
 // Ensure fake.Client interface is satisfied (compile-time check).
 var _ client.Client = fake.NewClientBuilder().Build()
+
+// ── RECON-I1: DeletionStage checkpoint tests ────────────────────────────────
+
+// TestDeletionStageReached verifies the stage ordering function used for
+// restart-recovery skip logic. RECON-I1.
+func TestDeletionStageReached(t *testing.T) {
+	tests := []struct {
+		current platformv1alpha1.DeletionStage
+		target  platformv1alpha1.DeletionStage
+		want    bool
+	}{
+		{platformv1alpha1.DeletionStageNone, platformv1alpha1.DeletionStageNone, true},
+		{platformv1alpha1.DeletionStageNone, platformv1alpha1.DeletionStagePackExecution, false},
+		{platformv1alpha1.DeletionStagePackExecution, platformv1alpha1.DeletionStageNone, true},
+		{platformv1alpha1.DeletionStagePackExecution, platformv1alpha1.DeletionStagePackExecution, true},
+		{platformv1alpha1.DeletionStagePackExecution, platformv1alpha1.DeletionStagePackInstalled, false},
+		{platformv1alpha1.DeletionStagePackInstalled, platformv1alpha1.DeletionStagePackExecution, true},
+		{platformv1alpha1.DeletionStageRunnerConfig, platformv1alpha1.DeletionStagePackDelivery, true},
+		{platformv1alpha1.DeletionStageComplete, platformv1alpha1.DeletionStageRunnerConfig, true},
+	}
+	for _, tc := range tests {
+		got := deletionStageReached(tc.current, tc.target)
+		if got != tc.want {
+			t.Errorf("deletionStageReached(%q, %q) = %v, want %v", tc.current, tc.target, got, tc.want)
+		}
+	}
+}
+
+// TestHandleTalosClusterDeletion_StageWrittenBeforePackExecution verifies that
+// status.deletionStage is set to "pack-execution" before PackExecutions are deleted.
+// RECON-I1.
+func TestHandleTalosClusterDeletion_StageWrittenBeforePackExecution(t *testing.T) {
+	scheme := buildHelperTestScheme(t)
+	clusterName := "ccs-dev"
+	tenantNS := "seam-tenant-" + clusterName
+
+	pe := fakePackExecution("nginx-exec", tenantNS)
+	tc := fakeTenantTalosCluster(clusterName, []string{finalizerDecisionHCascade})
+
+	c := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithObjects(tc, pe).
+		WithStatusSubresource(&platformv1alpha1.TalosCluster{}).
+		Build()
+
+	r := &TalosClusterReconciler{
+		Client:   c,
+		Scheme:   scheme,
+		Recorder: clientevents.NewFakeRecorder(8),
+	}
+	tc = setDeletionTimestamp(t, c, tc)
+
+	_, err := r.handleTalosClusterDeletion(context.Background(), tc)
+	if err != nil {
+		t.Fatalf("handleTalosClusterDeletion: %v", err)
+	}
+
+	// After full cascade, stage must be "complete" or the object is GC'd.
+	latest := &platformv1alpha1.TalosCluster{}
+	if getErr := c.Get(context.Background(), types.NamespacedName{Name: clusterName, Namespace: "seam-system"}, latest); getErr == nil {
+		// Object still present -- stage must be at least pack-execution.
+		if !deletionStageReached(latest.Status.DeletionStage, platformv1alpha1.DeletionStagePackExecution) {
+			t.Errorf("DeletionStage = %q; want at least pack-execution", latest.Status.DeletionStage)
+		}
+	}
+	// If NotFound: GC'd by fake client (all finalizers removed) -- cascade complete, stage irrelevant.
+}
+
+// TestHandleTalosClusterDeletion_SkipsPackExecution_WhenStageAlreadyAtPackInstalled
+// verifies that if status.deletionStage is already "pack-installed" on entry, Step 0a
+// (PackExecution deletion) is skipped. RECON-I1.
+func TestHandleTalosClusterDeletion_SkipsPackExecution_WhenStageAlreadyAtPackInstalled(t *testing.T) {
+	scheme := buildHelperTestScheme(t)
+	clusterName := "ccs-dev"
+	tenantNS := "seam-tenant-" + clusterName
+
+	// PackExecution that should NOT be deleted (stage already past pack-execution).
+	pe := fakePackExecution("nginx-exec", tenantNS)
+	tc := fakeTenantTalosCluster(clusterName, []string{finalizerDecisionHCascade})
+	tc.Status.DeletionStage = platformv1alpha1.DeletionStagePackInstalled
+
+	c := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithObjects(tc, pe).
+		WithStatusSubresource(&platformv1alpha1.TalosCluster{}).
+		Build()
+
+	r := &TalosClusterReconciler{
+		Client:   c,
+		Scheme:   scheme,
+		Recorder: clientevents.NewFakeRecorder(8),
+	}
+	tc = setDeletionTimestamp(t, c, tc)
+	// Restore stage after setDeletionTimestamp refetch (fake client clears status on delete).
+	tc.Status.DeletionStage = platformv1alpha1.DeletionStagePackInstalled
+	if err := c.Status().Update(context.Background(), tc); err != nil {
+		t.Fatalf("set stage: %v", err)
+	}
+	// Re-fetch to get the updated status.
+	if err := c.Get(context.Background(), types.NamespacedName{Name: clusterName, Namespace: "seam-system"}, tc); err != nil {
+		t.Fatalf("refetch tc: %v", err)
+	}
+
+	_, err := r.handleTalosClusterDeletion(context.Background(), tc)
+	if err != nil {
+		t.Fatalf("handleTalosClusterDeletion: %v", err)
+	}
+
+	// PackExecution must still exist because stage was already "pack-installed" on entry.
+	peGet := &unstructured.Unstructured{}
+	peGet.SetGroupVersionKind(packExecutionTenantGVK)
+	if getErr := c.Get(context.Background(), types.NamespacedName{Name: "nginx-exec", Namespace: tenantNS}, peGet); getErr != nil {
+		t.Errorf("PackExecution should NOT have been deleted (stage skip): %v", getErr)
+	}
+}
+
+// TestHandleTalosClusterDeletion_RunnerConfigStageWritten verifies that
+// status.deletionStage is set to "runner-config" when the RunnerConfig cleanup
+// finalizer is active. RECON-I1.
+func TestHandleTalosClusterDeletion_RunnerConfigStageWritten(t *testing.T) {
+	scheme := buildHelperTestScheme(t)
+	clusterName := "ccs-dev"
+
+	tc := fakeTenantTalosCluster(clusterName, []string{finalizerRunnerConfigCleanup})
+
+	c := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithObjects(tc).
+		WithStatusSubresource(&platformv1alpha1.TalosCluster{}).
+		Build()
+
+	r := &TalosClusterReconciler{
+		Client:   c,
+		Scheme:   scheme,
+		Recorder: clientevents.NewFakeRecorder(8),
+	}
+	tc = setDeletionTimestamp(t, c, tc)
+
+	_, err := r.handleTalosClusterDeletion(context.Background(), tc)
+	if err != nil {
+		t.Fatalf("handleTalosClusterDeletion: %v", err)
+	}
+
+	// After Step 1 runs, stage must be at least runner-config (or complete if GC'd).
+	latest := &platformv1alpha1.TalosCluster{}
+	if getErr := c.Get(context.Background(), types.NamespacedName{Name: clusterName, Namespace: "seam-system"}, latest); getErr == nil {
+		if !deletionStageReached(latest.Status.DeletionStage, platformv1alpha1.DeletionStageRunnerConfig) {
+			t.Errorf("DeletionStage = %q; want at least runner-config", latest.Status.DeletionStage)
+		}
+	}
+	// NotFound = all finalizers removed, cascade fully complete.
+}

@@ -50,6 +50,19 @@ type CAPICiliumPackRef = seamv1alpha1.CAPICiliumPackRef
 // +kubebuilder:object:generate=false
 type LocalObjectRef = seamv1alpha1.LocalObjectRef
 
+// +kubebuilder:object:generate=false
+type DeletionStage = seamv1alpha1.DeletionStage
+
+// DeletionStage constants -- re-exported from platform/api/seam/v1alpha1. RECON-I1.
+const (
+	DeletionStageNone          = seamv1alpha1.DeletionStageNone
+	DeletionStagePackExecution = seamv1alpha1.DeletionStagePackExecution
+	DeletionStagePackInstalled = seamv1alpha1.DeletionStagePackInstalled
+	DeletionStagePackDelivery  = seamv1alpha1.DeletionStagePackDelivery
+	DeletionStageRunnerConfig  = seamv1alpha1.DeletionStageRunnerConfig
+	DeletionStageComplete      = seamv1alpha1.DeletionStageComplete
+)
+
 // Mode constants.
 const (
 	TalosClusterModeBootstrap = seamv1alpha1.TalosClusterModeBootstrap

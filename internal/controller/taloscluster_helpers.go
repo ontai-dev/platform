@@ -1135,6 +1135,53 @@ func (r *TalosClusterReconciler) ensureDecisionHCascadeFinalizer(
 	return nil
 }
 
+// deletionStageOrder defines the sequence of cascade stages in ascending order.
+// Used by deletionStageReached to determine whether a stage has already been
+// passed in the current cascade run. RECON-I1.
+var deletionStageOrder = []platformv1alpha1.DeletionStage{
+	platformv1alpha1.DeletionStageNone,
+	platformv1alpha1.DeletionStagePackExecution,
+	platformv1alpha1.DeletionStagePackInstalled,
+	platformv1alpha1.DeletionStagePackDelivery,
+	platformv1alpha1.DeletionStageRunnerConfig,
+	platformv1alpha1.DeletionStageComplete,
+}
+
+// deletionStageReached returns true when current >= target in cascade ordering.
+// A step whose stage has been reached does not need to re-execute. RECON-I1.
+func deletionStageReached(current, target platformv1alpha1.DeletionStage) bool {
+	ci, ti := -1, -1
+	for i, s := range deletionStageOrder {
+		if s == current {
+			ci = i
+		}
+		if s == target {
+			ti = i
+		}
+	}
+	return ci >= 0 && ti >= 0 && ci >= ti
+}
+
+// advanceDeletionStage writes the new stage to tc.Status.DeletionStage and
+// patches the status subresource. Called before each cascade step to record
+// progress for restart recovery. RECON-I1.
+func (r *TalosClusterReconciler) advanceDeletionStage(ctx context.Context, tc *platformv1alpha1.TalosCluster, stage platformv1alpha1.DeletionStage) error {
+	if tc.Status.DeletionStage == stage {
+		return nil
+	}
+	base := tc.DeepCopy()
+	tc.Status.DeletionStage = stage
+	if err := r.Client.Status().Patch(ctx, tc, client.MergeFrom(base)); err != nil {
+		// NotFound means the object was already GC'd (all finalizers removed +
+		// deletionTimestamp set). The stage write is visibility-only; treat as success.
+		if apierrors.IsNotFound(err) {
+			return nil
+		}
+		return fmt.Errorf("advanceDeletionStage: set stage %q: %w", stage, err)
+	}
+	return nil
+}
+
 // handleTalosClusterDeletion is called when tc.DeletionTimestamp is set. Handles
 // four finalizers in order:
 //  0. finalizerDecisionHCascade (role=tenant only): Decision H ordered teardown.
@@ -1150,6 +1197,7 @@ func (r *TalosClusterReconciler) ensureDecisionHCascadeFinalizer(
 //
 // All steps are idempotent on NotFound. Finalizers are removed once their cleanup
 // is complete and all must be absent before the TalosCluster is released.
+// status.deletionStage is written before each step to allow restart recovery. RECON-I1.
 func (r *TalosClusterReconciler) handleTalosClusterDeletion(
 	ctx context.Context,
 	tc *platformv1alpha1.TalosCluster,
@@ -1162,36 +1210,48 @@ func (r *TalosClusterReconciler) handleTalosClusterDeletion(
 		tenantNS := "seam-tenant-" + tc.Name
 
 		// Step 0a — Delete all InfrastructurePackExecutions in seam-tenant-{name}.
-		peList := &unstructured.UnstructuredList{}
-		peList.SetGroupVersionKind(schema.GroupVersionKind{
-			Group:   packExecutionTenantGVK.Group,
-			Version: packExecutionTenantGVK.Version,
-			Kind:    packExecutionTenantGVK.Kind + "List",
-		})
-		if err := r.Client.List(ctx, peList, client.InNamespace(tenantNS)); err != nil && !apierrors.IsNotFound(err) {
-			return ctrl.Result{}, fmt.Errorf("handleTalosClusterDeletion: list PackExecutions in %s: %w", tenantNS, err)
-		}
-		for i := range peList.Items {
-			pe := &peList.Items[i]
-			if delErr := r.Client.Delete(ctx, pe); delErr != nil && !apierrors.IsNotFound(delErr) {
-				return ctrl.Result{}, fmt.Errorf("handleTalosClusterDeletion: delete PackExecution %s/%s: %w", tenantNS, pe.GetName(), delErr)
+		// Skip if stage already passed (restart recovery). RECON-I1.
+		if !deletionStageReached(tc.Status.DeletionStage, platformv1alpha1.DeletionStagePackInstalled) {
+			if err := r.advanceDeletionStage(ctx, tc, platformv1alpha1.DeletionStagePackExecution); err != nil {
+				return ctrl.Result{}, err
+			}
+			peList := &unstructured.UnstructuredList{}
+			peList.SetGroupVersionKind(schema.GroupVersionKind{
+				Group:   packExecutionTenantGVK.Group,
+				Version: packExecutionTenantGVK.Version,
+				Kind:    packExecutionTenantGVK.Kind + "List",
+			})
+			if err := r.Client.List(ctx, peList, client.InNamespace(tenantNS)); err != nil && !apierrors.IsNotFound(err) {
+				return ctrl.Result{}, fmt.Errorf("handleTalosClusterDeletion: list PackExecutions in %s: %w", tenantNS, err)
+			}
+			for i := range peList.Items {
+				pe := &peList.Items[i]
+				if delErr := r.Client.Delete(ctx, pe); delErr != nil && !apierrors.IsNotFound(delErr) {
+					return ctrl.Result{}, fmt.Errorf("handleTalosClusterDeletion: delete PackExecution %s/%s: %w", tenantNS, pe.GetName(), delErr)
+				}
 			}
 		}
 
 		// Step 0b — Delete all InfrastructurePackInstances in seam-tenant-{name}.
-		piList := &unstructured.UnstructuredList{}
-		piList.SetGroupVersionKind(schema.GroupVersionKind{
-			Group:   packInstanceTenantGVK.Group,
-			Version: packInstanceTenantGVK.Version,
-			Kind:    packInstanceTenantGVK.Kind + "List",
-		})
-		if err := r.Client.List(ctx, piList, client.InNamespace(tenantNS)); err != nil && !apierrors.IsNotFound(err) {
-			return ctrl.Result{}, fmt.Errorf("handleTalosClusterDeletion: list PackInstances in %s: %w", tenantNS, err)
-		}
-		for i := range piList.Items {
-			pi := &piList.Items[i]
-			if delErr := r.Client.Delete(ctx, pi); delErr != nil && !apierrors.IsNotFound(delErr) {
-				return ctrl.Result{}, fmt.Errorf("handleTalosClusterDeletion: delete PackInstance %s/%s: %w", tenantNS, pi.GetName(), delErr)
+		// Skip if stage already passed (restart recovery). RECON-I1.
+		if !deletionStageReached(tc.Status.DeletionStage, platformv1alpha1.DeletionStagePackDelivery) {
+			if err := r.advanceDeletionStage(ctx, tc, platformv1alpha1.DeletionStagePackInstalled); err != nil {
+				return ctrl.Result{}, err
+			}
+			piList := &unstructured.UnstructuredList{}
+			piList.SetGroupVersionKind(schema.GroupVersionKind{
+				Group:   packInstanceTenantGVK.Group,
+				Version: packInstanceTenantGVK.Version,
+				Kind:    packInstanceTenantGVK.Kind + "List",
+			})
+			if err := r.Client.List(ctx, piList, client.InNamespace(tenantNS)); err != nil && !apierrors.IsNotFound(err) {
+				return ctrl.Result{}, fmt.Errorf("handleTalosClusterDeletion: list PackInstances in %s: %w", tenantNS, err)
+			}
+			for i := range piList.Items {
+				pi := &piList.Items[i]
+				if delErr := r.Client.Delete(ctx, pi); delErr != nil && !apierrors.IsNotFound(delErr) {
+					return ctrl.Result{}, fmt.Errorf("handleTalosClusterDeletion: delete PackInstance %s/%s: %w", tenantNS, pi.GetName(), delErr)
+				}
 			}
 		}
 
@@ -1234,7 +1294,11 @@ func (r *TalosClusterReconciler) handleTalosClusterDeletion(
 	}
 
 	// Step 1 — RunnerConfig and Secret cleanup (annotation-gated).
+	// Advance deletion stage for restart recovery. RECON-I1.
 	if controllerutil.ContainsFinalizer(tc, finalizerRunnerConfigCleanup) {
+		if err := r.advanceDeletionStage(ctx, tc, platformv1alpha1.DeletionStageRunnerConfig); err != nil {
+			return ctrl.Result{}, err
+		}
 		rc := &OperationalRunnerConfig{}
 		err := r.Client.Get(ctx, types.NamespacedName{
 			Name:      tc.Name,
@@ -1316,6 +1380,13 @@ func (r *TalosClusterReconciler) handleTalosClusterDeletion(
 		controllerutil.RemoveFinalizer(tc, finalizerWrapperRunnerCRBCleanup)
 		if err := r.Client.Update(ctx, tc); err != nil {
 			return ctrl.Result{}, fmt.Errorf("handleTalosClusterDeletion: remove wrapper-runner-crb finalizer: %w", err)
+		}
+	}
+
+	// All finalizers removed. Mark cascade complete for visibility. RECON-I1.
+	if tc.Status.DeletionStage != platformv1alpha1.DeletionStageComplete {
+		if err := r.advanceDeletionStage(ctx, tc, platformv1alpha1.DeletionStageComplete); err != nil {
+			return ctrl.Result{}, err
 		}
 	}
 

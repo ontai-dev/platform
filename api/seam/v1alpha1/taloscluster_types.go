@@ -232,6 +232,30 @@ type TalosClusterSpec struct {
 	HardeningProfileRef *LocalObjectRef `json:"hardeningProfileRef,omitempty"`
 }
 
+// DeletionStage is the current step in the TalosCluster deletion cascade.
+// Written to status before each step so that a reconciler restart can resume
+// from the correct step rather than re-attempting already-completed deletes.
+// RECON-I1.
+//
+// +kubebuilder:validation:Enum="";pack-execution;pack-installed;pack-delivery;runner-config;complete
+type DeletionStage string
+
+const (
+	// DeletionStageNone is the zero value (no deletion in progress).
+	DeletionStageNone DeletionStage = ""
+	// DeletionStagePackExecution indicates the cascade is deleting PackExecutions.
+	DeletionStagePackExecution DeletionStage = "pack-execution"
+	// DeletionStagePackInstalled indicates the cascade is deleting PackInstalled CRs.
+	DeletionStagePackInstalled DeletionStage = "pack-installed"
+	// DeletionStagePackDelivery indicates the cascade is deleting PackDelivery CRs.
+	DeletionStagePackDelivery DeletionStage = "pack-delivery"
+	// DeletionStageRunnerConfig indicates the cascade is deleting the RunnerConfig.
+	DeletionStageRunnerConfig DeletionStage = "runner-config"
+	// DeletionStageComplete indicates all cascade steps completed and the finalizer
+	// is being removed. After this stage the TalosCluster CR is released.
+	DeletionStageComplete DeletionStage = "complete"
+)
+
 // TalosClusterStatus is the observed state of a TalosCluster.
 type TalosClusterStatus struct {
 	// ObservedGeneration is the generation most recently reconciled.
@@ -259,6 +283,12 @@ type TalosClusterStatus struct {
 	// kubeconfig Secrets. Set by the TalosCluster reconciler. platform-schema.md §13.
 	// +optional
 	PkiExpiryDate *metav1.Time `json:"pkiExpiryDate,omitempty"`
+
+	// DeletionStage is the current step in the deletion cascade. Written before
+	// each step so the reconciler can resume from the correct step after a restart.
+	// Empty when no deletion is in progress. RECON-I1.
+	// +optional
+	DeletionStage DeletionStage `json:"deletionStage,omitempty"`
 }
 
 // +kubebuilder:object:root=true
