@@ -54,6 +54,12 @@ const (
 
 	// executorTalosconfigEnvPath is the TALOSCONFIG_PATH value injected into executor Jobs.
 	executorTalosconfigEnvPath = executorTalosconfigMountPath + "/talosconfig"
+
+	// executorKubeconfigMountPath is the container mount path for the kubeconfig file
+	// mounted from the seam-mc-{cluster}-kubeconfig Secret (SubPath: "value").
+	// Used by upgrade capabilities that need to reach the target cluster Kubernetes API.
+	// RECON-J2, RECON-J7.
+	executorKubeconfigMountPath = "/var/run/secrets/kubeconfig"
 )
 
 // jobSpec builds a Conductor executor Job spec for the given capability and cluster.
@@ -378,4 +384,40 @@ func day2TTLExpired(completionTime time.Time) (expired bool, requeueAfter time.D
 		return true, 0
 	}
 	return false, remaining
+}
+
+// addKubeconfigMount adds the seam-mc-{clusterName}-kubeconfig Secret as a volume on
+// the Job pod and mounts it at executorKubeconfigMountPath in the first container.
+// The Secret's "value" data key is projected directly to the mount path via SubPath,
+// so the kubeconfig file is readable at exactly executorKubeconfigMountPath.
+// KUBECONFIG is set to that path so client-go auto-detects it from the environment.
+//
+// Called by reconcileDirectUpgrade for upgrade-class Jobs that need target cluster
+// Kubernetes API access (drain, node ready check). RECON-J2, RECON-J7.
+func addKubeconfigMount(job *batchv1.Job, clusterName string) {
+	secretName := "seam-mc-" + clusterName + "-kubeconfig"
+	job.Spec.Template.Spec.Volumes = append(job.Spec.Template.Spec.Volumes, corev1.Volume{
+		Name: "kubeconfig",
+		VolumeSource: corev1.VolumeSource{
+			Secret: &corev1.SecretVolumeSource{
+				SecretName: secretName,
+			},
+		},
+	})
+	if len(job.Spec.Template.Spec.Containers) == 0 {
+		return
+	}
+	job.Spec.Template.Spec.Containers[0].VolumeMounts = append(
+		job.Spec.Template.Spec.Containers[0].VolumeMounts,
+		corev1.VolumeMount{
+			Name:      "kubeconfig",
+			MountPath: executorKubeconfigMountPath,
+			SubPath:   "value",
+			ReadOnly:  true,
+		},
+	)
+	job.Spec.Template.Spec.Containers[0].Env = append(
+		job.Spec.Template.Spec.Containers[0].Env,
+		corev1.EnvVar{Name: "KUBECONFIG", Value: executorKubeconfigMountPath},
+	)
 }

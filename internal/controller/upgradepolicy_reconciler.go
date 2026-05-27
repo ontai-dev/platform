@@ -282,6 +282,8 @@ func (r *UpgradePolicyReconciler) reconcileDirectUpgrade(ctx context.Context, up
 		nodeExclusions := buildNodeExclusions(nil, leaderNode)
 
 		job := jobSpecWithExclusions(jobName, up.Namespace, up.Spec.ClusterRef.Name, capability, nodeExclusions, clusterRC.Spec.RunnerImage)
+		// RECON-J2, RECON-J7: mount target cluster kubeconfig for drain and node-ready checks.
+		addKubeconfigMount(job, up.Spec.ClusterRef.Name)
 
 		// For management cluster upgrades: pass LEADER_NODE so Conductor upgrades
 		// the leader last and performs lease handover before its node reboots.
