@@ -28,6 +28,15 @@ const (
 	// ConditionTypeDiskPressure is True when any node's ephemeral or STATE partition
 	// exceeds the critical disk usage threshold. Written by conductor ClusterNodeHealthLoop. RECON-C7.
 	ConditionTypeDiskPressure = "DiskPressure"
+
+	// ConditionTypeNodeInfrastructureReady is True when all nodes in the cluster have:
+	// machineconfig applied, ont-controlled label injected, and talosconfig endpoints current.
+	// Distinct from the Kubernetes NodeReady condition (which tracks kubelet state).
+	// Written by management conductor after MachineConfigSync completion.
+	// Prerequisite for Kubernetes-layer B selections (tenant conductor RuntimeDrift remediation).
+	// False during: MaintenanceMode (RECON-C10), MachineConfigSync failure,
+	// endpoint drift (RECON-C4), or enrollment in progress. RECON-H2.
+	ConditionTypeNodeInfrastructureReady = "NodeInfrastructureReady"
 )
 
 // Reason constants for health-related TalosCluster conditions.
@@ -43,6 +52,29 @@ const (
 // NodeHealthAnnotation is the TalosCluster annotation key for the per-node JSON health summary.
 // Written by ClusterNodeHealthLoop. Format: {"nodes":[{"name":"...","ip":"...","state":"..."}]}.
 const NodeHealthAnnotation = "platform.ontai.dev/node-health-summary"
+
+// NodeRole classifies a TalosCluster node as either a control plane or worker node.
+// Control plane nodes run etcd and the Kubernetes API server.
+// +kubebuilder:validation:Enum=controlplane;worker
+type NodeRole string
+
+const (
+	NodeRoleControlPlane NodeRole = "controlplane"
+	NodeRoleWorker       NodeRole = "worker"
+)
+
+// NodeAddress is a classified node IP entry in TalosClusterSpec.NodeAddresses.
+// RECON-A9.
+type NodeAddress struct {
+	// IP is the node's primary IPv4 address.
+	IP string `json:"ip"`
+	// Role classifies the node as controlplane or worker.
+	// +kubebuilder:validation:Enum=controlplane;worker
+	Role NodeRole `json:"role"`
+	// Name is the optional node hostname. Used for per-node machineconfig secret targeting.
+	// +optional
+	Name string `json:"name,omitempty"`
+}
 
 // TalosClusterMode declares whether the cluster is bootstrapped or imported.
 // +kubebuilder:validation:Enum=bootstrap;import
@@ -192,9 +224,12 @@ type TalosClusterSpec struct {
 	// +optional
 	ClusterEndpoint string `json:"clusterEndpoint,omitempty"`
 
-	// NodeAddresses is the list of node IPs for DSNSReconciler A-record population.
+	// NodeAddresses is the classified list of node IPs for this cluster.
+	// Each entry carries the node IP, its role (controlplane or worker),
+	// and an optional hostname. Populated by the import flow and bootstrap
+	// compiler; updated on node enrollment changes. RECON-A9.
 	// +optional
-	NodeAddresses []string `json:"nodeAddresses,omitempty"`
+	NodeAddresses []NodeAddress `json:"nodeAddresses,omitempty"`
 
 	// CAPI holds CAPI integration settings. When absent, direct bootstrap is used.
 	// +optional
