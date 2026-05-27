@@ -76,6 +76,10 @@ type TalosClusterReconciler struct {
 	// raw machineconfig YAML bytes and the machine.type classification string
 	// ("controlplane" or "worker"). Used exclusively in unit tests. RECON-A2.
 	MachineConfigReaderFn func(ctx context.Context, clusterName, endpoint string) ([]byte, string, error)
+
+	// mcSyncCoalescer debounces MachineConfigSync CR creation to prevent content-change
+	// storms from flooding the Job queue. Lazily initialized on first use. RECON-F2.
+	mcSyncCoalescer *MCSyncCoalescer
 }
 
 // Reconcile is the main reconciliation loop for TalosCluster.
@@ -263,6 +267,14 @@ func (r *TalosClusterReconciler) Reconcile(ctx context.Context, req ctrl.Request
 	// reconcile pass (stable-Ready). Non-fatal: failures are logged and result
 	// in a requeue rather than an error return. platform-schema.md §13.
 	if wasAlreadyReady {
+		// Annotation-based node roster refresh. RECON-C9.
+		if tc.Annotations != nil && tc.Annotations[AnnotationRefreshNodeRoster] == "true" {
+			if err := r.reconcileNodeRosterRefresh(ctx, tc); err != nil {
+				logger.Error(err, "node roster refresh failed -- non-fatal, will retry")
+				return ctrl.Result{RequeueAfter: 5 * time.Minute}, nil
+			}
+		}
+
 		// Annotation-based on-demand rotation.
 		if tc.Annotations != nil && tc.Annotations["platform.ontai.dev/rotate-pki"] == "true" {
 			if err := ensureAnnotationRotationPKI(ctx, r.Client, r.Scheme, tc); err != nil {

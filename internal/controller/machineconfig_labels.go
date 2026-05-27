@@ -37,6 +37,10 @@ const (
 	// MachineConfigSyncStatusDrift means the secret content hash differs from the last
 	// confirmed sync hash -- a new MachineConfigSync Job will be triggered.
 	MachineConfigSyncStatusDrift = "drift"
+
+	// MachineConfigSyncStatusDecommissioned marks a per-node secret whose node no longer
+	// appears in the live Talos API roster. The secret is retained for audit (INV-006).
+	MachineConfigSyncStatusDecommissioned = "decommissioned"
 )
 
 // MachineConfigClass values for LabelMachineConfigClass.
