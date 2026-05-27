@@ -307,7 +307,7 @@ func (r *NodeOperationReconciler) reconcileDirectNodeOp(ctx context.Context, nop
 		nop.Generation,
 	)
 
-	jobName := operationalJobName(nop.Name, capability)
+	jobName := retryJobName(nop.Name, capability, nop.Status.RetryCount)
 
 	existingJob, err := getOperationalJob(ctx, r.Client, nop.Namespace, jobName)
 	if err != nil {
@@ -347,23 +347,45 @@ func (r *NodeOperationReconciler) reconcileDirectNodeOp(ctx context.Context, nop
 	// Job exists — check OperationResult ConfigMap.
 	complete, failed, result := readOperationRecord(ctx, r.Client, nop.Spec.ClusterRef.Name, jobName)
 	if failed {
+		nop.Status.RetryCount++
 		nop.Status.OperationResult = result
+		if nop.Status.RetryCount >= effectiveMaxRetry(nop.Spec.MaxRetry) {
+			msg := fmt.Sprintf("Conductor executor Job %s failed after %d attempts: %s. Human intervention required.", jobName, nop.Status.RetryCount, result)
+			platformv1alpha1.SetCondition(
+				&nop.Status.Conditions,
+				platformv1alpha1.ConditionTypeNodeOperationDegraded,
+				metav1.ConditionTrue,
+				platformv1alpha1.ReasonNodeOpPermanentFailure,
+				msg,
+				nop.Generation,
+			)
+			r.Recorder.Eventf(nop, nil, "Warning", "PermanentFailure", "PermanentFailure", "%s", msg)
+			clusterNS := nop.Spec.ClusterRef.Namespace
+			if clusterNS == "" {
+				clusterNS = nop.Namespace
+			}
+			_ = setTalosClusterHumanInterventionRequired(ctx, r.Client, nop.Spec.ClusterRef.Name, clusterNS,
+				fmt.Sprintf("NodeOperation %s/%s permanently failed after %d attempts.", nop.Namespace, nop.Name, nop.Status.RetryCount),
+				nop.Generation)
+			return ctrl.Result{}, nil
+		}
 		platformv1alpha1.SetCondition(
 			&nop.Status.Conditions,
 			platformv1alpha1.ConditionTypeNodeOperationDegraded,
 			metav1.ConditionTrue,
 			platformv1alpha1.ReasonNodeOpJobFailed,
-			fmt.Sprintf("Conductor executor Job %s failed: %s", jobName, result),
+			fmt.Sprintf("Conductor executor Job %s failed (attempt %d/%d): %s. Retrying.", jobName, nop.Status.RetryCount, effectiveMaxRetry(nop.Spec.MaxRetry), result),
 			nop.Generation,
 		)
 		r.Recorder.Eventf(nop, nil, "Warning", "JobFailed", "JobFailed",
-			"Conductor executor Job %s failed: %s", jobName, result)
-		return ctrl.Result{}, nil
+			"Conductor executor Job %s failed (attempt %d/%d): %s", jobName, nop.Status.RetryCount, effectiveMaxRetry(nop.Spec.MaxRetry), result)
+		return ctrl.Result{RequeueAfter: retryJobRetryInterval}, nil
 	}
 	if !complete {
 		return ctrl.Result{RequeueAfter: operationalJobPollInterval}, nil
 	}
 
+	nop.Status.RetryCount = 0
 	nop.Status.OperationResult = result
 	platformv1alpha1.SetCondition(
 		&nop.Status.Conditions,

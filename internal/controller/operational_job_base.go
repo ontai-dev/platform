@@ -24,6 +24,7 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
+	platformv1alpha1 "github.com/ontai-dev/platform/api/v1alpha1"
 	seamplatformv1alpha1 "github.com/ontai-dev/platform/api/seam/v1alpha1"
 )
 
@@ -384,6 +385,62 @@ func day2TTLExpired(completionTime time.Time) (expired bool, requeueAfter time.D
 		return true, 0
 	}
 	return false, remaining
+}
+
+// defaultMaxRetry is the number of Job re-submissions attempted before a day-2
+// operation is declared permanently failed and HumanInterventionRequired is set
+// on the owning TalosCluster. RECON-I3.
+const defaultMaxRetry = 3
+
+// retryJobRetryInterval is the requeue delay between a failed Job and the next retry.
+const retryJobRetryInterval = 10 * time.Second
+
+// retryJobName returns the deterministic Job name for the Nth attempt.
+// For attempt 0 (first submission) the name is identical to operationalJobName.
+// For attempts 1..N the suffix -r{N} is appended, allowing a fresh Job to be
+// submitted without waiting for the previous failed Job's TTL GC window.
+func retryJobName(crName, capability string, retryCount int) string {
+	if retryCount == 0 {
+		return fmt.Sprintf("%s-%s", crName, capability)
+	}
+	return fmt.Sprintf("%s-%s-r%d", crName, capability, retryCount)
+}
+
+// effectiveMaxRetry returns specMaxRetry when > 0, otherwise defaultMaxRetry.
+func effectiveMaxRetry(specMaxRetry int) int {
+	if specMaxRetry > 0 {
+		return specMaxRetry
+	}
+	return defaultMaxRetry
+}
+
+// setTalosClusterHumanInterventionRequired patches HumanInterventionRequired=True
+// on the named TalosCluster. Called by day-2 reconcilers when a Job permanently
+// fails after exhausting all retries. RECON-I3.
+func setTalosClusterHumanInterventionRequired(ctx context.Context, c client.Client, clusterName, namespace, message string, generation int64) error {
+	tc := &platformv1alpha1.TalosCluster{}
+	if err := c.Get(ctx, types.NamespacedName{Name: clusterName, Namespace: namespace}, tc); err != nil {
+		if apierrors.IsNotFound(err) {
+			return nil
+		}
+		return fmt.Errorf("setTalosClusterHumanInterventionRequired: get TalosCluster %s/%s: %w", namespace, clusterName, err)
+	}
+	patch := client.MergeFrom(tc.DeepCopy())
+	platformv1alpha1.SetCondition(
+		&tc.Status.Conditions,
+		seamplatformv1alpha1.ConditionTypeHumanInterventionRequired,
+		metav1.ConditionTrue,
+		seamplatformv1alpha1.ReasonHumanInterventionNeeded,
+		message,
+		generation,
+	)
+	if err := c.Status().Patch(ctx, tc, patch); err != nil {
+		if apierrors.IsNotFound(err) {
+			return nil
+		}
+		return fmt.Errorf("setTalosClusterHumanInterventionRequired: patch TalosCluster %s/%s: %w", namespace, clusterName, err)
+	}
+	return nil
 }
 
 // addKubeconfigMount adds the seam-mc-{clusterName}-kubeconfig Secret as a volume on

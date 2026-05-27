@@ -36,6 +36,10 @@ const (
 
 	// ReasonMachineConfigSyncPending is set before the first reconcile action.
 	ReasonMachineConfigSyncPending = "Pending"
+
+	// ReasonMachineConfigSyncPermanentFailure is set when the Job has failed
+	// maxRetry times. No further Jobs will be submitted. Human intervention required.
+	ReasonMachineConfigSyncPermanentFailure = "PermanentFailure"
 )
 
 // MachineConfigSyncSpec defines the desired state of MachineConfigSync.
@@ -48,6 +52,15 @@ type MachineConfigSyncSpec struct {
 	// Values: "controlplane", "worker", or "node-{node-name}".
 	// +kubebuilder:validation:MinLength=1
 	NodeClass string `json:"nodeClass"`
+
+	// MaxRetry is the maximum number of times the reconciler will re-submit the
+	// Conductor executor Job after a failure before declaring permanent failure
+	// and setting HumanInterventionRequired on the owning TalosCluster.
+	// Defaults to 3 when unset or zero.
+	// +optional
+	// +kubebuilder:default=3
+	// +kubebuilder:validation:Minimum=1
+	MaxRetry int `json:"maxRetry,omitempty"`
 
 	// ForceApply skips the hash-equality check and reapplies the machineconfig
 	// even if the node-side hash already matches. Use for repair scenarios.
@@ -74,6 +87,11 @@ type MachineConfigSyncStatus struct {
 	// JobName is the name of the Conductor executor Job submitted for this sync.
 	// +optional
 	JobName string `json:"jobName,omitempty"`
+
+	// RetryCount is the number of Job submission attempts that have failed so far.
+	// Reset to zero on successful Job completion.
+	// +optional
+	RetryCount int `json:"retryCount,omitempty"`
 
 	// ObservedHash is the SHA-256 hash of the machineconfig bytes that were applied.
 	// Copied from the machineconfig Secret's sync-hash label after Job completion.

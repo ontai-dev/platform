@@ -49,6 +49,10 @@ const (
 
 	// ReasonNodeOpPending is set before the first action.
 	ReasonNodeOpPending = "Pending"
+
+	// ReasonNodeOpPermanentFailure is set when the Job has failed maxRetry times.
+	// No further Jobs will be submitted. Human intervention required.
+	ReasonNodeOpPermanentFailure = "PermanentFailure"
 )
 
 // NodeOperationSpec defines the desired state of NodeOperation.
@@ -64,6 +68,15 @@ type NodeOperationSpec struct {
 	// Required when operation=decommission or operation=reboot.
 	// +optional
 	TargetNodes []string `json:"targetNodes,omitempty"`
+
+	// MaxRetry is the maximum number of times the reconciler will re-submit the
+	// Conductor executor Job after a failure before declaring permanent failure
+	// and setting HumanInterventionRequired on the owning TalosCluster.
+	// Defaults to 3 when unset or zero.
+	// +optional
+	// +kubebuilder:default=3
+	// +kubebuilder:validation:Minimum=1
+	MaxRetry int `json:"maxRetry,omitempty"`
 
 	// ReplicaCount is the desired number of worker replicas after scale-up.
 	// Required when operation=scale-up.
@@ -82,6 +95,11 @@ type NodeOperationStatus struct {
 	// ObservedGeneration is the generation of the spec last reconciled.
 	// +optional
 	ObservedGeneration int64 `json:"observedGeneration,omitempty"`
+
+	// RetryCount is the number of Job submission attempts that have failed so far.
+	// Reset to zero on successful Job completion.
+	// +optional
+	RetryCount int `json:"retryCount,omitempty"`
 
 	// JobName is the name of the Conductor executor Job submitted for this operation.
 	// Only set for the capi.enabled=false (non-CAPI) path.

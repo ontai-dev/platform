@@ -205,7 +205,7 @@ func (r *MachineConfigSyncReconciler) Reconcile(ctx context.Context, req ctrl.Re
 		mcs.Generation,
 	)
 
-	jobName := operationalJobName(mcs.Name, capabilityMachineConfigSync)
+	jobName := retryJobName(mcs.Name, capabilityMachineConfigSync, mcs.Status.RetryCount)
 
 	existingJob, err := getOperationalJob(ctx, r.Client, mcs.Namespace, jobName)
 	if err != nil {
@@ -247,15 +247,8 @@ func (r *MachineConfigSyncReconciler) Reconcile(ctx context.Context, req ctrl.Re
 	// Job exists -- poll OperationResult.
 	complete, failed, result := readOperationRecord(ctx, r.Client, clusterRef, jobName)
 	if failed {
+		mcs.Status.RetryCount++
 		mcs.Status.OperationResult = result
-		platformv1alpha1.SetCondition(
-			&mcs.Status.Conditions,
-			platformv1alpha1.ConditionTypeMachineConfigSyncDegraded,
-			metav1.ConditionTrue,
-			platformv1alpha1.ReasonMachineConfigSyncJobFailed,
-			fmt.Sprintf("Conductor executor Job %s failed: %s", jobName, result),
-			mcs.Generation,
-		)
 		platformv1alpha1.SetCondition(
 			&mcs.Status.Conditions,
 			platformv1alpha1.ConditionTypeMachineConfigSyncRunning,
@@ -264,15 +257,44 @@ func (r *MachineConfigSyncReconciler) Reconcile(ctx context.Context, req ctrl.Re
 			"Job failed.",
 			mcs.Generation,
 		)
+		if mcs.Status.RetryCount >= effectiveMaxRetry(mcs.Spec.MaxRetry) {
+			msg := fmt.Sprintf("Conductor executor Job %s failed after %d attempts: %s. Human intervention required.", jobName, mcs.Status.RetryCount, result)
+			platformv1alpha1.SetCondition(
+				&mcs.Status.Conditions,
+				platformv1alpha1.ConditionTypeMachineConfigSyncDegraded,
+				metav1.ConditionTrue,
+				platformv1alpha1.ReasonMachineConfigSyncPermanentFailure,
+				msg,
+				mcs.Generation,
+			)
+			r.Recorder.Eventf(mcs, nil, "Warning", "PermanentFailure", "PermanentFailure", "%s", msg)
+			clusterNS := mcs.Spec.ClusterRef.Namespace
+			if clusterNS == "" {
+				clusterNS = mcs.Namespace
+			}
+			_ = setTalosClusterHumanInterventionRequired(ctx, r.Client, clusterRef, clusterNS,
+				fmt.Sprintf("MachineConfigSync %s/%s permanently failed after %d attempts.", mcs.Namespace, mcs.Name, mcs.Status.RetryCount),
+				mcs.Generation)
+			return ctrl.Result{}, nil
+		}
+		platformv1alpha1.SetCondition(
+			&mcs.Status.Conditions,
+			platformv1alpha1.ConditionTypeMachineConfigSyncDegraded,
+			metav1.ConditionTrue,
+			platformv1alpha1.ReasonMachineConfigSyncJobFailed,
+			fmt.Sprintf("Conductor executor Job %s failed (attempt %d/%d): %s. Retrying.", jobName, mcs.Status.RetryCount, effectiveMaxRetry(mcs.Spec.MaxRetry), result),
+			mcs.Generation,
+		)
 		r.Recorder.Eventf(mcs, nil, "Warning", "JobFailed", "JobFailed",
-			"Conductor executor Job %s failed: %s", jobName, result)
-		return ctrl.Result{}, nil
+			"Conductor executor Job %s failed (attempt %d/%d): %s", jobName, mcs.Status.RetryCount, effectiveMaxRetry(mcs.Spec.MaxRetry), result)
+		return ctrl.Result{RequeueAfter: retryJobRetryInterval}, nil
 	}
 	if !complete {
 		return ctrl.Result{RequeueAfter: operationalJobPollInterval}, nil
 	}
 
 	// Job complete -- update Secret sync labels and MachineConfigSync status.
+	mcs.Status.RetryCount = 0
 	mcs.Status.OperationResult = result
 	mcs.Status.ObservedHash = contentHash
 	if err := r.updateSecretSyncLabels(ctx, mcSecret, contentHash); err != nil {

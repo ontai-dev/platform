@@ -63,6 +63,10 @@ const (
 
 	// ReasonUpgradeOperationPending is set before the first action.
 	ReasonUpgradeOperationPending = "Pending"
+
+	// ReasonUpgradePermanentFailure is set when the Job has failed maxRetry times.
+	// No further Jobs will be submitted. Human intervention required.
+	ReasonUpgradePermanentFailure = "PermanentFailure"
 )
 
 // UpgradePolicySpec defines the desired state of UpgradePolicy.
@@ -89,6 +93,15 @@ type UpgradePolicySpec struct {
 	// +optional
 	// +kubebuilder:default=sequential
 	RollingStrategy RollingStrategy `json:"rollingStrategy,omitempty"`
+
+	// MaxRetry is the maximum number of times the reconciler will re-submit the
+	// Conductor executor Job after a failure before declaring permanent failure
+	// and setting HumanInterventionRequired on the owning TalosCluster.
+	// Defaults to 3 when unset or zero.
+	// +optional
+	// +kubebuilder:default=3
+	// +kubebuilder:validation:Minimum=1
+	MaxRetry int `json:"maxRetry,omitempty"`
 
 	// HealthGateConditions is a list of Kubernetes condition types that must be
 	// True on each node before the upgrade proceeds to the next node. Used to
@@ -148,6 +161,11 @@ type UpgradePolicyStatus struct {
 	// ObservedGeneration is the generation of the spec last reconciled.
 	// +optional
 	ObservedGeneration int64 `json:"observedGeneration,omitempty"`
+
+	// RetryCount is the number of Job submission attempts that have failed so far.
+	// Reset to zero on successful Job completion.
+	// +optional
+	RetryCount int `json:"retryCount,omitempty"`
 
 	// JobName is the name of the Conductor executor Job submitted for this upgrade.
 	// Only set for the capi.enabled=false (non-CAPI) path.

@@ -47,6 +47,10 @@ const (
 	// ReasonEtcdOperationPending is set before the first Job submission.
 	ReasonEtcdOperationPending = "Pending"
 
+	// ReasonEtcdPermanentFailure is set when the Job has failed maxRetry times.
+	// No further Jobs will be submitted. Human intervention required.
+	ReasonEtcdPermanentFailure = "PermanentFailure"
+
 	// EtcdBackupDestinationAbsent indicates no S3 backup destination is configured.
 	// Set when operation=backup and neither spec.etcdBackupS3SecretRef nor the
 	// cluster-wide seam-etcd-backup-config Secret in seam-system is present.
@@ -116,6 +120,15 @@ type EtcdMaintenanceSpec struct {
 	// +optional
 	PVCFallbackEnabled bool `json:"pvcFallbackEnabled,omitempty"`
 
+	// MaxRetry is the maximum number of times the reconciler will re-submit the
+	// Conductor executor Job after a failure before declaring permanent failure
+	// and setting HumanInterventionRequired on the owning TalosCluster.
+	// Defaults to 3 when unset or zero.
+	// +optional
+	// +kubebuilder:default=3
+	// +kubebuilder:validation:Minimum=1
+	MaxRetry int `json:"maxRetry,omitempty"`
+
 	// Schedule is a cron expression for recurring backup operations.
 	// When set with operation=backup, a recurring Job is submitted on schedule.
 	// +optional
@@ -133,6 +146,11 @@ type EtcdMaintenanceStatus struct {
 	// ObservedGeneration is the generation of the spec last reconciled.
 	// +optional
 	ObservedGeneration int64 `json:"observedGeneration,omitempty"`
+
+	// RetryCount is the number of Job submission attempts that have failed so far.
+	// Reset to zero on successful Job completion.
+	// +optional
+	RetryCount int `json:"retryCount,omitempty"`
 
 	// JobName is the name of the most recently submitted Conductor executor Job.
 	// +optional
