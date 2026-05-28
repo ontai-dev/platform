@@ -1049,7 +1049,7 @@ func TestClusterMaintenanceReconcile_NoBlockOutsideWindows(t *testing.T) {
 
 // TestClusterMaintenanceReconcile_BlockOutsideWindowsNoWindow verifies that when
 // blockOutsideWindows=true and no maintenance window is active, the reconciler
-// sets Paused=True/ConductorJobGateBlocked on the non-CAPI path.
+// sets Paused=True/ConductorJobGateBlocked.
 func TestClusterMaintenanceReconcile_BlockOutsideWindowsNoWindow(t *testing.T) {
 	scheme := buildDay2Scheme(t)
 	cm := &platformv1alpha1.ClusterMaintenance{
@@ -1092,8 +1092,7 @@ func TestClusterMaintenanceReconcile_BlockOutsideWindowsNoWindow(t *testing.T) {
 
 // --- UpgradePolicy tests ---
 
-// TestUpgradePolicyReconcile_DirectPath verifies that for a non-CAPI cluster,
-// a talos-upgrade Conductor executor Job is submitted directly.
+// TestUpgradePolicyReconcile_DirectPath verifies that a talos-upgrade Conductor executor Job is submitted.
 func TestUpgradePolicyReconcile_DirectPath(t *testing.T) {
 	scheme := buildDay2Scheme(t)
 	up := &platformv1alpha1.UpgradePolicy{
@@ -1186,7 +1185,7 @@ func TestUpgradePolicyReconcile_StackUpgradeSingleJob(t *testing.T) {
 }
 
 // TestUpgradePolicyReconcile_KubeUpgradeJob verifies that a kube-upgrade type
-// UpgradePolicy on a non-CAPI cluster submits a single kube-upgrade Job.
+// UpgradePolicy submits a single kube-upgrade Job.
 func TestUpgradePolicyReconcile_KubeUpgradeJob(t *testing.T) {
 	scheme := buildDay2Scheme(t)
 	up := &platformv1alpha1.UpgradePolicy{
@@ -1225,58 +1224,6 @@ func TestUpgradePolicyReconcile_KubeUpgradeJob(t *testing.T) {
 	if len(jobList.Items) > 0 && jobList.Items[0].Labels["platform.ontai.dev/capability"] != "kube-upgrade" {
 		t.Errorf("Job capability label = %q, want kube-upgrade",
 			jobList.Items[0].Labels["platform.ontai.dev/capability"])
-	}
-}
-
-// TestUpgradePolicyReconcile_CAPIPath verifies that when the owning TalosCluster
-// has capi.enabled=true, the reconciler sets CAPIDelegated=True instead of
-// submitting a Job.
-func TestUpgradePolicyReconcile_CAPIPath(t *testing.T) {
-	scheme := buildDay2Scheme(t)
-	tc := &platformv1alpha1.TalosCluster{
-		ObjectMeta: metav1.ObjectMeta{Name: "ccs-target", Namespace: "ont-system"},
-		Spec: platformv1alpha1.TalosClusterSpec{
-			CAPI: &platformv1alpha1.CAPIConfig{Enabled: true},
-		},
-	}
-	up := &platformv1alpha1.UpgradePolicy{
-		ObjectMeta: metav1.ObjectMeta{Name: "capi-up-1", Namespace: "ont-system", Generation: 1},
-		Spec: platformv1alpha1.UpgradePolicySpec{
-			ClusterRef:      platformv1alpha1.LocalObjectRef{Name: "ccs-target"},
-			UpgradeType:     platformv1alpha1.UpgradeTypeTalos,
-			RollingStrategy: platformv1alpha1.RollingStrategySequential,
-		},
-	}
-	c := fake.NewClientBuilder().WithScheme(scheme).WithObjects(tc, up).WithStatusSubresource(up).Build()
-	r := &controller.UpgradePolicyReconciler{Client: c, Scheme: scheme, Recorder: fakeRecorder()}
-
-	result, err := r.Reconcile(context.Background(), ctrl.Request{
-		NamespacedName: types.NamespacedName{Name: "capi-up-1", Namespace: "ont-system"},
-	})
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	if result.RequeueAfter != 0 {
-		t.Errorf("CAPI path should not requeue, got %v", result.RequeueAfter)
-	}
-
-	jobList := &batchv1.JobList{}
-	if err := c.List(context.Background(), jobList); err != nil {
-		t.Fatalf("list Jobs: %v", err)
-	}
-	if len(jobList.Items) != 0 {
-		t.Errorf("expected 0 Jobs on CAPI path, got %d", len(jobList.Items))
-	}
-
-	got := &platformv1alpha1.UpgradePolicy{}
-	if err := c.Get(context.Background(), types.NamespacedName{
-		Name: "capi-up-1", Namespace: "ont-system",
-	}, got); err != nil {
-		t.Fatalf("get: %v", err)
-	}
-	cond := platformv1alpha1.FindCondition(got.Status.Conditions, platformv1alpha1.ConditionTypeUpgradePolicyCAPIDelegated)
-	if cond == nil || cond.Status != metav1.ConditionTrue {
-		t.Error("expected CAPIDelegated=True on CAPI upgrade path")
 	}
 }
 
@@ -1330,8 +1277,7 @@ func TestUpgradePolicyReconcile_Failed(t *testing.T) {
 
 // --- NodeOperation tests ---
 
-// TestNodeOperationReconcile_DirectScaleUp verifies that for a non-CAPI cluster,
-// a node-scale-up Conductor executor Job is submitted.
+// TestNodeOperationReconcile_DirectScaleUp verifies that a node-scale-up Conductor executor Job is submitted.
 func TestNodeOperationReconcile_DirectScaleUp(t *testing.T) {
 	scheme := buildDay2Scheme(t)
 	nop := &platformv1alpha1.NodeOperation{

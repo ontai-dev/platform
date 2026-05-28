@@ -36,18 +36,6 @@ type TalosClusterOrigin = seamv1alpha1.TalosClusterOrigin
 type InfrastructureProvider = seamv1alpha1.InfrastructureProvider
 
 // +kubebuilder:object:generate=false
-type CAPIConfig = seamv1alpha1.CAPIConfig
-
-// +kubebuilder:object:generate=false
-type CAPIControlPlaneConfig = seamv1alpha1.CAPIControlPlaneConfig
-
-// +kubebuilder:object:generate=false
-type CAPIWorkerPool = seamv1alpha1.CAPIWorkerPool
-
-// +kubebuilder:object:generate=false
-type CAPICiliumPackRef = seamv1alpha1.CAPICiliumPackRef
-
-// +kubebuilder:object:generate=false
 type LocalObjectRef = seamv1alpha1.LocalObjectRef
 
 // +kubebuilder:object:generate=false
@@ -90,7 +78,6 @@ const (
 // InfrastructureProvider constants.
 const (
 	InfrastructureProviderNative = seamv1alpha1.InfrastructureProviderNative
-	InfrastructureProviderCAPI   = seamv1alpha1.InfrastructureProviderCAPI
 	InfrastructureProviderScreen = seamv1alpha1.InfrastructureProviderScreen
 )
 
@@ -126,8 +113,6 @@ const (
 	ReasonBootstrapJobSubmitted      = conditions.ReasonBootstrapJobSubmitted
 	ReasonBootstrapJobComplete       = conditions.ReasonBootstrapJobComplete
 	ReasonBootstrapJobFailed         = conditions.ReasonBootstrapJobFailed
-	ReasonCAPIObjectsCreated         = conditions.ReasonCAPIObjectsCreated
-	ReasonCAPIClusterRunning         = conditions.ReasonCAPIClusterRunning
 	ReasonCiliumPackPending          = conditions.ReasonCiliumPackPending
 	ReasonCiliumPackReady            = conditions.ReasonCiliumPackReady
 	ReasonClusterReady               = conditions.ReasonClusterReady

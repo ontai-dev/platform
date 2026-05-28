@@ -56,9 +56,6 @@ func TestTalosClusterReconcile_ScreenProviderNotImplemented(t *testing.T) {
 		Spec: platformv1alpha1.TalosClusterSpec{
 			Mode:                   platformv1alpha1.TalosClusterModeBootstrap,
 			InfrastructureProvider: platformv1alpha1.InfrastructureProviderScreen,
-			CAPI: &platformv1alpha1.CAPIConfig{
-				Enabled: true,
-			},
 		},
 	}
 

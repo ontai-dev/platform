@@ -105,15 +105,12 @@ const (
 )
 
 // InfrastructureProvider declares the infrastructure provider backing a TalosCluster.
-// +kubebuilder:validation:Enum=native;capi;screen
+// +kubebuilder:validation:Enum=native;screen
 type InfrastructureProvider string
 
 const (
 	// InfrastructureProviderNative is the default provider.
 	InfrastructureProviderNative InfrastructureProvider = "native"
-
-	// InfrastructureProviderCAPI is an explicit alias for the CAPI-backed path.
-	InfrastructureProviderCAPI InfrastructureProvider = "capi"
 
 	// InfrastructureProviderScreen is reserved for the future Screen operator (INV-021).
 	InfrastructureProviderScreen InfrastructureProvider = "screen"
@@ -127,65 +124,6 @@ type LocalObjectRef struct {
 	// Namespace is the object namespace. May be empty for cluster-scoped objects.
 	// +optional
 	Namespace string `json:"namespace,omitempty"`
-}
-
-// CAPICiliumPackRef is a reference to the cluster-specific Cilium PackDelivery.
-// platform-schema.md §2.3.
-type CAPICiliumPackRef struct {
-	// Name is the PackDelivery CR name for the Cilium pack.
-	Name string `json:"name"`
-
-	// Version is the PackDelivery version string.
-	Version string `json:"version"`
-}
-
-// CAPIWorkerPool declares a worker node pool for a CAPI-managed target cluster.
-type CAPIWorkerPool struct {
-	// Name is the pool identifier. Used as the MachineDeployment name suffix.
-	Name string `json:"name"`
-
-	// Replicas is the desired number of worker nodes in this pool.
-	// +optional
-	Replicas int32 `json:"replicas,omitempty"`
-
-	// SeamInfrastructureMachineNames lists the SeamInfrastructureMachine CR names
-	// pre-provisioned for this pool. One per node.
-	// +optional
-	SeamInfrastructureMachineNames []string `json:"seamInfrastructureMachineNames,omitempty"`
-}
-
-// CAPIControlPlaneConfig declares the control plane configuration for a CAPI target cluster.
-type CAPIControlPlaneConfig struct {
-	// Replicas is the desired number of control plane nodes.
-	// +optional
-	Replicas int32 `json:"replicas,omitempty"`
-}
-
-// CAPIConfig holds CAPI integration settings for a target cluster.
-// Only consulted when capi.enabled=true. platform-schema.md §5.
-type CAPIConfig struct {
-	// Enabled determines whether this TalosCluster uses the CAPI path.
-	Enabled bool `json:"enabled"`
-
-	// TalosVersion is the Talos version to use for TalosConfigTemplate generation.
-	// +optional
-	TalosVersion string `json:"talosVersion,omitempty"`
-
-	// KubernetesVersion is the Kubernetes version for TalosControlPlane.
-	// +optional
-	KubernetesVersion string `json:"kubernetesVersion,omitempty"`
-
-	// ControlPlane holds control plane configuration. Required when Enabled=true.
-	// +optional
-	ControlPlane *CAPIControlPlaneConfig `json:"controlPlane,omitempty"`
-
-	// Workers is the list of worker node pools.
-	// +optional
-	Workers []CAPIWorkerPool `json:"workers,omitempty"`
-
-	// CiliumPackRef references the cluster-specific Cilium PackDelivery.
-	// +optional
-	CiliumPackRef *CAPICiliumPackRef `json:"ciliumPackRef,omitempty"`
 }
 
 // TalosClusterSpec is the declared desired state of a TalosCluster.
@@ -230,10 +168,6 @@ type TalosClusterSpec struct {
 	// compiler; updated on node enrollment changes. RECON-A9.
 	// +optional
 	NodeAddresses []NodeAddress `json:"nodeAddresses,omitempty"`
-
-	// CAPI holds CAPI integration settings. When absent, direct bootstrap is used.
-	// +optional
-	CAPI *CAPIConfig `json:"capi,omitempty"`
 
 	// InfrastructureProvider declares the infrastructure provider backing this cluster.
 	// +kubebuilder:validation:Enum=native;capi;screen
@@ -304,11 +238,6 @@ type TalosClusterStatus struct {
 	// ObservedTalosVersion is the Talos version last confirmed running.
 	// +optional
 	ObservedTalosVersion string `json:"observedTalosVersion,omitempty"`
-
-	// CAPIClusterRef is a reference to the owned CAPI Cluster object.
-	// Only set for CAPI-managed clusters (capi.enabled=true).
-	// +optional
-	CAPIClusterRef *LocalObjectRef `json:"capiClusterRef,omitempty"`
 
 	// Conditions is the list of status conditions for this TalosCluster.
 	// +optional

@@ -34,10 +34,6 @@ const (
 	// ConditionTypeNodeOperationDegraded indicates the operation failed.
 	ConditionTypeNodeOperationDegraded = "Degraded"
 
-	// ConditionTypeNodeOperationCAPIDelegated indicates the operation has been
-	// delegated to CAPI native machinery (capi.enabled=true path).
-	ConditionTypeNodeOperationCAPIDelegated = "CAPIDelegated"
-
 	// ReasonNodeOpJobSubmitted is set when the Conductor executor Job has been submitted.
 	ReasonNodeOpJobSubmitted = "JobSubmitted"
 
@@ -46,10 +42,6 @@ const (
 
 	// ReasonNodeOpJobFailed is set when the Conductor executor Job failed. INV-018 applies.
 	ReasonNodeOpJobFailed = "JobFailed"
-
-	// ReasonNodeOpCAPIDelegated is set when the operation is delegated to CAPI
-	// for capi.enabled=true clusters.
-	ReasonNodeOpCAPIDelegated = "CAPIDelegated"
 
 	// ReasonNodeOpPending is set before the first action.
 	ReasonNodeOpPending = "Pending"
@@ -123,7 +115,6 @@ type NodeOperationStatus struct {
 	RetryCount int `json:"retryCount,omitempty"`
 
 	// JobName is the name of the Conductor executor Job submitted for this operation.
-	// Only set for the capi.enabled=false (non-CAPI) path.
 	// +optional
 	JobName string `json:"jobName,omitempty"`
 
@@ -132,7 +123,7 @@ type NodeOperationStatus struct {
 	OperationResult string `json:"operationResult,omitempty"`
 
 	// Conditions is the list of status conditions for this NodeOperation.
-	// Condition types: Ready, Degraded, CAPIDelegated, LineageSynced.
+	// Condition types: Ready, Degraded, LineageSynced.
 	// +optional
 	// +listType=map
 	// +listMapKey=type
@@ -140,16 +131,10 @@ type NodeOperationStatus struct {
 }
 
 // NodeOperation governs node lifecycle operations: scale-up, decommission, reboot.
+// Submits a node-scale-up, node-decommission, or node-reboot Conductor executor Job.
 //
-// Dual-path CRD governed by spec.capi.enabled on the owning TalosCluster:
-//   - For CAPI-managed clusters (capi.enabled=true): modifies MachineDeployment
-//     replicas for scale-up, deletes specific Machine objects for decommission,
-//     or sets the Machine reboot annotation — all handled natively by CAPI.
-//   - For management cluster (capi.enabled=false): submits node-scale-up,
-//     node-decommission, or node-reboot Conductor executor Job.
-//
-// Named Conductor capabilities (non-CAPI path): node-scale-up, node-decommission,
-// node-reboot. platform-schema.md §5.
+// Named Conductor capabilities: node-scale-up, node-decommission, node-reboot.
+// platform-schema.md §5.
 //
 // +kubebuilder:object:root=true
 // +kubebuilder:subresource:status

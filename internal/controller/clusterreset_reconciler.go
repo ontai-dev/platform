@@ -1,23 +1,12 @@
 package controller
 
 // ClusterResetReconciler reconciles ClusterReset CRs. It enforces the INV-007
-// human approval gate, then for CAPI-managed clusters deletes the CAPI Cluster
-// object and waits for all Machine objects to reach Deleted phase, then submits
-// a single batch/v1 Conductor executor Job for the cluster-reset capability.
+// human approval gate, then submits a cluster-reset Conductor executor Job.
 //
 // HUMAN GATE — CP-INV-006, INV-007:
 // The ontai.dev/reset-approved=true annotation must be present before any
 // reconciliation beyond setting PendingApproval proceeds.
 //
-// For CAPI-managed clusters (capi.enabled=true):
-//  1. Verify approval annotation.
-//  2. Delete CAPI Cluster object in tenant namespace.
-//  3. Wait for all CAPI Machine objects to reach Deleted phase.
-//  4. Gate on cluster RunnerConfig capability availability.
-//  5. Submit cluster-reset Conductor executor Job.
-//  6. Wait for OperationResult ConfigMap.
-//
-// For management cluster (capi.enabled=false):
 //  1. Verify approval annotation.
 //  2. Gate on cluster RunnerConfig capability availability.
 //  3. Submit cluster-reset Conductor executor Job.
@@ -32,10 +21,7 @@ import (
 
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime"
-	"k8s.io/apimachinery/pkg/runtime/schema"
-	"k8s.io/apimachinery/pkg/types"
 	clientevents "k8s.io/client-go/tools/events"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -136,91 +122,6 @@ func (r *ClusterResetReconciler) Reconcile(ctx context.Context, req ctrl.Request
 		crst.Generation,
 	)
 
-	capiEnabled, err := r.isCAPIEnabled(ctx, crst)
-	if err != nil {
-		return ctrl.Result{}, fmt.Errorf("ClusterResetReconciler: read TalosCluster: %w", err)
-	}
-
-	if capiEnabled {
-		return r.reconcileCAPIReset(ctx, crst)
-	}
-	return r.reconcileDirectReset(ctx, crst)
-}
-
-// reconcileCAPIReset handles the CAPI-managed cluster reset sequence:
-// delete CAPI Cluster → wait for all Machines deleted → submit reset Job.
-func (r *ClusterResetReconciler) reconcileCAPIReset(ctx context.Context, crst *platformv1alpha1.ClusterReset) (ctrl.Result, error) {
-	logger := log.FromContext(ctx)
-	tenantNS := "seam-tenant-" + crst.Spec.ClusterRef.Name
-
-	// Step 1 — Delete the CAPI Cluster object if it still exists.
-	capiCluster := &unstructured.Unstructured{}
-	capiCluster.SetGroupVersionKind(schema.GroupVersionKind{
-		Group:   "cluster.x-k8s.io",
-		Version: "v1beta1",
-		Kind:    "Cluster",
-	})
-	err := r.Client.Get(ctx, types.NamespacedName{
-		Name:      crst.Spec.ClusterRef.Name,
-		Namespace: tenantNS,
-	}, capiCluster)
-	if err != nil && !apierrors.IsNotFound(err) {
-		return ctrl.Result{}, fmt.Errorf("reconcileCAPIReset: get CAPI Cluster: %w", err)
-	}
-
-	if err == nil {
-		if capiCluster.GetDeletionTimestamp() == nil {
-			if err := r.Client.Delete(ctx, capiCluster); err != nil && !apierrors.IsNotFound(err) {
-				return ctrl.Result{}, fmt.Errorf("reconcileCAPIReset: delete CAPI Cluster: %w", err)
-			}
-			platformv1alpha1.SetCondition(
-				&crst.Status.Conditions,
-				platformv1alpha1.ConditionTypeResetPendingApproval,
-				metav1.ConditionFalse,
-				platformv1alpha1.ReasonCAPIClusterDeleting,
-				"CAPI Cluster deletion initiated. Waiting for Machine objects to reach Deleted phase.",
-				crst.Generation,
-			)
-			r.Recorder.Eventf(crst, nil, "Normal", "CAPIClusterDeleting", "CAPIClusterDeleting",
-				"Deleted CAPI Cluster %s/%s — waiting for machines to drain",
-				tenantNS, crst.Spec.ClusterRef.Name)
-		}
-		logger.Info("CAPI Cluster still terminating — requeuing",
-			"name", crst.Name, "clusterName", crst.Spec.ClusterRef.Name)
-		return ctrl.Result{RequeueAfter: operationalJobPollInterval}, nil
-	}
-
-	// Step 2 — CAPI Cluster deleted. Verify all Machine objects are gone.
-	machineList := &unstructured.UnstructuredList{}
-	machineList.SetGroupVersionKind(schema.GroupVersionKind{
-		Group:   "cluster.x-k8s.io",
-		Version: "v1beta1",
-		Kind:    "MachineList",
-	})
-	if err := r.Client.List(ctx, machineList, client.InNamespace(tenantNS)); err != nil {
-		if !apierrors.IsNotFound(err) {
-			return ctrl.Result{}, fmt.Errorf("reconcileCAPIReset: list Machines: %w", err)
-		}
-	}
-	if len(machineList.Items) > 0 {
-		logger.Info("waiting for Machine objects to be deleted",
-			"name", crst.Name, "remaining", len(machineList.Items))
-		return ctrl.Result{RequeueAfter: operationalJobPollInterval}, nil
-	}
-
-	platformv1alpha1.SetCondition(
-		&crst.Status.Conditions,
-		platformv1alpha1.ConditionTypeResetPendingApproval,
-		metav1.ConditionFalse,
-		platformv1alpha1.ReasonCAPIClusterDrained,
-		"All CAPI Machine objects deleted. Submitting cluster-reset Job.",
-		crst.Generation,
-	)
-	return r.submitAndWatchResetJob(ctx, crst, tenantNS)
-}
-
-// reconcileDirectReset handles the management cluster (capi.enabled=false) reset.
-func (r *ClusterResetReconciler) reconcileDirectReset(ctx context.Context, crst *platformv1alpha1.ClusterReset) (ctrl.Result, error) {
 	return r.submitAndWatchResetJob(ctx, crst, crst.Namespace)
 }
 
@@ -336,25 +237,6 @@ func (r *ClusterResetReconciler) submitAndWatchResetJob(ctx context.Context, crs
 	logger.Info("ClusterReset complete",
 		"name", crst.Name, "cluster", crst.Spec.ClusterRef.Name)
 	return ctrl.Result{}, nil
-}
-
-// isCAPIEnabled reads the owning TalosCluster's capi.enabled field.
-func (r *ClusterResetReconciler) isCAPIEnabled(ctx context.Context, crst *platformv1alpha1.ClusterReset) (bool, error) {
-	tc := &platformv1alpha1.TalosCluster{}
-	ns := crst.Spec.ClusterRef.Namespace
-	if ns == "" {
-		ns = crst.Namespace
-	}
-	if err := r.Client.Get(ctx, types.NamespacedName{
-		Name:      crst.Spec.ClusterRef.Name,
-		Namespace: ns,
-	}, tc); err != nil {
-		if apierrors.IsNotFound(err) {
-			return false, nil
-		}
-		return false, fmt.Errorf("get TalosCluster %s/%s: %w", ns, crst.Spec.ClusterRef.Name, err)
-	}
-	return tc.Spec.CAPI != nil && tc.Spec.CAPI.Enabled, nil
 }
 
 // SetupWithManager registers ClusterResetReconciler with the manager.

@@ -21,7 +21,6 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/predicate"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
-	infrav1alpha1 "github.com/ontai-dev/platform/api/infrastructure/v1alpha1"
 	platformv1alpha1 "github.com/ontai-dev/platform/api/v1alpha1"
 )
 
@@ -232,24 +231,17 @@ func (r *TalosClusterReconciler) Reconcile(ctx context.Context, req ctrl.Request
 	prevReadyCond := platformv1alpha1.FindCondition(tc.Status.Conditions, platformv1alpha1.ConditionTypeReady)
 	wasAlreadyReady := prevReadyCond != nil && prevReadyCond.Status == metav1.ConditionTrue
 
-	// Step E — Route to the appropriate reconciliation path.
-	var routeResult ctrl.Result
-	var routeErr error
-	if tc.Spec.CAPI == nil || !tc.Spec.CAPI.Enabled {
-		routeResult, routeErr = r.reconcileDirectBootstrap(ctx, tc)
-	} else {
-		routeResult, routeErr = r.reconcileCAPIPath(ctx, tc)
-	}
+	// Step E — Reconcile via direct bootstrap path.
+	routeResult, routeErr := r.reconcileDirectBootstrap(ctx, tc)
 	if routeErr != nil {
 		return routeResult, routeErr
 	}
 
-	// Step G -- Bootstrap hardening (ONT-native path only). When hardeningProfileRef is
-	// set and the cluster is currently Ready, ensure the bootstrap NodeMaintenance exists
-	// in seam-tenant-{cluster} and set HardeningApplied once it reaches Ready=True.
+	// Step G -- Bootstrap hardening. When hardeningProfileRef is set and the cluster is
+	// currently Ready, ensure the bootstrap NodeMaintenance exists in seam-tenant-{cluster}
+	// and set HardeningApplied once it reaches Ready=True.
 	// Idempotent: the label check prevents duplicate NodeMaintenance creation.
-	// CAPI path: HardeningApplied is set in reconcileCAPIPath (patches baked in at boot).
-	if tc.Spec.HardeningProfileRef != nil && (tc.Spec.CAPI == nil || !tc.Spec.CAPI.Enabled) {
+	if tc.Spec.HardeningProfileRef != nil {
 		currentReady := platformv1alpha1.FindCondition(tc.Status.Conditions, platformv1alpha1.ConditionTypeReady)
 		if currentReady != nil && currentReady.Status == metav1.ConditionTrue {
 			hardenResult, hardenErr := r.ensureBootstrapHardening(ctx, tc)
@@ -569,167 +561,6 @@ func (r *TalosClusterReconciler) reconcileDirectBootstrap(ctx context.Context, t
 	return ctrl.Result{}, nil
 }
 
-// reconcileCAPIPath handles the target cluster CAPI lifecycle path
-// (spec.capi.enabled=true). Creates and owns all CAPI objects. Watches CAPI
-// Cluster status and triggers Cilium deployment when cluster reaches Running.
-// platform-design.md §2.1, §4.
-func (r *TalosClusterReconciler) reconcileCAPIPath(ctx context.Context, tc *platformv1alpha1.TalosCluster) (ctrl.Result, error) {
-	logger := log.FromContext(ctx)
-	logger.Info("reconciling TalosCluster via CAPI path",
-		"name", tc.Name, "namespace", tc.Namespace)
-
-	// Step 1 — Ensure the tenant namespace exists.
-	// Platform is the sole namespace creation authority. CP-INV-004.
-	if err := r.ensureTenantNamespace(ctx, tc); err != nil {
-		return ctrl.Result{}, fmt.Errorf("reconcileCAPIPath: ensure tenant namespace: %w", err)
-	}
-
-	// Step 2 — Ensure SeamInfrastructureCluster exists.
-	// Owned by TalosCluster via ownerReference. CP-INV-008.
-	if err := r.ensureSeamInfrastructureCluster(ctx, tc); err != nil {
-		return ctrl.Result{}, fmt.Errorf("reconcileCAPIPath: ensure SeamInfrastructureCluster: %w", err)
-	}
-
-	// Step 3 — Ensure CAPI Cluster object exists.
-	if err := r.ensureCAPICluster(ctx, tc); err != nil {
-		return ctrl.Result{}, fmt.Errorf("reconcileCAPIPath: ensure CAPI Cluster: %w", err)
-	}
-
-	// Step 4 — Ensure TalosConfigTemplate exists (with CNI=none + Cilium BPF params,
-	// plus HardeningProfile patches when hardeningProfileRef is set). CP-INV-009.
-	if err := r.ensureTalosConfigTemplate(ctx, tc); err != nil {
-		return ctrl.Result{}, fmt.Errorf("reconcileCAPIPath: ensure TalosConfigTemplate: %w", err)
-	}
-	// Patches are baked into the template at creation time. Mark HardeningApplied when
-	// the profile is referenced (the template may already exist from a previous pass).
-	if tc.Spec.HardeningProfileRef != nil {
-		platformv1alpha1.SetCondition(
-			&tc.Status.Conditions,
-			platformv1alpha1.ConditionTypeHardeningApplied,
-			metav1.ConditionTrue,
-			platformv1alpha1.ReasonHardeningApplied,
-			"HardeningProfile patches merged into TalosConfigTemplate at provisioning time.",
-			tc.Generation,
-		)
-	}
-
-	// Step 5 — Ensure TalosControlPlane exists.
-	if err := r.ensureTalosControlPlane(ctx, tc); err != nil {
-		return ctrl.Result{}, fmt.Errorf("reconcileCAPIPath: ensure TalosControlPlane: %w", err)
-	}
-
-	// Step 6 — Ensure MachineDeployments and SeamInfrastructureMachineTemplates exist.
-	for _, pool := range tc.Spec.CAPI.Workers {
-		if err := r.ensureWorkerPool(ctx, tc, pool); err != nil {
-			return ctrl.Result{}, fmt.Errorf("reconcileCAPIPath: ensure worker pool %q: %w",
-				pool.Name, err)
-		}
-	}
-
-	// Record CAPI objects created.
-	platformv1alpha1.SetCondition(
-		&tc.Status.Conditions,
-		platformv1alpha1.ConditionTypeBootstrapped,
-		metav1.ConditionFalse,
-		platformv1alpha1.ReasonCAPIObjectsCreated,
-		"CAPI objects created. Waiting for CAPI Cluster to reach Running state.",
-		tc.Generation,
-	)
-
-	// Step 6.5 — Check for port-50000 unreachability on SeamInfrastructureMachine nodes.
-	// Control plane failures after machineApplyAttemptsHaltThreshold halt this reconcile.
-	// Worker failures are noted as PartialWorkerAvailability but do not block.
-	halt, err := r.checkMachineReachability(ctx, tc)
-	if err != nil {
-		return ctrl.Result{}, fmt.Errorf("reconcileCAPIPath: check machine reachability: %w", err)
-	}
-	if halt {
-		return ctrl.Result{RequeueAfter: capiPollInterval}, nil
-	}
-
-	// Step 7 — Read CAPI Cluster status.phase.
-	capiPhase, err := r.getCAPIClusterPhase(ctx, tc)
-	if err != nil {
-		// CAPI Cluster not yet visible — requeue.
-		return ctrl.Result{RequeueAfter: capiPollInterval}, nil
-	}
-
-	if capiPhase != "Running" {
-		// CAPI cluster not yet Running — poll.
-		logger.Info("CAPI Cluster not yet Running",
-			"name", tc.Name, "capiPhase", capiPhase)
-		return ctrl.Result{RequeueAfter: capiPollInterval}, nil
-	}
-
-	// Step 8 — CAPI cluster Running. Set CiliumPending condition.
-	// CP-INV-013: CiliumPending is not a degraded state.
-	platformv1alpha1.SetCondition(
-		&tc.Status.Conditions,
-		platformv1alpha1.ConditionTypeCiliumPending,
-		metav1.ConditionTrue,
-		platformv1alpha1.ReasonCiliumPackPending,
-		"CAPI Cluster Running. Waiting for Cilium ClusterPack PackInstance to reach Ready.",
-		tc.Generation,
-	)
-	platformv1alpha1.SetCondition(
-		&tc.Status.Conditions,
-		platformv1alpha1.ConditionTypeBootstrapped,
-		metav1.ConditionTrue,
-		platformv1alpha1.ReasonCAPIClusterRunning,
-		"CAPI Cluster reached Running state.",
-		tc.Generation,
-	)
-
-	// Record the CAPI cluster reference.
-	tc.Status.CAPIClusterRef = &platformv1alpha1.LocalObjectRef{
-		Name:      tc.Name,
-		Namespace: tc.Namespace,
-	}
-
-	// CAPI-bootstrapped cluster: origin is bootstrapped.
-	tc.Status.Origin = platformv1alpha1.TalosClusterOriginBootstrapped
-
-	// Step 8.5 — Normalize CAPI-generated secrets to canonical platform names and
-	// register the cluster for RBAC and pack delivery. These three steps run once
-	// after CAPI Running is confirmed and are idempotent on subsequent passes.
-	// TALM writes {cluster}-talosconfig; translate to seam-mc-{cluster}-talosconfig
-	// so ensureExecutorTalosconfig finds the source when distributing to day-2 Jobs.
-	if err := r.ensureCAPITalosconfig(ctx, tc); err != nil {
-		return ctrl.Result{}, fmt.Errorf("reconcileCAPIPath: ensure CAPI talosconfig: %w", err)
-	}
-	// CAPI writes {cluster}-kubeconfig; translate to seam-mc-{cluster}-kubeconfig
-	// so EnsureRemoteConductorBootstrap and all conductor-execute Jobs read one name.
-	if err := r.ensureCAPIKubeconfig(ctx, tc); err != nil {
-		return ctrl.Result{}, fmt.Errorf("reconcileCAPIPath: ensure CAPI kubeconfig: %w", err)
-	}
-	// Register in RBACPolicy/RBACProfiles, create LocalQueue, platform-executor and
-	// wrapper-runner SA/Role/RoleBinding, distribute talosconfig to day-2 namespaces.
-	if err := r.ensureTenantOnboarding(ctx, tc); err != nil {
-		return ctrl.Result{}, fmt.Errorf("reconcileCAPIPath: tenant onboarding: %w", err)
-	}
-
-	// Step 9 — Check Cilium PackInstance Ready status.
-	if tc.Spec.CAPI.CiliumPackRef == nil {
-		// No Cilium pack configured — skip Cilium gate (development mode).
-		logger.Info("no CiliumPackRef configured — skipping Cilium gate (development mode)",
-			"name", tc.Name)
-		return r.ensureConductorReadyAndTransition(ctx, tc)
-	}
-
-	ciliumReady, err := r.isCiliumPackInstanceReady(ctx, tc)
-	if err != nil {
-		return ctrl.Result{RequeueAfter: capiPollInterval}, nil
-	}
-	if !ciliumReady {
-		return ctrl.Result{RequeueAfter: capiPollInterval}, nil
-	}
-
-	// Step 10 — Cilium Ready. Ensure Conductor Deployment Available, then mark Ready.
-	// The ConductorReady condition is the final gate before Ready=True. Gap 27.
-	// platform-schema.md §12 Conductor Deployment Contract.
-	return r.ensureConductorReadyAndTransition(ctx, tc)
-}
-
 // ensureConductorReadyAndTransition ensures the Conductor Deployment exists on the
 // target cluster and has reached Available=True. If Available, sets ConductorReady=True
 // and calls transitionToReady. If not yet Available, sets ConductorReady=False and
@@ -794,98 +625,9 @@ func (r *TalosClusterReconciler) transitionToReady(tc *platformv1alpha1.TalosClu
 		platformv1alpha1.ConditionTypeReady,
 		metav1.ConditionTrue,
 		platformv1alpha1.ReasonClusterReady,
-		"Cluster Ready: CAPI Running, Cilium up, all nodes Ready.",
+		"Cluster Ready: Cilium up, all nodes Ready.",
 		tc.Generation,
 	)
-}
-
-// checkMachineReachability lists SeamInfrastructureMachine objects in the tenant
-// namespace and checks for port-50000 ApplyConfiguration failures. After
-// machineApplyAttemptsHaltThreshold failures:
-//   - Control plane nodes → sets ControlPlaneUnreachable=true, returns halt=true.
-//   - Worker nodes → sets PartialWorkerAvailability=true, returns halt=false.
-//
-// When no machines are stuck, both conditions are cleared. Returns (true, nil) to
-// halt reconciliation when a control plane node is unreachable past the threshold.
-func (r *TalosClusterReconciler) checkMachineReachability(ctx context.Context, tc *platformv1alpha1.TalosCluster) (halt bool, err error) {
-	logger := log.FromContext(ctx)
-	tenantNS := "seam-tenant-" + tc.Name
-
-	simList := &infrav1alpha1.SeamInfrastructureMachineList{}
-	if listErr := r.Client.List(ctx, simList, client.InNamespace(tenantNS)); listErr != nil {
-		if apierrors.IsNotFound(listErr) {
-			return false, nil
-		}
-		return false, fmt.Errorf("list SeamInfrastructureMachines in %s: %w", tenantNS, listErr)
-	}
-
-	if len(simList.Items) == 0 {
-		return false, nil
-	}
-
-	var cpUnreachable, workerUnreachable bool
-	for _, sim := range simList.Items {
-		if sim.Status.MachineConfigApplied || sim.Status.ApplyAttempts < machineApplyAttemptsHaltThreshold {
-			continue
-		}
-		if sim.Spec.NodeRole == infrav1alpha1.NodeRoleControlPlane {
-			cpUnreachable = true
-		} else {
-			workerUnreachable = true
-		}
-	}
-
-	if cpUnreachable {
-		platformv1alpha1.SetCondition(
-			&tc.Status.Conditions,
-			platformv1alpha1.ConditionTypeControlPlaneUnreachable,
-			metav1.ConditionTrue,
-			platformv1alpha1.ReasonControlPlaneNodeUnreachable,
-			fmt.Sprintf("Control plane node(s) unreachable on port 50000 after %d attempts. Halting reconciliation.", machineApplyAttemptsHaltThreshold),
-			tc.Generation,
-		)
-		r.Recorder.Eventf(tc, nil, "Warning", "ControlPlaneUnreachable", "ControlPlaneUnreachable",
-			"Control plane node(s) unreachable on port 50000 after %d attempts", machineApplyAttemptsHaltThreshold)
-		logger.Info("halting TalosCluster reconcile — control plane port-50000 unreachable",
-			"name", tc.Name, "threshold", machineApplyAttemptsHaltThreshold)
-		return true, nil
-	}
-
-	// Clear ControlPlaneUnreachable if previously set and now resolved.
-	platformv1alpha1.SetCondition(
-		&tc.Status.Conditions,
-		platformv1alpha1.ConditionTypeControlPlaneUnreachable,
-		metav1.ConditionFalse,
-		platformv1alpha1.ReasonControlPlaneNodeUnreachable,
-		"All control plane nodes reachable on port 50000.",
-		tc.Generation,
-	)
-
-	if workerUnreachable {
-		platformv1alpha1.SetCondition(
-			&tc.Status.Conditions,
-			platformv1alpha1.ConditionTypePartialWorkerAvailability,
-			metav1.ConditionTrue,
-			platformv1alpha1.ReasonWorkerNodeUnreachable,
-			fmt.Sprintf("Worker node(s) unreachable on port 50000 after %d attempts. Proceeding with available workers.", machineApplyAttemptsHaltThreshold),
-			tc.Generation,
-		)
-		r.Recorder.Eventf(tc, nil, "Warning", "PartialWorkerAvailability", "PartialWorkerAvailability",
-			"Worker node(s) unreachable on port 50000 after %d attempts — proceeding with available workers",
-			machineApplyAttemptsHaltThreshold)
-	} else {
-		// Clear PartialWorkerAvailability — clears on next reconcile once resolved.
-		platformv1alpha1.SetCondition(
-			&tc.Status.Conditions,
-			platformv1alpha1.ConditionTypePartialWorkerAvailability,
-			metav1.ConditionFalse,
-			platformv1alpha1.ReasonWorkerNodeUnreachable,
-			"All worker nodes reachable on port 50000.",
-			tc.Generation,
-		)
-	}
-
-	return false, nil
 }
 
 // SetupWithManager registers TalosClusterReconciler with the controller-runtime

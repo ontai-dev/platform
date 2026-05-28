@@ -2,7 +2,7 @@
 //
 // Tests for PLATFORM-BL-TENANT-GC: the finalizer-based seam-tenant-{name} namespace
 // deletion on TalosCluster deletion. Cross-namespace ownerReferences are not supported
-// by the Kubernetes GC controller, so a finalizer is required for CAPI-enabled clusters.
+// by the Kubernetes GC controller, so a finalizer is required for role=tenant clusters.
 package controller_test
 
 import (
@@ -23,19 +23,18 @@ import (
 
 const finalizerTenantNS = "platform.ontai.dev/tenant-namespace-cleanup"
 
-// TestTenantGC_FinalizerAddedOnCAPIEnabled verifies that a CAPI-enabled TalosCluster
+// TestTenantGC_FinalizerAddedOnTenantRole verifies that a role=tenant TalosCluster
 // receives the tenant-namespace-cleanup finalizer on the first reconcile.
-func TestTenantGC_FinalizerAddedOnCAPIEnabled(t *testing.T) {
+// The reconciler may return an error from downstream steps (e.g., Kueue not in
+// scheme), but the finalizer is committed at Step C0 before any mode-specific logic.
+func TestTenantGC_FinalizerAddedOnTenantRole(t *testing.T) {
 	scheme := buildDay2Scheme(t)
 	tc := &platformv1alpha1.TalosCluster{
 		ObjectMeta: metav1.ObjectMeta{Name: "ccs-dev", Namespace: "seam-system", Generation: 1},
 		Spec: platformv1alpha1.TalosClusterSpec{
-			CAPI: &platformv1alpha1.CAPIConfig{
-				Enabled:           true,
-				TalosVersion:      "v1.7.0",
-				KubernetesVersion: "v1.31.0",
-				ControlPlane:      &platformv1alpha1.CAPIControlPlaneConfig{Replicas: 1},
-			},
+			Mode:         platformv1alpha1.TalosClusterModeImport,
+			TalosVersion: "v1.9.3",
+			Role:         platformv1alpha1.TalosClusterRoleTenant,
 		},
 	}
 
@@ -50,24 +49,25 @@ func TestTenantGC_FinalizerAddedOnCAPIEnabled(t *testing.T) {
 		Recorder: fakeRecorder(),
 	}
 
-	if _, err := r.Reconcile(context.Background(), ctrl.Request{
+	// The finalizer is added at Step C0, before any mode-specific logic. Downstream
+	// steps may return errors in the unit test environment (Kueue not in scheme), but
+	// the finalizer update is committed to the fake client before any error is returned.
+	_, _ = r.Reconcile(context.Background(), ctrl.Request{
 		NamespacedName: types.NamespacedName{Name: "ccs-dev", Namespace: "seam-system"},
-	}); err != nil {
-		t.Fatalf("reconcile: %v", err)
-	}
+	})
 
 	updated := &platformv1alpha1.TalosCluster{}
 	if err := c.Get(context.Background(), types.NamespacedName{Name: "ccs-dev", Namespace: "seam-system"}, updated); err != nil {
 		t.Fatalf("get TalosCluster after reconcile: %v", err)
 	}
 	if !controllerutil.ContainsFinalizer(updated, finalizerTenantNS) {
-		t.Errorf("expected finalizer %q on CAPI-enabled TalosCluster, got finalizers: %v",
+		t.Errorf("expected finalizer %q on role=tenant TalosCluster, got finalizers: %v",
 			finalizerTenantNS, updated.Finalizers)
 	}
 }
 
 // TestTenantGC_FinalizerNotAddedOnDirectPath verifies that the tenant-namespace-cleanup
-// finalizer is NOT added to a TalosCluster with capi.enabled=false (direct bootstrap path).
+// finalizer is NOT added to a role=management TalosCluster.
 func TestTenantGC_FinalizerNotAddedOnDirectPath(t *testing.T) {
 	scheme := buildDay2Scheme(t)
 	tc := &platformv1alpha1.TalosCluster{
@@ -101,12 +101,12 @@ func TestTenantGC_FinalizerNotAddedOnDirectPath(t *testing.T) {
 		t.Fatalf("get TalosCluster after reconcile: %v", err)
 	}
 	if controllerutil.ContainsFinalizer(updated, finalizerTenantNS) {
-		t.Errorf("did not expect finalizer %q on direct-path TalosCluster", finalizerTenantNS)
+		t.Errorf("did not expect finalizer %q on role=management TalosCluster", finalizerTenantNS)
 	}
 }
 
 // TestTenantGC_NamespaceDeletedOnDeletion verifies that the seam-tenant-{name} namespace
-// is deleted when a CAPI-enabled TalosCluster with the tenant-namespace-cleanup finalizer
+// is deleted when a role=tenant TalosCluster with the tenant-namespace-cleanup finalizer
 // has its DeletionTimestamp set. PLATFORM-BL-TENANT-GC.
 func TestTenantGC_NamespaceDeletedOnDeletion(t *testing.T) {
 	scheme := buildDay2Scheme(t)
@@ -121,11 +121,9 @@ func TestTenantGC_NamespaceDeletedOnDeletion(t *testing.T) {
 			Finalizers:        []string{finalizerTenantNS},
 		},
 		Spec: platformv1alpha1.TalosClusterSpec{
-			CAPI: &platformv1alpha1.CAPIConfig{
-				Enabled:           true,
-				TalosVersion:      "v1.7.0",
-				KubernetesVersion: "v1.31.0",
-			},
+			Mode:         platformv1alpha1.TalosClusterModeImport,
+			TalosVersion: "v1.9.3",
+			Role:         platformv1alpha1.TalosClusterRoleTenant,
 		},
 	}
 	tenantNS := &corev1.Namespace{
@@ -172,11 +170,9 @@ func TestTenantGC_IdempotentWhenNamespaceAlreadyGone(t *testing.T) {
 			Finalizers:        []string{finalizerTenantNS},
 		},
 		Spec: platformv1alpha1.TalosClusterSpec{
-			CAPI: &platformv1alpha1.CAPIConfig{
-				Enabled:           true,
-				TalosVersion:      "v1.7.0",
-				KubernetesVersion: "v1.31.0",
-			},
+			Mode:         platformv1alpha1.TalosClusterModeImport,
+			TalosVersion: "v1.9.3",
+			Role:         platformv1alpha1.TalosClusterRoleTenant,
 		},
 	}
 
@@ -204,7 +200,7 @@ func TestTenantGC_IdempotentWhenNamespaceAlreadyGone(t *testing.T) {
 	err := c.Get(context.Background(), types.NamespacedName{Name: "ccs-dev", Namespace: "seam-system"}, updated)
 	if err != nil {
 		if apierrors.IsNotFound(err) {
-			return // object released — finalizer was removed
+			return // object released -- finalizer was removed
 		}
 		t.Fatalf("get TalosCluster after deletion reconcile: %v", err)
 	}

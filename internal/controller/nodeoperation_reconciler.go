@@ -1,16 +1,9 @@
 package controller
 
-// NodeOperationReconciler reconciles NodeOperation CRs. It is a dual-path reconciler
-// governed by spec.capi.enabled on the owning TalosCluster:
+// NodeOperationReconciler reconciles NodeOperation CRs. Submits a Conductor executor
+// Job for node-scale-up, node-decommission, or node-reboot.
 //
-//   - CAPI path (capi.enabled=true): modifies MachineDeployment replicas for
-//     scale-up, deletes specific Machine objects for decommission, or sets the
-//     Machine reboot annotation — all handled natively by CAPI.
-//
-//   - Non-CAPI path (capi.enabled=false): submits a Conductor executor Job for
-//     node-scale-up, node-decommission, or node-reboot.
-//
-// Named Conductor capabilities (non-CAPI): node-scale-up, node-decommission, node-reboot.
+// Named Conductor capabilities: node-scale-up, node-decommission, node-reboot.
 // platform-schema.md §5 NodeOperation. platform-design.md §2.1.
 
 import (
@@ -19,10 +12,7 @@ import (
 
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime"
-	"k8s.io/apimachinery/pkg/runtime/schema"
-	"k8s.io/apimachinery/pkg/types"
 	clientevents "k8s.io/client-go/tools/events"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -37,9 +27,6 @@ const (
 	capabilityNodeDecommission = "node-decommission"
 	capabilityNodeReboot       = "node-reboot"
 	capabilityNodeRollback     = "node-rollback"
-
-	// capiRebootAnnotation is the CAPI annotation that triggers a node reboot.
-	capiRebootAnnotation = "cluster.x-k8s.io/reboot"
 )
 
 // NodeOperationReconciler reconciles NodeOperation objects.
@@ -106,156 +93,11 @@ func (r *NodeOperationReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 		}
 	}
 
-	capiEnabled, err := r.nodeOpCAPIEnabled(ctx, nop)
-	if err != nil {
-		return ctrl.Result{}, fmt.Errorf("NodeOperationReconciler: read TalosCluster: %w", err)
-	}
-
-	if capiEnabled {
-		return r.reconcileCAPINodeOp(ctx, nop)
-	}
 	return r.reconcileDirectNodeOp(ctx, nop)
 }
 
-// reconcileCAPINodeOp handles node operations via CAPI native machinery.
-func (r *NodeOperationReconciler) reconcileCAPINodeOp(ctx context.Context, nop *platformv1alpha1.NodeOperation) (ctrl.Result, error) {
-	logger := log.FromContext(ctx)
-	tenantNS := "seam-tenant-" + nop.Spec.ClusterRef.Name
-
-	switch nop.Spec.Operation {
-	case platformv1alpha1.NodeOperationTypeScaleUp:
-		if err := r.capiScaleUp(ctx, tenantNS, nop); err != nil {
-			return ctrl.Result{}, fmt.Errorf("reconcileCAPINodeOp: scale-up: %w", err)
-		}
-
-	case platformv1alpha1.NodeOperationTypeDecommission:
-		if err := r.capiDecommission(ctx, tenantNS, nop); err != nil {
-			return ctrl.Result{}, fmt.Errorf("reconcileCAPINodeOp: decommission: %w", err)
-		}
-
-	case platformv1alpha1.NodeOperationTypeReboot:
-		if err := r.capiReboot(ctx, tenantNS, nop); err != nil {
-			return ctrl.Result{}, fmt.Errorf("reconcileCAPINodeOp: reboot: %w", err)
-		}
-
-	default:
-		platformv1alpha1.SetCondition(
-			&nop.Status.Conditions,
-			platformv1alpha1.ConditionTypeNodeOperationDegraded,
-			metav1.ConditionTrue,
-			platformv1alpha1.ReasonNodeOpJobFailed,
-			fmt.Sprintf("unknown operation %q", nop.Spec.Operation),
-			nop.Generation,
-		)
-		return ctrl.Result{}, nil
-	}
-
-	platformv1alpha1.SetCondition(
-		&nop.Status.Conditions,
-		platformv1alpha1.ConditionTypeNodeOperationCAPIDelegated,
-		metav1.ConditionTrue,
-		platformv1alpha1.ReasonNodeOpCAPIDelegated,
-		"Operation delegated to CAPI native machinery.",
-		nop.Generation,
-	)
-	platformv1alpha1.SetCondition(
-		&nop.Status.Conditions,
-		platformv1alpha1.ConditionTypeNodeOperationReady,
-		metav1.ConditionTrue,
-		platformv1alpha1.ReasonNodeOpCAPIDelegated,
-		"CAPI objects updated. Operation progression managed by CAPI controllers.",
-		nop.Generation,
-	)
-	r.Recorder.Eventf(nop, nil, "Normal", "CAPIDelegated", "CAPIDelegated",
-		"NodeOperation %s for cluster %s delegated to CAPI", nop.Spec.Operation, nop.Spec.ClusterRef.Name)
-	logger.Info("NodeOperation reconciled via CAPI delegation",
-		"name", nop.Name, "operation", nop.Spec.Operation, "cluster", nop.Spec.ClusterRef.Name)
-	return ctrl.Result{}, nil
-}
-
-// capiScaleUp patches MachineDeployment replicas to trigger CAPI scale-up.
-func (r *NodeOperationReconciler) capiScaleUp(ctx context.Context, ns string, nop *platformv1alpha1.NodeOperation) error {
-	mdList := &unstructured.UnstructuredList{}
-	mdList.SetGroupVersionKind(schema.GroupVersionKind{
-		Group:   "cluster.x-k8s.io",
-		Version: "v1beta1",
-		Kind:    "MachineDeploymentList",
-	})
-	if err := r.Client.List(ctx, mdList,
-		client.InNamespace(ns),
-		client.MatchingLabels{"cluster.x-k8s.io/cluster-name": nop.Spec.ClusterRef.Name},
-	); err != nil {
-		return fmt.Errorf("list MachineDeployments in %s: %w", ns, err)
-	}
-	replicas := int64(nop.Spec.ReplicaCount)
-	for i := range mdList.Items {
-		md := mdList.Items[i].DeepCopy()
-		patch := client.MergeFrom(mdList.Items[i].DeepCopy())
-		if err := unstructured.SetNestedField(md.Object, replicas, "spec", "replicas"); err != nil {
-			return fmt.Errorf("set MachineDeployment %s replicas: %w", md.GetName(), err)
-		}
-		if err := r.Client.Patch(ctx, md, patch); err != nil {
-			return fmt.Errorf("patch MachineDeployment %s: %w", md.GetName(), err)
-		}
-	}
-	return nil
-}
-
-// capiDecommission deletes specific Machine objects for the listed target nodes.
-func (r *NodeOperationReconciler) capiDecommission(ctx context.Context, ns string, nop *platformv1alpha1.NodeOperation) error {
-	for _, nodeName := range nop.Spec.TargetNodes {
-		machine := &unstructured.Unstructured{}
-		machine.SetGroupVersionKind(schema.GroupVersionKind{
-			Group:   "cluster.x-k8s.io",
-			Version: "v1beta1",
-			Kind:    "Machine",
-		})
-		if err := r.Client.Get(ctx, types.NamespacedName{Name: nodeName, Namespace: ns}, machine); err != nil {
-			if apierrors.IsNotFound(err) {
-				continue // already gone
-			}
-			return fmt.Errorf("get Machine %s/%s: %w", ns, nodeName, err)
-		}
-		if machine.GetDeletionTimestamp() == nil {
-			if err := r.Client.Delete(ctx, machine); err != nil && !apierrors.IsNotFound(err) {
-				return fmt.Errorf("delete Machine %s/%s: %w", ns, nodeName, err)
-			}
-		}
-	}
-	return nil
-}
-
-// capiReboot annotates specific Machine objects to trigger CAPI-managed reboot.
-func (r *NodeOperationReconciler) capiReboot(ctx context.Context, ns string, nop *platformv1alpha1.NodeOperation) error {
-	for _, nodeName := range nop.Spec.TargetNodes {
-		machine := &unstructured.Unstructured{}
-		machine.SetGroupVersionKind(schema.GroupVersionKind{
-			Group:   "cluster.x-k8s.io",
-			Version: "v1beta1",
-			Kind:    "Machine",
-		})
-		if err := r.Client.Get(ctx, types.NamespacedName{Name: nodeName, Namespace: ns}, machine); err != nil {
-			if apierrors.IsNotFound(err) {
-				continue
-			}
-			return fmt.Errorf("get Machine %s/%s: %w", ns, nodeName, err)
-		}
-		patch := client.MergeFrom(machine.DeepCopy())
-		annotations := machine.GetAnnotations()
-		if annotations == nil {
-			annotations = make(map[string]string)
-		}
-		annotations[capiRebootAnnotation] = "true"
-		machine.SetAnnotations(annotations)
-		if err := r.Client.Patch(ctx, machine, patch); err != nil {
-			return fmt.Errorf("patch Machine %s reboot annotation: %w", nodeName, err)
-		}
-	}
-	return nil
-}
-
 // reconcileDirectNodeOp gates on capability then submits a single batch/v1
-// Conductor executor Job for the non-CAPI path. conductor-schema.md §5 §17.
+// Conductor executor Job. conductor-schema.md §5 §17.
 func (r *NodeOperationReconciler) reconcileDirectNodeOp(ctx context.Context, nop *platformv1alpha1.NodeOperation) (ctrl.Result, error) {
 	logger := log.FromContext(ctx)
 
@@ -404,25 +246,6 @@ func (r *NodeOperationReconciler) reconcileDirectNodeOp(ctx context.Context, nop
 		"Conductor executor Job %s completed successfully", jobName)
 	logger.Info("NodeOperation complete", "name", nop.Name, "capability", capability)
 	return ctrl.Result{}, nil
-}
-
-// nodeOpCAPIEnabled reads the owning TalosCluster's capi.enabled field.
-func (r *NodeOperationReconciler) nodeOpCAPIEnabled(ctx context.Context, nop *platformv1alpha1.NodeOperation) (bool, error) {
-	tc := &platformv1alpha1.TalosCluster{}
-	ns := nop.Spec.ClusterRef.Namespace
-	if ns == "" {
-		ns = nop.Namespace
-	}
-	if err := r.Client.Get(ctx, types.NamespacedName{
-		Name:      nop.Spec.ClusterRef.Name,
-		Namespace: ns,
-	}, tc); err != nil {
-		if apierrors.IsNotFound(err) {
-			return false, nil
-		}
-		return false, fmt.Errorf("get TalosCluster %s/%s: %w", ns, nop.Spec.ClusterRef.Name, err)
-	}
-	return tc.Spec.CAPI != nil && tc.Spec.CAPI.Enabled, nil
 }
 
 // nodeOpCapability maps a NodeOperationType to the Conductor capability name.

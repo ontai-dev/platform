@@ -44,10 +44,6 @@ const (
 	// ConditionTypeUpgradePolicyDegraded indicates the upgrade failed.
 	ConditionTypeUpgradePolicyDegraded = "Degraded"
 
-	// ConditionTypeUpgradePolicyCAPIDelegated indicates the upgrade has been
-	// delegated to CAPI native machinery (capi.enabled=true path).
-	ConditionTypeUpgradePolicyCAPIDelegated = "CAPIDelegated"
-
 	// ReasonUpgradeJobSubmitted is set when the Conductor executor Job has been submitted.
 	ReasonUpgradeJobSubmitted = "JobSubmitted"
 
@@ -56,10 +52,6 @@ const (
 
 	// ReasonUpgradeJobFailed is set when the Conductor executor Job failed. INV-018 applies.
 	ReasonUpgradeJobFailed = "JobFailed"
-
-	// ReasonUpgradeCAPIDelegated is set when the upgrade is delegated to CAPI
-	// native machinery for capi.enabled=true clusters.
-	ReasonUpgradeCAPIDelegated = "CAPIDelegated"
 
 	// ReasonUpgradeOperationPending is set before the first action.
 	ReasonUpgradeOperationPending = "Pending"
@@ -168,7 +160,6 @@ type UpgradePolicyStatus struct {
 	RetryCount int `json:"retryCount,omitempty"`
 
 	// JobName is the name of the Conductor executor Job submitted for this upgrade.
-	// Only set for the capi.enabled=false (non-CAPI) path.
 	// +optional
 	JobName string `json:"jobName,omitempty"`
 
@@ -184,7 +175,7 @@ type UpgradePolicyStatus struct {
 	Progress *UpgradeProgress `json:"progress,omitempty"`
 
 	// Conditions is the list of status conditions for this UpgradePolicy.
-	// Condition types: Ready, Degraded, CAPIDelegated, LineageSynced.
+	// Condition types: Ready, Degraded, LineageSynced.
 	// +optional
 	// +listType=map
 	// +listMapKey=type
@@ -192,16 +183,10 @@ type UpgradePolicyStatus struct {
 }
 
 // UpgradePolicy governs Talos OS, Kubernetes, or combined stack upgrades.
+// Submits a talos-upgrade, kube-upgrade, or stack-upgrade Conductor executor Job.
 //
-// Dual-path CRD governed by spec.capi.enabled on the owning TalosCluster:
-//   - For CAPI-managed clusters (capi.enabled=true): updates TalosControlPlane
-//     version and MachineDeployment rolling upgrade settings natively through
-//     CAPI machinery. No Conductor Job is submitted.
-//   - For management cluster (capi.enabled=false): submits talos-upgrade,
-//     kube-upgrade, or stack-upgrade Conductor executor Job.
-//
-// Named Conductor capabilities (non-CAPI path): talos-upgrade, kube-upgrade,
-// stack-upgrade. platform-schema.md §5.
+// Named Conductor capabilities: talos-upgrade, kube-upgrade, stack-upgrade.
+// platform-schema.md §5.
 //
 // +kubebuilder:object:root=true
 // +kubebuilder:subresource:status

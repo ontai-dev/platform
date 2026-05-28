@@ -22,15 +22,6 @@ const (
 	// is absent. The reconciler halts and waits for human approval. CP-INV-006.
 	ReasonApprovalRequired = "ApprovalRequired"
 
-	// ReasonCAPIClusterDeleting is set when the CAPI Cluster deletion is in
-	// progress (capi.enabled=true path). The reconciler waits for all Machine
-	// objects to reach Deleted phase before submitting the reset Job.
-	ReasonCAPIClusterDeleting = "CAPIClusterDeleting"
-
-	// ReasonCAPIClusterDrained is set when all CAPI Machine objects have reached
-	// Deleted phase and the reset Job is about to be submitted.
-	ReasonCAPIClusterDrained = "CAPIClusterDrained"
-
 	// ReasonResetJobSubmitted is set when the Conductor executor Job has been submitted.
 	ReasonResetJobSubmitted = "JobSubmitted"
 
@@ -101,12 +92,7 @@ type ClusterResetStatus struct {
 // holds at PendingApproval and emits an event if the annotation is absent.
 // INV-007, CP-INV-006.
 //
-// For CAPI-managed clusters (capi.enabled=true): the CAPI Cluster object is
-// deleted first, then all Machine objects are drained through the Seam
-// Infrastructure Provider, then the cluster-reset Conductor Job is submitted.
-//
-// For management cluster (capi.enabled=false): the cluster-reset Conductor Job
-// is submitted directly.
+// The cluster-reset Conductor Job is submitted directly after approval.
 //
 // Named Conductor capability: cluster-reset. platform-schema.md §5.
 //
