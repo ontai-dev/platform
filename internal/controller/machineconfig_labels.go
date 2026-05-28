@@ -52,6 +52,13 @@ const (
 	MachineConfigClassWorker = "worker"
 )
 
+// LabelMachineConfigCompression indicates the compression algorithm applied to the
+// machineconfig data bytes. Absent label means no compression (raw YAML). RECON-F5.
+const LabelMachineConfigCompression = "platform.ontai.dev/compression"
+
+// MachineConfigCompressionGzip is the label value when data.machineconfig is gzip-compressed.
+const MachineConfigCompressionGzip = "gzip"
+
 // MachineConfigSecretNamePrefix is the name prefix for all machineconfig source-of-truth secrets.
 // Full name: seam-mc-{cluster}-{class}.
 const MachineConfigSecretNamePrefix = "seam-mc-"

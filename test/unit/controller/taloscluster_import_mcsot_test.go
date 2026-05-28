@@ -537,3 +537,92 @@ func TestMCSOT_SecretWatch_StaleCRReplacedOnRehash(t *testing.T) {
 		t.Errorf("fresh CR Reason = %q, want secret-content-changed", freshCR.Spec.Reason)
 	}
 }
+
+// TestMCSOT_ImportMode_NodeAddressesPopulatedWithRoles verifies that after import,
+// spec.nodeAddresses on the TalosCluster is populated with classified IPs. RECON-A9.
+func TestMCSOT_ImportMode_NodeAddressesPopulatedWithRoles(t *testing.T) {
+	const cluster = "mcsot-nodeaddr"
+	scheme := buildDay2Scheme(t)
+	tc := buildImportTalosCluster(cluster, "seam-system")
+	talosSecret := buildFakeTalosconfigSecretWithEndpoints(cluster, []string{"10.20.0.2", "10.20.0.3", "10.20.0.4"})
+
+	c := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithObjects(tc, talosSecret).
+		WithStatusSubresource(tc).
+		Build()
+	r := &controller.TalosClusterReconciler{
+		Client:                c,
+		Scheme:                scheme,
+		Recorder:              clientevents.NewFakeRecorder(16),
+		KubeconfigGeneratorFn: fakeKubeconfigGenerator,
+		MachineConfigReaderFn: fakeEndpointClassReader(map[string]string{
+			"10.20.0.2": controller.MachineConfigClassControlPlane,
+			"10.20.0.3": controller.MachineConfigClassControlPlane,
+			"10.20.0.4": controller.MachineConfigClassControlPlane,
+		}),
+	}
+
+	if _, err := r.Reconcile(context.Background(), ctrl.Request{
+		NamespacedName: types.NamespacedName{Name: cluster, Namespace: "seam-system"},
+	}); err != nil {
+		t.Fatalf("Reconcile: %v", err)
+	}
+
+	updated := &platformv1alpha1.TalosCluster{}
+	if err := c.Get(context.Background(), types.NamespacedName{Name: cluster, Namespace: "seam-system"}, updated); err != nil {
+		t.Fatalf("get updated TalosCluster: %v", err)
+	}
+	if len(updated.Spec.NodeAddresses) != 3 {
+		t.Fatalf("expected 3 NodeAddresses, got %d", len(updated.Spec.NodeAddresses))
+	}
+	for _, na := range updated.Spec.NodeAddresses {
+		if na.Role != platformv1alpha1.NodeRoleControlPlane {
+			t.Errorf("NodeAddress %q: expected role=controlplane, got %q", na.IP, na.Role)
+		}
+	}
+}
+
+// TestMCSOT_ImportMode_NodeAddressesNotOverwrittenIfPopulated verifies that if
+// spec.nodeAddresses is already set, it is not overwritten by a re-import. RECON-A9.
+func TestMCSOT_ImportMode_NodeAddressesNotOverwrittenIfPopulated(t *testing.T) {
+	const cluster = "mcsot-nodeaddr-idem"
+	scheme := buildDay2Scheme(t)
+	tc := buildImportTalosCluster(cluster, "seam-system")
+	// Pre-populate nodeAddresses.
+	tc.Spec.NodeAddresses = []platformv1alpha1.NodeAddress{
+		{IP: "10.20.0.2", Role: platformv1alpha1.NodeRoleControlPlane},
+	}
+	talosSecret := buildFakeTalosconfigSecretWithEndpoints(cluster, []string{"10.20.0.2", "10.20.0.3"})
+
+	c := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithObjects(tc, talosSecret).
+		WithStatusSubresource(tc).
+		Build()
+	r := &controller.TalosClusterReconciler{
+		Client:                c,
+		Scheme:                scheme,
+		Recorder:              clientevents.NewFakeRecorder(16),
+		KubeconfigGeneratorFn: fakeKubeconfigGenerator,
+		MachineConfigReaderFn: fakeEndpointClassReader(map[string]string{
+			"10.20.0.2": controller.MachineConfigClassControlPlane,
+			"10.20.0.3": controller.MachineConfigClassWorker,
+		}),
+	}
+
+	if _, err := r.Reconcile(context.Background(), ctrl.Request{
+		NamespacedName: types.NamespacedName{Name: cluster, Namespace: "seam-system"},
+	}); err != nil {
+		t.Fatalf("Reconcile: %v", err)
+	}
+
+	updated := &platformv1alpha1.TalosCluster{}
+	if err := c.Get(context.Background(), types.NamespacedName{Name: cluster, Namespace: "seam-system"}, updated); err != nil {
+		t.Fatalf("get updated TalosCluster: %v", err)
+	}
+	// Should remain 1 (original), not overwritten to 2.
+	if len(updated.Spec.NodeAddresses) != 1 {
+		t.Errorf("expected nodeAddresses to remain unchanged (1 entry), got %d", len(updated.Spec.NodeAddresses))
+	}
+}

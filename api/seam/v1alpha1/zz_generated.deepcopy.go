@@ -310,7 +310,7 @@ func (in *TalosClusterSpec) DeepCopyInto(out *TalosClusterSpec) {
 	*out = *in
 	if in.NodeAddresses != nil {
 		in, out := &in.NodeAddresses, &out.NodeAddresses
-		*out = make([]string, len(*in))
+		*out = make([]NodeAddress, len(*in))
 		copy(*out, *in)
 	}
 	if in.CAPI != nil {

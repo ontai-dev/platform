@@ -8,7 +8,7 @@ import (
 
 // NodeOperationType declares the node lifecycle operation to perform.
 //
-// +kubebuilder:validation:Enum=scale-up;decommission;reboot
+// +kubebuilder:validation:Enum=scale-up;decommission;reboot;rollback
 type NodeOperationType string
 
 const (
@@ -20,6 +20,10 @@ const (
 
 	// NodeOperationTypeReboot reboots specific nodes.
 	NodeOperationTypeReboot NodeOperationType = "reboot"
+
+	// NodeOperationTypeRollback rolls target nodes back to the previous Talos OS image.
+	// Used after a failed upgrade to restore the prior version. RECON-H4.
+	NodeOperationTypeRollback NodeOperationType = "rollback"
 )
 
 // Condition type and reason constants for NodeOperation.
@@ -82,6 +86,12 @@ type NodeOperationSpec struct {
 	// Required when operation=scale-up.
 	// +optional
 	ReplicaCount int32 `json:"replicaCount,omitempty"`
+
+	// PerformWipe enables a secure disk wipe after decommission reset.
+	// Only valid when operation=decommission. Caller must satisfy INV-007 approval
+	// gate before setting this field. RECON-H4.
+	// +optional
+	PerformWipe bool `json:"performWipe,omitempty"`
 
 	// Lineage is the sealed causal chain record for this root declaration.
 	// Authored once at object creation time and immutable thereafter.

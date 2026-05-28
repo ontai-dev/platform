@@ -13,6 +13,8 @@ package controller
 // No other file in this codebase may import github.com/siderolabs/talos/pkg/machinery.
 
 import (
+	"bytes"
+	"compress/gzip"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
@@ -244,16 +246,12 @@ func (r *TalosClusterReconciler) ensureMachineConfigSecrets(ctx context.Context,
 	// use it to avoid establishing a real talos goclient connection.
 	readNode := r.buildMachineConfigNodeReader(ctx, tc.Name, talosconfigBytes)
 
-	// Collect the first machineconfig seen for each class (controlplane, worker).
+	// Collect the first machineconfig seen for each class (controlplane, worker)
+	// and all classified node IPs for spec.nodeAddresses population.
 	classConfigs := map[string][]byte{}
+	var nodeAddresses []platformv1alpha1.NodeAddress
 
 	for _, endpoint := range activeCtx.Endpoints {
-		if _, done := classConfigs[MachineConfigClassControlPlane]; done {
-			if _, done2 := classConfigs[MachineConfigClassWorker]; done2 {
-				break // Both classes collected; no need to read more nodes.
-			}
-		}
-
 		configBytes, nodeClass, rErr := readNode(endpoint)
 		if rErr != nil {
 			log.FromContext(ctx).Info("ensureMachineConfigSecrets: could not read machineconfig from node (skipping)",
@@ -266,6 +264,13 @@ func (r *TalosClusterReconciler) ensureMachineConfigSecrets(ctx context.Context,
 		if _, exists := classConfigs[nodeClass]; !exists {
 			classConfigs[nodeClass] = configBytes
 		}
+		var role platformv1alpha1.NodeRole
+		if nodeClass == MachineConfigClassControlPlane {
+			role = platformv1alpha1.NodeRoleControlPlane
+		} else {
+			role = platformv1alpha1.NodeRoleWorker
+		}
+		nodeAddresses = append(nodeAddresses, platformv1alpha1.NodeAddress{IP: endpoint, Role: role})
 	}
 
 	if len(classConfigs) == 0 {
@@ -280,6 +285,17 @@ func (r *TalosClusterReconciler) ensureMachineConfigSecrets(ctx context.Context,
 		if wErr := r.createMachineConfigSyncCR(ctx, tc.Name, secretsNS, class); wErr != nil {
 			return fmt.Errorf("ensureMachineConfigSecrets: create MachineConfigSync for class %s: %w", class, wErr)
 		}
+	}
+
+	// Write classified node IPs to spec.nodeAddresses if not already populated.
+	if len(nodeAddresses) > 0 && len(tc.Spec.NodeAddresses) == 0 {
+		patch := client.MergeFrom(tc.DeepCopy())
+		tc.Spec.NodeAddresses = nodeAddresses
+		if err := r.Client.Patch(ctx, tc, patch); err != nil {
+			return fmt.Errorf("ensureMachineConfigSecrets: patch nodeAddresses: %w", err)
+		}
+		log.FromContext(ctx).Info("ensureMachineConfigSecrets: wrote nodeAddresses",
+			"cluster", tc.Name, "count", len(nodeAddresses))
 	}
 
 	return nil
@@ -341,6 +357,20 @@ func (r *TalosClusterReconciler) buildMachineConfigNodeReader(
 // writeMachineConfigSecret creates or skips the machineconfig source-of-truth Secret
 // for a given cluster and class. If the secret already exists, it is left unchanged
 // (the admin may have pre-created it, or a prior import run wrote it). Idempotent.
+// compressMachineConfig gzip-compresses configBytes. Returns the compressed bytes.
+// Called by writeMachineConfigSecret to reduce etcd footprint. RECON-F5.
+func compressMachineConfig(configBytes []byte) ([]byte, error) {
+	var buf bytes.Buffer
+	w := gzip.NewWriter(&buf)
+	if _, err := w.Write(configBytes); err != nil {
+		return nil, fmt.Errorf("gzip write: %w", err)
+	}
+	if err := w.Close(); err != nil {
+		return nil, fmt.Errorf("gzip close: %w", err)
+	}
+	return buf.Bytes(), nil
+}
+
 func (r *TalosClusterReconciler) writeMachineConfigSecret(
 	ctx context.Context,
 	clusterName, secretsNS, class string,
@@ -355,22 +385,41 @@ func (r *TalosClusterReconciler) writeMachineConfigSecret(
 		return fmt.Errorf("check secret %s/%s: %w", secretsNS, secretName, err)
 	}
 
+	// SHA-256 is computed over the uncompressed bytes so hash comparisons remain stable. RECON-F5.
 	hash := sha256.Sum256(configBytes)
 	hashHex := hex.EncodeToString(hash[:])
+
+	compressed, cErr := compressMachineConfig(configBytes)
+	if cErr != nil {
+		// Fallback to uncompressed rather than failing the import. Log and continue.
+		compressed = configBytes
+		log.FromContext(ctx).Info("writeMachineConfigSecret: gzip compression failed, storing uncompressed",
+			"error", cErr.Error())
+	}
+	compressionLabel := MachineConfigCompressionGzip
+	if len(compressed) == len(configBytes) {
+		// Compression was a no-op (fallback path): don't set the label.
+		compressionLabel = ""
+	}
+
+	labels := map[string]string{
+		LabelMachineConfigCluster:    clusterName,
+		LabelMachineConfigClass:      class,
+		LabelMachineConfigSyncStatus: MachineConfigSyncStatusPending,
+		LabelMachineConfigSyncHash:   hashHex,
+	}
+	if compressionLabel != "" {
+		labels[LabelMachineConfigCompression] = compressionLabel
+	}
 
 	secret := &corev1.Secret{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      secretName,
 			Namespace: secretsNS,
-			Labels: map[string]string{
-				LabelMachineConfigCluster:    clusterName,
-				LabelMachineConfigClass:      class,
-				LabelMachineConfigSyncStatus: MachineConfigSyncStatusPending,
-				LabelMachineConfigSyncHash:   hashHex,
-			},
+			Labels:    labels,
 		},
 		Data: map[string][]byte{
-			MachineConfigDataKey: configBytes,
+			MachineConfigDataKey: compressed,
 		},
 	}
 	if err := r.Client.Create(ctx, secret); err != nil {
@@ -454,12 +503,35 @@ func (r *TalosClusterReconciler) reconcileMachineConfigSync(ctx context.Context,
 			continue
 		}
 
+		// Hash is always computed over the uncompressed bytes (RECON-F5). Decompress if needed.
+		hashBytes := configBytes
+		if secret.Labels[LabelMachineConfigCompression] == MachineConfigCompressionGzip {
+			if r, rErr := gzip.NewReader(bytes.NewReader(configBytes)); rErr == nil {
+				if uncompressed, rErr2 := io.ReadAll(r); rErr2 == nil {
+					hashBytes = uncompressed
+				}
+			}
+		}
+
 		// Trigger condition: content hash differs from the recorded sync hash.
-		sum := sha256.Sum256(configBytes)
+		sum := sha256.Sum256(hashBytes)
 		newHash := hex.EncodeToString(sum[:])
 		prevHash := secret.Labels[LabelMachineConfigSyncHash]
 		if newHash == prevHash {
 			// Content unchanged since last sync attempt. No action needed.
+			continue
+		}
+
+		// RECON-F2: coalesce window -- suppress rapid burst submissions for the same
+		// (cluster, class) pair within the 30-second debounce window. The coalescer
+		// allows the submission if the hash changed again, ensuring the latest content
+		// is always eventually applied.
+		if r.mcSyncCoalescer == nil {
+			r.mcSyncCoalescer = NewMCSyncCoalescer()
+		}
+		if !r.mcSyncCoalescer.ShouldSubmit(tc.Name, class, newHash) {
+			logger.Info("reconcileMachineConfigSync: suppressed by coalesce window",
+				"cluster", tc.Name, "class", class, "hash", newHash[:8])
 			continue
 		}
 
@@ -470,6 +542,7 @@ func (r *TalosClusterReconciler) reconcileMachineConfigSync(ctx context.Context,
 		if getErr == nil {
 			// CR exists. If it already targets this content version, skip.
 			if existing.Status.ObservedHash == newHash {
+				r.mcSyncCoalescer.MarkSubmitted(tc.Name, class, newHash)
 				continue
 			}
 			// Stale CR from a previous content version. Replace it.
@@ -500,6 +573,7 @@ func (r *TalosClusterReconciler) reconcileMachineConfigSync(ctx context.Context,
 		if cErr := r.Client.Create(ctx, newCR); cErr != nil && !apierrors.IsAlreadyExists(cErr) {
 			return fmt.Errorf("reconcileMachineConfigSync: create CR %s/%s: %w", ns, crName, cErr)
 		}
+		r.mcSyncCoalescer.MarkSubmitted(tc.Name, class, newHash)
 		logger.Info("reconcileMachineConfigSync: created MachineConfigSync CR for content change",
 			"cluster", tc.Name, "class", class)
 	}

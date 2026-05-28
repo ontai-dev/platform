@@ -53,6 +53,12 @@ type LocalObjectRef = seamv1alpha1.LocalObjectRef
 // +kubebuilder:object:generate=false
 type DeletionStage = seamv1alpha1.DeletionStage
 
+// +kubebuilder:object:generate=false
+type NodeRole = seamv1alpha1.NodeRole
+
+// +kubebuilder:object:generate=false
+type NodeAddress = seamv1alpha1.NodeAddress
+
 // DeletionStage constants -- re-exported from platform/api/seam/v1alpha1. RECON-I1.
 const (
 	DeletionStageNone          = seamv1alpha1.DeletionStageNone
@@ -86,6 +92,12 @@ const (
 	InfrastructureProviderNative = seamv1alpha1.InfrastructureProviderNative
 	InfrastructureProviderCAPI   = seamv1alpha1.InfrastructureProviderCAPI
 	InfrastructureProviderScreen = seamv1alpha1.InfrastructureProviderScreen
+)
+
+// NodeRole constants -- re-exported from platform/api/seam/v1alpha1. RECON-A9.
+const (
+	NodeRoleControlPlane = seamv1alpha1.NodeRoleControlPlane
+	NodeRoleWorker       = seamv1alpha1.NodeRoleWorker
 )
 
 // Condition type constants for TalosCluster -- re-exported from seam-core/pkg/conditions.

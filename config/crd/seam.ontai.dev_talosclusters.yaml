@@ -255,10 +255,29 @@ spec:
                   scratch or imported.
                 type: string
               nodeAddresses:
-                description: NodeAddresses is the list of node IPs for DSNSReconciler
-                  A-record population.
+                description: NodeAddresses is the classified list of node IPs for
+                  this cluster. Each entry carries the node IP, its role (controlplane
+                  or worker), and an optional hostname. Populated by import flow and
+                  bootstrap compiler. RECON-A9.
                 items:
-                  type: string
+                  description: NodeAddress is a classified node IP entry in TalosClusterSpec.NodeAddresses.
+                  properties:
+                    ip:
+                      description: IP is the node's primary IPv4 address.
+                      type: string
+                    name:
+                      description: Name is the optional node hostname.
+                      type: string
+                    role:
+                      description: Role classifies the node as controlplane or worker.
+                      enum:
+                      - controlplane
+                      - worker
+                      type: string
+                  required:
+                  - ip
+                  - role
+                  type: object
                 type: array
               pkiRotationThresholdDays:
                 default: 30

@@ -85,7 +85,7 @@ Deletion of a TalosCluster CR never triggers physical cluster destruction (INV-0
 | kubernetesVersion | string | no | Kubernetes version for this cluster. When versionUpgrade=true, drives an UpgradeTypeKubernetes policy. |
 | versionUpgrade | bool | no | When true, triggers a cluster-level rolling upgrade. Upgrade type derived from which version fields are set: talosVersion only = UpgradeTypeTalos; kubernetesVersion only = UpgradeTypeKubernetes; both = UpgradeTypeStack. |
 | clusterEndpoint | string | no | Cluster VIP or primary API endpoint IP. |
-| nodeAddresses | []string | no | Node IPs for DNS A-record population. |
+| nodeAddresses | []NodeAddress | no | Classified node IPs: each entry has ip (string), role (controlplane/worker), name (optional). Populated by import flow and bootstrap compiler. RECON-A9. |
 | capi | CAPIConfig | no | CAPI integration settings. When absent, direct bootstrap path is used. |
 | infrastructureProvider | string (native, capi, screen) | no | Default: native. screen is reserved (INV-021). |
 | kubeconfigSecretRef | string | no | Name of the Secret containing the kubeconfig. Required on mode=import. Not used when CAPI manages lifecycle. |
