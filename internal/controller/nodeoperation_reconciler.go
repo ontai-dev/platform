@@ -36,6 +36,7 @@ const (
 	capabilityNodeScaleUp      = "node-scale-up"
 	capabilityNodeDecommission = "node-decommission"
 	capabilityNodeReboot       = "node-reboot"
+	capabilityNodeRollback     = "node-rollback"
 
 	// capiRebootAnnotation is the CAPI annotation that triggers a node reboot.
 	capiRebootAnnotation = "cluster.x-k8s.io/reboot"
@@ -322,6 +323,10 @@ func (r *NodeOperationReconciler) reconcileDirectNodeOp(ctx context.Context, nop
 		nodeExclusions := buildNodeExclusions(nop.Spec.TargetNodes, leaderNode)
 
 		job := jobSpecWithExclusions(jobName, nop.Namespace, nop.Spec.ClusterRef.Name, capability, nodeExclusions, clusterRC.Spec.RunnerImage)
+		// Scale-up needs the tenant cluster kubeconfig to poll Kubernetes node Ready. RECON-C8.
+		if capability == capabilityNodeScaleUp {
+			addKubeconfigMount(job, nop.Spec.ClusterRef.Name)
+		}
 		if err := controllerutil.SetControllerReference(nop, job, r.Scheme); err != nil {
 			return ctrl.Result{}, fmt.Errorf("NodeOperationReconciler: set owner reference: %w", err)
 		}
@@ -429,6 +434,8 @@ func nodeOpCapability(op platformv1alpha1.NodeOperationType) (string, error) {
 		return capabilityNodeDecommission, nil
 	case platformv1alpha1.NodeOperationTypeReboot:
 		return capabilityNodeReboot, nil
+	case platformv1alpha1.NodeOperationTypeRollback:
+		return capabilityNodeRollback, nil
 	default:
 		return "", fmt.Errorf("unknown NodeOperationType %q", op)
 	}

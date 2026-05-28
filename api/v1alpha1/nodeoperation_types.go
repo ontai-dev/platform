@@ -65,13 +65,24 @@ type NodeOperationSpec struct {
 	ClusterRef LocalObjectRef `json:"clusterRef"`
 
 	// Operation declares the node lifecycle operation to perform.
-	// +kubebuilder:validation:Enum=scale-up;decommission;reboot
+	// +kubebuilder:validation:Enum=scale-up;decommission;reboot;rollback
 	Operation NodeOperationType `json:"operation"`
 
 	// TargetNodes is the list of node names to target for decommission or reboot.
 	// Required when operation=decommission or operation=reboot.
 	// +optional
 	TargetNodes []string `json:"targetNodes,omitempty"`
+
+	// TargetNodeIP is the IP address of the new node in Talos maintenance mode.
+	// Required when operation=scale-up.
+	// +optional
+	TargetNodeIP string `json:"targetNodeIP,omitempty"`
+
+	// NodeRole declares the role of the node for scale-up operations.
+	// Valid values are "controlplane" and "worker". Defaults to "worker" when unset.
+	// +optional
+	// +kubebuilder:validation:Enum=controlplane;worker
+	NodeRole string `json:"nodeRole,omitempty"`
 
 	// MaxRetry is the maximum number of times the reconciler will re-submit the
 	// Conductor executor Job after a failure before declaring permanent failure
