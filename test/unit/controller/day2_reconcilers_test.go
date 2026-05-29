@@ -66,7 +66,7 @@ func clusterRC(clusterName string, capabilities ...string) *controller.Operation
 	rc.Spec.RunnerImage = "10.20.0.1:5000/ontai-dev/conductor:v1.9.3-dev"
 	entries := make([]seamcorev1alpha1.RunnerCapabilityEntry, len(capabilities))
 	for i, name := range capabilities {
-		entries[i] = seamcorev1alpha1.RunnerCapabilityEntry{Name: name}
+		entries[i] = seamcorev1alpha1.RunnerCapabilityEntry{Name: name, Version: "1.0.0"}
 	}
 	rc.Status.Capabilities = entries
 	return rc

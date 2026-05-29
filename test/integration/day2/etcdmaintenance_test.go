@@ -39,7 +39,7 @@ func buildClusterRC(ctx context.Context, t *testing.T, clusterName string, capab
 	}
 	entries := make([]seamcorev1alpha1.RunnerCapabilityEntry, len(capabilities))
 	for i, name := range capabilities {
-		entries[i] = seamcorev1alpha1.RunnerCapabilityEntry{Name: name}
+		entries[i] = seamcorev1alpha1.RunnerCapabilityEntry{Name: name, Version: "1.0.0"}
 	}
 	rc.Status.Capabilities = entries
 	if err := testClient.Status().Update(ctx, rc); err != nil {

@@ -100,7 +100,7 @@ func fakeClusterRC(clusterName string, caps ...string) *controller.OperationalRu
 	}
 	entries := make([]seamcorev1alpha1.RunnerCapabilityEntry, len(caps))
 	for i, name := range caps {
-		entries[i] = seamcorev1alpha1.RunnerCapabilityEntry{Name: name}
+		entries[i] = seamcorev1alpha1.RunnerCapabilityEntry{Name: name, Version: "1.0.0"}
 	}
 	rc.Status.Capabilities = entries
 	return rc
