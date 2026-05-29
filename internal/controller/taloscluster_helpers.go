@@ -606,9 +606,6 @@ func EnsureRemoteTalosClusterCopy(ctx context.Context, dynClient dynamic.Interfa
 	return nil
 }
 
-// boolPtr returns a pointer to a bool value.
-func boolPtr(b bool) *bool { return &b }
-
 // --- Bug 3: RunnerConfig cleanup finalizer ---
 
 // ensureRunnerConfigCleanupFinalizer adds finalizerRunnerConfigCleanup to tc when

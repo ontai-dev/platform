@@ -6,7 +6,6 @@ import (
 	"strings"
 
 	corev1 "k8s.io/api/core/v1"
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
@@ -119,20 +118,4 @@ func (r *TalosClusterReconciler) reconcileNodeRosterRefresh(ctx context.Context,
 	}
 
 	return nil
-}
-
-// buildDecommissionedRosterEntry builds a minimal Secret for decommissioned-node
-// tracking. Used only in tests. RECON-C9.
-func buildDecommissionedRosterEntry(ns, clusterName, nodeClass string) *corev1.Secret {
-	return &corev1.Secret{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      MachineConfigSecretName(clusterName, nodeClass),
-			Namespace: ns,
-			Labels: map[string]string{
-				LabelMachineConfigCluster:    clusterName,
-				LabelMachineConfigClass:      nodeClass,
-				LabelMachineConfigSyncStatus: MachineConfigSyncStatusDecommissioned,
-			},
-		},
-	}
 }

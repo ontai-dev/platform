@@ -24,11 +24,6 @@ import (
 	platformv1alpha1 "github.com/ontai-dev/platform/api/v1alpha1"
 )
 
-// machineApplyAttemptsHaltThreshold is the number of consecutive ApplyConfiguration
-// failures on port 50000 before TalosClusterReconciler raises ControlPlaneUnreachable
-// (control plane nodes) or PartialWorkerAvailability (worker nodes).
-const machineApplyAttemptsHaltThreshold int32 = 3
-
 // TalosClusterReconciler watches TalosCluster CRs and drives cluster lifecycle.
 //
 // For management clusters (spec.capi.enabled=false): reads bootstrap secrets from
