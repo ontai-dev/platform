@@ -11,20 +11,50 @@ import (
 
 // Type aliases -- struct definitions live in platform/api/seam/v1alpha1.
 // These preserve the platformv1alpha1 package interface for all reconcilers without source edits.
-type (
-	TalosCluster           = seamv1alpha1.TalosCluster
-	TalosClusterList       = seamv1alpha1.TalosClusterList
-	TalosClusterSpec       = seamv1alpha1.TalosClusterSpec
-	TalosClusterStatus     = seamv1alpha1.TalosClusterStatus
-	TalosClusterMode       = seamv1alpha1.TalosClusterMode
-	TalosClusterRole       = seamv1alpha1.TalosClusterRole
-	TalosClusterOrigin     = seamv1alpha1.TalosClusterOrigin
-	InfrastructureProvider = seamv1alpha1.InfrastructureProvider
-	CAPIConfig             = seamv1alpha1.CAPIConfig
-	CAPIControlPlaneConfig = seamv1alpha1.CAPIControlPlaneConfig
-	CAPIWorkerPool         = seamv1alpha1.CAPIWorkerPool
-	CAPICiliumPackRef      = seamv1alpha1.CAPICiliumPackRef
-	LocalObjectRef         = seamv1alpha1.LocalObjectRef
+// +kubebuilder:object:generate=false
+type TalosCluster = seamv1alpha1.TalosCluster
+
+// +kubebuilder:object:generate=false
+type TalosClusterList = seamv1alpha1.TalosClusterList
+
+// +kubebuilder:object:generate=false
+type TalosClusterSpec = seamv1alpha1.TalosClusterSpec
+
+// +kubebuilder:object:generate=false
+type TalosClusterStatus = seamv1alpha1.TalosClusterStatus
+
+// +kubebuilder:object:generate=false
+type TalosClusterMode = seamv1alpha1.TalosClusterMode
+
+// +kubebuilder:object:generate=false
+type TalosClusterRole = seamv1alpha1.TalosClusterRole
+
+// +kubebuilder:object:generate=false
+type TalosClusterOrigin = seamv1alpha1.TalosClusterOrigin
+
+// +kubebuilder:object:generate=false
+type InfrastructureProvider = seamv1alpha1.InfrastructureProvider
+
+// +kubebuilder:object:generate=false
+type LocalObjectRef = seamv1alpha1.LocalObjectRef
+
+// +kubebuilder:object:generate=false
+type DeletionStage = seamv1alpha1.DeletionStage
+
+// +kubebuilder:object:generate=false
+type NodeRole = seamv1alpha1.NodeRole
+
+// +kubebuilder:object:generate=false
+type NodeAddress = seamv1alpha1.NodeAddress
+
+// DeletionStage constants -- re-exported from platform/api/seam/v1alpha1. RECON-I1.
+const (
+	DeletionStageNone          = seamv1alpha1.DeletionStageNone
+	DeletionStagePackExecution = seamv1alpha1.DeletionStagePackExecution
+	DeletionStagePackInstalled = seamv1alpha1.DeletionStagePackInstalled
+	DeletionStagePackDelivery  = seamv1alpha1.DeletionStagePackDelivery
+	DeletionStageRunnerConfig  = seamv1alpha1.DeletionStageRunnerConfig
+	DeletionStageComplete      = seamv1alpha1.DeletionStageComplete
 )
 
 // Mode constants.
@@ -48,8 +78,13 @@ const (
 // InfrastructureProvider constants.
 const (
 	InfrastructureProviderNative = seamv1alpha1.InfrastructureProviderNative
-	InfrastructureProviderCAPI   = seamv1alpha1.InfrastructureProviderCAPI
 	InfrastructureProviderScreen = seamv1alpha1.InfrastructureProviderScreen
+)
+
+// NodeRole constants -- re-exported from platform/api/seam/v1alpha1. RECON-A9.
+const (
+	NodeRoleControlPlane = seamv1alpha1.NodeRoleControlPlane
+	NodeRoleWorker       = seamv1alpha1.NodeRoleWorker
 )
 
 // Condition type constants for TalosCluster -- re-exported from seam-core/pkg/conditions.
@@ -78,8 +113,6 @@ const (
 	ReasonBootstrapJobSubmitted      = conditions.ReasonBootstrapJobSubmitted
 	ReasonBootstrapJobComplete       = conditions.ReasonBootstrapJobComplete
 	ReasonBootstrapJobFailed         = conditions.ReasonBootstrapJobFailed
-	ReasonCAPIObjectsCreated         = conditions.ReasonCAPIObjectsCreated
-	ReasonCAPIClusterRunning         = conditions.ReasonCAPIClusterRunning
 	ReasonCiliumPackPending          = conditions.ReasonCiliumPackPending
 	ReasonCiliumPackReady            = conditions.ReasonCiliumPackReady
 	ReasonClusterReady               = conditions.ReasonClusterReady

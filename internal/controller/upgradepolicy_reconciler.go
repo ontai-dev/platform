@@ -1,16 +1,9 @@
 package controller
 
-// UpgradePolicyReconciler reconciles UpgradePolicy CRs. It is a dual-path reconciler
-// governed by spec.capi.enabled on the owning TalosCluster:
+// UpgradePolicyReconciler reconciles UpgradePolicy CRs. Submits a Conductor executor
+// Job for talos-upgrade, kube-upgrade, or stack-upgrade.
 //
-//   - CAPI path (capi.enabled=true): updates TalosControlPlane version and
-//     MachineDeployment rolling upgrade settings natively through CAPI machinery.
-//     No Conductor Job is submitted.
-//
-//   - Non-CAPI path (capi.enabled=false): submits a Conductor executor Job for
-//     talos-upgrade, kube-upgrade, or stack-upgrade.
-//
-// Named Conductor capabilities (non-CAPI): talos-upgrade, kube-upgrade, stack-upgrade.
+// Named Conductor capabilities: talos-upgrade, kube-upgrade, stack-upgrade.
 // platform-schema.md §5 UpgradePolicy. platform-design.md §2.1.
 
 import (
@@ -21,9 +14,7 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime"
-	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
 	clientevents "k8s.io/client-go/tools/events"
 	ctrl "sigs.k8s.io/controller-runtime"
@@ -53,8 +44,6 @@ type UpgradePolicyReconciler struct {
 // +kubebuilder:rbac:groups=platform.ontai.dev,resources=upgradepolicies/finalizers,verbs=update
 // +kubebuilder:rbac:groups=infrastructure.ontai.dev,resources=infrastructuretalosclusters,verbs=get;list;watch
 // +kubebuilder:rbac:groups=infrastructure.ontai.dev,resources=infrastructuretalosclusters/status,verbs=get;update;patch
-// +kubebuilder:rbac:groups=controlplane.cluster.x-k8s.io,resources=taloscontrolplanes,verbs=get;list;watch;patch;update
-// +kubebuilder:rbac:groups=cluster.x-k8s.io,resources=machinedeployments,verbs=get;list;watch;patch;update
 // +kubebuilder:rbac:groups="",resources=events,verbs=create;patch
 // +kubebuilder:rbac:groups=batch,resources=jobs,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=infrastructure.ontai.dev,resources=infrastructuretalosclusteroperationresults,verbs=get;list;watch
@@ -100,121 +89,11 @@ func (r *UpgradePolicyReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 		return ctrl.Result{}, nil
 	}
 
-	// Read TalosCluster to determine path.
-	capiEnabled, err := r.upgradeCAPIEnabled(ctx, up)
-	if err != nil {
-		return ctrl.Result{}, fmt.Errorf("UpgradePolicyReconciler: read TalosCluster: %w", err)
-	}
-
-	if capiEnabled {
-		return r.reconcileCAPIUpgrade(ctx, up)
-	}
 	return r.reconcileDirectUpgrade(ctx, up)
 }
 
-// reconcileCAPIUpgrade delegates the upgrade to CAPI native machinery by patching
-// the TalosControlPlane version and MachineDeployment rollout settings.
-func (r *UpgradePolicyReconciler) reconcileCAPIUpgrade(ctx context.Context, up *platformv1alpha1.UpgradePolicy) (ctrl.Result, error) {
-	logger := log.FromContext(ctx)
-	tenantNS := "seam-tenant-" + up.Spec.ClusterRef.Name
-
-	// Patch TalosControlPlane version for talos and stack upgrades.
-	if up.Spec.UpgradeType == platformv1alpha1.UpgradeTypeTalos ||
-		up.Spec.UpgradeType == platformv1alpha1.UpgradeTypeStack {
-		if up.Spec.TargetTalosVersion != "" {
-			if err := r.patchTalosControlPlaneVersion(ctx, tenantNS, up.Spec.ClusterRef.Name, up.Spec.TargetTalosVersion); err != nil {
-				return ctrl.Result{}, fmt.Errorf("reconcileCAPIUpgrade: patch TCP version: %w", err)
-			}
-		}
-	}
-
-	// Patch MachineDeployment version for kubernetes and stack upgrades.
-	if up.Spec.UpgradeType == platformv1alpha1.UpgradeTypeKubernetes ||
-		up.Spec.UpgradeType == platformv1alpha1.UpgradeTypeStack {
-		if up.Spec.TargetKubernetesVersion != "" {
-			if err := r.patchMachineDeploymentVersion(ctx, tenantNS, up.Spec.ClusterRef.Name, up.Spec.TargetKubernetesVersion); err != nil {
-				return ctrl.Result{}, fmt.Errorf("reconcileCAPIUpgrade: patch MD version: %w", err)
-			}
-		}
-	}
-
-	platformv1alpha1.SetCondition(
-		&up.Status.Conditions,
-		platformv1alpha1.ConditionTypeUpgradePolicyCAPIDelegated,
-		metav1.ConditionTrue,
-		platformv1alpha1.ReasonUpgradeCAPIDelegated,
-		"Upgrade delegated to CAPI native machinery via TalosControlPlane and MachineDeployment version patch.",
-		up.Generation,
-	)
-	platformv1alpha1.SetCondition(
-		&up.Status.Conditions,
-		platformv1alpha1.ConditionTypeUpgradePolicyReady,
-		metav1.ConditionTrue,
-		platformv1alpha1.ReasonUpgradeCAPIDelegated,
-		"CAPI objects patched. Upgrade progression managed by CAPI controllers.",
-		up.Generation,
-	)
-	r.Recorder.Eventf(up, nil, "Normal", "CAPIDelegated", "CAPIDelegated",
-		"Upgrade for cluster %s delegated to CAPI", up.Spec.ClusterRef.Name)
-	logger.Info("UpgradePolicy reconciled via CAPI delegation",
-		"name", up.Name, "upgradeType", up.Spec.UpgradeType,
-		"cluster", up.Spec.ClusterRef.Name)
-	return ctrl.Result{}, nil
-}
-
-// patchTalosControlPlaneVersion patches the TalosControlPlane version field
-// to trigger a rolling control plane upgrade via CAPI/CACPPT.
-func (r *UpgradePolicyReconciler) patchTalosControlPlaneVersion(ctx context.Context, ns, clusterName, talosVersion string) error {
-	tcp := &unstructured.Unstructured{}
-	tcp.SetGroupVersionKind(schema.GroupVersionKind{
-		Group:   "controlplane.cluster.x-k8s.io",
-		Version: "v1alpha3",
-		Kind:    "TalosControlPlane",
-	})
-	tcpName := clusterName + "-control-plane"
-	if err := r.Client.Get(ctx, types.NamespacedName{Name: tcpName, Namespace: ns}, tcp); err != nil {
-		if apierrors.IsNotFound(err) {
-			return nil // CAPI objects not yet created — no-op.
-		}
-		return fmt.Errorf("get TalosControlPlane %s/%s: %w", ns, tcpName, err)
-	}
-	patch := client.MergeFrom(tcp.DeepCopy())
-	if err := unstructured.SetNestedField(tcp.Object, talosVersion, "spec", "version"); err != nil {
-		return fmt.Errorf("set TalosControlPlane version: %w", err)
-	}
-	return r.Client.Patch(ctx, tcp, patch)
-}
-
-// patchMachineDeploymentVersion patches all MachineDeployments for the cluster
-// to trigger a rolling worker upgrade via CAPI.
-func (r *UpgradePolicyReconciler) patchMachineDeploymentVersion(ctx context.Context, ns, clusterName, k8sVersion string) error {
-	mdList := &unstructured.UnstructuredList{}
-	mdList.SetGroupVersionKind(schema.GroupVersionKind{
-		Group:   "cluster.x-k8s.io",
-		Version: "v1beta1",
-		Kind:    "MachineDeploymentList",
-	})
-	if err := r.Client.List(ctx, mdList,
-		client.InNamespace(ns),
-		client.MatchingLabels{"cluster.x-k8s.io/cluster-name": clusterName},
-	); err != nil {
-		return fmt.Errorf("list MachineDeployments in %s: %w", ns, err)
-	}
-	for i := range mdList.Items {
-		md := mdList.Items[i].DeepCopy()
-		patch := client.MergeFrom(mdList.Items[i].DeepCopy())
-		if err := unstructured.SetNestedField(md.Object, k8sVersion, "spec", "template", "spec", "version"); err != nil {
-			return fmt.Errorf("set MachineDeployment %s version: %w", md.GetName(), err)
-		}
-		if err := r.Client.Patch(ctx, md, patch); err != nil {
-			return fmt.Errorf("patch MachineDeployment %s: %w", md.GetName(), err)
-		}
-	}
-	return nil
-}
-
 // reconcileDirectUpgrade gates on capability then submits a single batch/v1
-// Conductor executor Job for the non-CAPI path. conductor-schema.md §5 §17.
+// Conductor executor Job. conductor-schema.md §5 §17.
 func (r *UpgradePolicyReconciler) reconcileDirectUpgrade(ctx context.Context, up *platformv1alpha1.UpgradePolicy) (ctrl.Result, error) {
 	logger := log.FromContext(ctx)
 
@@ -267,7 +146,7 @@ func (r *UpgradePolicyReconciler) reconcileDirectUpgrade(ctx context.Context, up
 		up.Generation,
 	)
 
-	jobName := operationalJobName(up.Name, capability)
+	jobName := retryJobName(up.Name, capability, up.Status.RetryCount)
 
 	existingJob, err := getOperationalJob(ctx, r.Client, up.Namespace, jobName)
 	if err != nil {
@@ -282,6 +161,8 @@ func (r *UpgradePolicyReconciler) reconcileDirectUpgrade(ctx context.Context, up
 		nodeExclusions := buildNodeExclusions(nil, leaderNode)
 
 		job := jobSpecWithExclusions(jobName, up.Namespace, up.Spec.ClusterRef.Name, capability, nodeExclusions, clusterRC.Spec.RunnerImage)
+		// RECON-J2, RECON-J7: mount target cluster kubeconfig for drain and node-ready checks.
+		addKubeconfigMount(job, up.Spec.ClusterRef.Name)
 
 		// For management cluster upgrades: pass LEADER_NODE so Conductor upgrades
 		// the leader last and performs lease handover before its node reboots.
@@ -324,23 +205,45 @@ func (r *UpgradePolicyReconciler) reconcileDirectUpgrade(ctx context.Context, up
 	// Job exists — check OperationResult ConfigMap.
 	complete, failed, result := readOperationRecord(ctx, r.Client, up.Spec.ClusterRef.Name, jobName)
 	if failed {
+		up.Status.RetryCount++
 		up.Status.OperationResult = result
+		if up.Status.RetryCount >= effectiveMaxRetry(up.Spec.MaxRetry) {
+			msg := fmt.Sprintf("Conductor executor Job %s failed after %d attempts: %s. Human intervention required.", jobName, up.Status.RetryCount, result)
+			platformv1alpha1.SetCondition(
+				&up.Status.Conditions,
+				platformv1alpha1.ConditionTypeUpgradePolicyDegraded,
+				metav1.ConditionTrue,
+				platformv1alpha1.ReasonUpgradePermanentFailure,
+				msg,
+				up.Generation,
+			)
+			r.Recorder.Eventf(up, nil, "Warning", "PermanentFailure", "PermanentFailure", "%s", msg)
+			clusterNS := up.Spec.ClusterRef.Namespace
+			if clusterNS == "" {
+				clusterNS = up.Namespace
+			}
+			_ = setTalosClusterHumanInterventionRequired(ctx, r.Client, up.Spec.ClusterRef.Name, clusterNS,
+				fmt.Sprintf("UpgradePolicy %s/%s permanently failed after %d attempts.", up.Namespace, up.Name, up.Status.RetryCount),
+				up.Generation)
+			return ctrl.Result{}, nil
+		}
 		platformv1alpha1.SetCondition(
 			&up.Status.Conditions,
 			platformv1alpha1.ConditionTypeUpgradePolicyDegraded,
 			metav1.ConditionTrue,
 			platformv1alpha1.ReasonUpgradeJobFailed,
-			fmt.Sprintf("Conductor executor Job %s failed: %s", jobName, result),
+			fmt.Sprintf("Conductor executor Job %s failed (attempt %d/%d): %s. Retrying.", jobName, up.Status.RetryCount, effectiveMaxRetry(up.Spec.MaxRetry), result),
 			up.Generation,
 		)
 		r.Recorder.Eventf(up, nil, "Warning", "JobFailed", "JobFailed",
-			"Conductor executor Job %s failed: %s", jobName, result)
-		return ctrl.Result{}, nil
+			"Conductor executor Job %s failed (attempt %d/%d): %s", jobName, up.Status.RetryCount, effectiveMaxRetry(up.Spec.MaxRetry), result)
+		return ctrl.Result{RequeueAfter: retryJobRetryInterval}, nil
 	}
 	if !complete {
 		return ctrl.Result{RequeueAfter: operationalJobPollInterval}, nil
 	}
 
+	up.Status.RetryCount = 0
 	up.Status.OperationResult = result
 	platformv1alpha1.SetCondition(
 		&up.Status.Conditions,
@@ -389,26 +292,6 @@ func upgradeCapability(ut platformv1alpha1.UpgradeType) (string, error) {
 		return "", fmt.Errorf("unknown UpgradeType %q", ut)
 	}
 }
-
-// upgradeCAPIEnabled reads the owning TalosCluster's capi.enabled field.
-func (r *UpgradePolicyReconciler) upgradeCAPIEnabled(ctx context.Context, up *platformv1alpha1.UpgradePolicy) (bool, error) {
-	tc := &platformv1alpha1.TalosCluster{}
-	ns := up.Spec.ClusterRef.Namespace
-	if ns == "" {
-		ns = up.Namespace
-	}
-	if err := r.Client.Get(ctx, types.NamespacedName{
-		Name:      up.Spec.ClusterRef.Name,
-		Namespace: ns,
-	}, tc); err != nil {
-		if apierrors.IsNotFound(err) {
-			return false, nil
-		}
-		return false, fmt.Errorf("get TalosCluster %s/%s: %w", ns, up.Spec.ClusterRef.Name, err)
-	}
-	return tc.Spec.CAPI != nil && tc.Spec.CAPI.Enabled, nil
-}
-
 
 // patchObservedTalosVersion patches InfrastructureTalosCluster.status.observedTalosVersion
 // to the given version after a successful talos or stack upgrade. The TalosCluster

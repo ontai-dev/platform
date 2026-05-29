@@ -6,6 +6,76 @@ import (
 	"github.com/ontai-dev/seam/pkg/lineage"
 )
 
+// TalosCluster health and intervention condition type constants.
+// Written by ClusterNodeHealthLoop in conductor agent mode.
+const (
+	// ConditionTypeNodeHealthSummary is True when all nodes are Ready.
+	// False when any node is Degraded or Unreachable.
+	// Written by conductor ClusterNodeHealthLoop. RECON-B1.
+	ConditionTypeNodeHealthSummary = "NodeHealthSummary"
+
+	// ConditionTypeHumanInterventionRequired is True when the cluster has entered a state
+	// that conductor cannot resolve autonomously regardless of AutonomyLevel.
+	// Examples: control plane quorum loss, multiple nodes simultaneously degraded.
+	// Written by conductor ClusterNodeHealthLoop. RECON-B3 Tier 3.
+	ConditionTypeHumanInterventionRequired = "HumanInterventionRequired"
+
+	// ConditionTypeCapacitySaturation is True when any node exceeds the CPU or memory
+	// utilisation threshold for the configured consecutive check window.
+	// Written by conductor ClusterNodeHealthLoop. RECON-C6.
+	ConditionTypeCapacitySaturation = "CapacitySaturation"
+
+	// ConditionTypeDiskPressure is True when any node's ephemeral or STATE partition
+	// exceeds the critical disk usage threshold. Written by conductor ClusterNodeHealthLoop. RECON-C7.
+	ConditionTypeDiskPressure = "DiskPressure"
+
+	// ConditionTypeNodeInfrastructureReady is True when all nodes in the cluster have:
+	// machineconfig applied, ont-controlled label injected, and talosconfig endpoints current.
+	// Distinct from the Kubernetes NodeReady condition (which tracks kubelet state).
+	// Written by management conductor after MachineConfigSync completion.
+	// Prerequisite for Kubernetes-layer B selections (tenant conductor RuntimeDrift remediation).
+	// False during: MaintenanceMode (RECON-C10), MachineConfigSync failure,
+	// endpoint drift (RECON-C4), or enrollment in progress. RECON-H2.
+	ConditionTypeNodeInfrastructureReady = "NodeInfrastructureReady"
+)
+
+// Reason constants for health-related TalosCluster conditions.
+const (
+	ReasonAllNodesReady            = "AllNodesReady"
+	ReasonNodesDegraded            = "NodesDegraded"
+	ReasonNodesUnreachable         = "NodesUnreachable"
+	ReasonControlPlaneQuorumAtRisk = "ControlPlaneQuorumAtRisk"
+	ReasonHumanInterventionNeeded  = "HumanInterventionNeeded"
+	ReasonPKIExpiryApproaching     = "PKIExpiryApproaching"
+)
+
+// NodeHealthAnnotation is the TalosCluster annotation key for the per-node JSON health summary.
+// Written by ClusterNodeHealthLoop. Format: {"nodes":[{"name":"...","ip":"...","state":"..."}]}.
+const NodeHealthAnnotation = "platform.ontai.dev/node-health-summary"
+
+// NodeRole classifies a TalosCluster node as either a control plane or worker node.
+// Control plane nodes run etcd and the Kubernetes API server.
+// +kubebuilder:validation:Enum=controlplane;worker
+type NodeRole string
+
+const (
+	NodeRoleControlPlane NodeRole = "controlplane"
+	NodeRoleWorker       NodeRole = "worker"
+)
+
+// NodeAddress is a classified node IP entry in TalosClusterSpec.NodeAddresses.
+// RECON-A9.
+type NodeAddress struct {
+	// IP is the node's primary IPv4 address.
+	IP string `json:"ip"`
+	// Role classifies the node as controlplane or worker.
+	// +kubebuilder:validation:Enum=controlplane;worker
+	Role NodeRole `json:"role"`
+	// Name is the optional node hostname. Used for per-node machineconfig secret targeting.
+	// +optional
+	Name string `json:"name,omitempty"`
+}
+
 // TalosClusterMode declares whether the cluster is bootstrapped or imported.
 // +kubebuilder:validation:Enum=bootstrap;import
 type TalosClusterMode string
@@ -35,15 +105,12 @@ const (
 )
 
 // InfrastructureProvider declares the infrastructure provider backing a TalosCluster.
-// +kubebuilder:validation:Enum=native;capi;screen
+// +kubebuilder:validation:Enum=native;screen
 type InfrastructureProvider string
 
 const (
 	// InfrastructureProviderNative is the default provider.
 	InfrastructureProviderNative InfrastructureProvider = "native"
-
-	// InfrastructureProviderCAPI is an explicit alias for the CAPI-backed path.
-	InfrastructureProviderCAPI InfrastructureProvider = "capi"
 
 	// InfrastructureProviderScreen is reserved for the future Screen operator (INV-021).
 	InfrastructureProviderScreen InfrastructureProvider = "screen"
@@ -57,65 +124,6 @@ type LocalObjectRef struct {
 	// Namespace is the object namespace. May be empty for cluster-scoped objects.
 	// +optional
 	Namespace string `json:"namespace,omitempty"`
-}
-
-// CAPICiliumPackRef is a reference to the cluster-specific Cilium PackDelivery.
-// platform-schema.md §2.3.
-type CAPICiliumPackRef struct {
-	// Name is the PackDelivery CR name for the Cilium pack.
-	Name string `json:"name"`
-
-	// Version is the PackDelivery version string.
-	Version string `json:"version"`
-}
-
-// CAPIWorkerPool declares a worker node pool for a CAPI-managed target cluster.
-type CAPIWorkerPool struct {
-	// Name is the pool identifier. Used as the MachineDeployment name suffix.
-	Name string `json:"name"`
-
-	// Replicas is the desired number of worker nodes in this pool.
-	// +optional
-	Replicas int32 `json:"replicas,omitempty"`
-
-	// SeamInfrastructureMachineNames lists the SeamInfrastructureMachine CR names
-	// pre-provisioned for this pool. One per node.
-	// +optional
-	SeamInfrastructureMachineNames []string `json:"seamInfrastructureMachineNames,omitempty"`
-}
-
-// CAPIControlPlaneConfig declares the control plane configuration for a CAPI target cluster.
-type CAPIControlPlaneConfig struct {
-	// Replicas is the desired number of control plane nodes.
-	// +optional
-	Replicas int32 `json:"replicas,omitempty"`
-}
-
-// CAPIConfig holds CAPI integration settings for a target cluster.
-// Only consulted when capi.enabled=true. platform-schema.md §5.
-type CAPIConfig struct {
-	// Enabled determines whether this TalosCluster uses the CAPI path.
-	Enabled bool `json:"enabled"`
-
-	// TalosVersion is the Talos version to use for TalosConfigTemplate generation.
-	// +optional
-	TalosVersion string `json:"talosVersion,omitempty"`
-
-	// KubernetesVersion is the Kubernetes version for TalosControlPlane.
-	// +optional
-	KubernetesVersion string `json:"kubernetesVersion,omitempty"`
-
-	// ControlPlane holds control plane configuration. Required when Enabled=true.
-	// +optional
-	ControlPlane *CAPIControlPlaneConfig `json:"controlPlane,omitempty"`
-
-	// Workers is the list of worker node pools.
-	// +optional
-	Workers []CAPIWorkerPool `json:"workers,omitempty"`
-
-	// CiliumPackRef references the cluster-specific Cilium PackDelivery.
-	// +optional
-	CiliumPackRef *CAPICiliumPackRef `json:"ciliumPackRef,omitempty"`
 }
 
 // TalosClusterSpec is the declared desired state of a TalosCluster.
@@ -154,13 +162,12 @@ type TalosClusterSpec struct {
 	// +optional
 	ClusterEndpoint string `json:"clusterEndpoint,omitempty"`
 
-	// NodeAddresses is the list of node IPs for DSNSReconciler A-record population.
+	// NodeAddresses is the classified list of node IPs for this cluster.
+	// Each entry carries the node IP, its role (controlplane or worker),
+	// and an optional hostname. Populated by the import flow and bootstrap
+	// compiler; updated on node enrollment changes. RECON-A9.
 	// +optional
-	NodeAddresses []string `json:"nodeAddresses,omitempty"`
-
-	// CAPI holds CAPI integration settings. When absent, direct bootstrap is used.
-	// +optional
-	CAPI *CAPIConfig `json:"capi,omitempty"`
+	NodeAddresses []NodeAddress `json:"nodeAddresses,omitempty"`
 
 	// InfrastructureProvider declares the infrastructure provider backing this cluster.
 	// +kubebuilder:validation:Enum=native;capi;screen
@@ -194,6 +201,30 @@ type TalosClusterSpec struct {
 	HardeningProfileRef *LocalObjectRef `json:"hardeningProfileRef,omitempty"`
 }
 
+// DeletionStage is the current step in the TalosCluster deletion cascade.
+// Written to status before each step so that a reconciler restart can resume
+// from the correct step rather than re-attempting already-completed deletes.
+// RECON-I1.
+//
+// +kubebuilder:validation:Enum="";pack-execution;pack-installed;pack-delivery;runner-config;complete
+type DeletionStage string
+
+const (
+	// DeletionStageNone is the zero value (no deletion in progress).
+	DeletionStageNone DeletionStage = ""
+	// DeletionStagePackExecution indicates the cascade is deleting PackExecutions.
+	DeletionStagePackExecution DeletionStage = "pack-execution"
+	// DeletionStagePackInstalled indicates the cascade is deleting PackInstalled CRs.
+	DeletionStagePackInstalled DeletionStage = "pack-installed"
+	// DeletionStagePackDelivery indicates the cascade is deleting PackDelivery CRs.
+	DeletionStagePackDelivery DeletionStage = "pack-delivery"
+	// DeletionStageRunnerConfig indicates the cascade is deleting the RunnerConfig.
+	DeletionStageRunnerConfig DeletionStage = "runner-config"
+	// DeletionStageComplete indicates all cascade steps completed and the finalizer
+	// is being removed. After this stage the TalosCluster CR is released.
+	DeletionStageComplete DeletionStage = "complete"
+)
+
 // TalosClusterStatus is the observed state of a TalosCluster.
 type TalosClusterStatus struct {
 	// ObservedGeneration is the generation most recently reconciled.
@@ -208,11 +239,6 @@ type TalosClusterStatus struct {
 	// +optional
 	ObservedTalosVersion string `json:"observedTalosVersion,omitempty"`
 
-	// CAPIClusterRef is a reference to the owned CAPI Cluster object.
-	// Only set for CAPI-managed clusters (capi.enabled=true).
-	// +optional
-	CAPIClusterRef *LocalObjectRef `json:"capiClusterRef,omitempty"`
-
 	// Conditions is the list of status conditions for this TalosCluster.
 	// +optional
 	Conditions []metav1.Condition `json:"conditions,omitempty"`
@@ -221,6 +247,12 @@ type TalosClusterStatus struct {
 	// kubeconfig Secrets. Set by the TalosCluster reconciler. platform-schema.md §13.
 	// +optional
 	PkiExpiryDate *metav1.Time `json:"pkiExpiryDate,omitempty"`
+
+	// DeletionStage is the current step in the deletion cascade. Written before
+	// each step so the reconciler can resume from the correct step after a restart.
+	// Empty when no deletion is in progress. RECON-I1.
+	// +optional
+	DeletionStage DeletionStage `json:"deletionStage,omitempty"`
 }
 
 // +kubebuilder:object:root=true

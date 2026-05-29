@@ -44,10 +44,6 @@ const (
 	// ConditionTypeUpgradePolicyDegraded indicates the upgrade failed.
 	ConditionTypeUpgradePolicyDegraded = "Degraded"
 
-	// ConditionTypeUpgradePolicyCAPIDelegated indicates the upgrade has been
-	// delegated to CAPI native machinery (capi.enabled=true path).
-	ConditionTypeUpgradePolicyCAPIDelegated = "CAPIDelegated"
-
 	// ReasonUpgradeJobSubmitted is set when the Conductor executor Job has been submitted.
 	ReasonUpgradeJobSubmitted = "JobSubmitted"
 
@@ -57,12 +53,12 @@ const (
 	// ReasonUpgradeJobFailed is set when the Conductor executor Job failed. INV-018 applies.
 	ReasonUpgradeJobFailed = "JobFailed"
 
-	// ReasonUpgradeCAPIDelegated is set when the upgrade is delegated to CAPI
-	// native machinery for capi.enabled=true clusters.
-	ReasonUpgradeCAPIDelegated = "CAPIDelegated"
-
 	// ReasonUpgradeOperationPending is set before the first action.
 	ReasonUpgradeOperationPending = "Pending"
+
+	// ReasonUpgradePermanentFailure is set when the Job has failed maxRetry times.
+	// No further Jobs will be submitted. Human intervention required.
+	ReasonUpgradePermanentFailure = "PermanentFailure"
 )
 
 // UpgradePolicySpec defines the desired state of UpgradePolicy.
@@ -90,6 +86,15 @@ type UpgradePolicySpec struct {
 	// +kubebuilder:default=sequential
 	RollingStrategy RollingStrategy `json:"rollingStrategy,omitempty"`
 
+	// MaxRetry is the maximum number of times the reconciler will re-submit the
+	// Conductor executor Job after a failure before declaring permanent failure
+	// and setting HumanInterventionRequired on the owning TalosCluster.
+	// Defaults to 3 when unset or zero.
+	// +optional
+	// +kubebuilder:default=3
+	// +kubebuilder:validation:Minimum=1
+	MaxRetry int `json:"maxRetry,omitempty"`
+
 	// HealthGateConditions is a list of Kubernetes condition types that must be
 	// True on each node before the upgrade proceeds to the next node. Used to
 	// gate inter-node upgrade sequencing on cluster health.
@@ -103,14 +108,58 @@ type UpgradePolicySpec struct {
 	Lineage *lineage.SealedCausalChain `json:"lineage,omitempty"`
 }
 
+// UpgradeProgressPhase is the phase of an in-progress upgrade operation.
+//
+// +kubebuilder:validation:Enum=upgrading;complete
+type UpgradeProgressPhase string
+
+const (
+	// UpgradeProgressPhaseUpgrading means the upgrade is actively processing nodes.
+	UpgradeProgressPhaseUpgrading UpgradeProgressPhase = "upgrading"
+
+	// UpgradeProgressPhaseComplete means all nodes finished successfully and the
+	// progress record is cleared on the next reconcile.
+	UpgradeProgressPhaseComplete UpgradeProgressPhase = "complete"
+)
+
+// UpgradeProgress records per-node checkpoint state for a rolling upgrade.
+// Written by the Conductor executor Job after each successful node step so
+// that a retry Job can resume from where the previous Job failed rather than
+// re-upgrading already-completed nodes. RECON-J6.
+type UpgradeProgress struct {
+	// CompletedNodes is the list of node IPs or names that have been successfully
+	// upgraded to the target version in this upgrade operation.
+	// +optional
+	CompletedNodes []string `json:"completedNodes,omitempty"`
+
+	// CurrentNode is the node IP or name currently being upgraded.
+	// Empty between node steps or when no upgrade is in progress.
+	// +optional
+	CurrentNode string `json:"currentNode,omitempty"`
+
+	// FailedNode is the node IP or name that caused the upgrade Job to fail.
+	// Set by the Conductor executor before returning failure so that the next
+	// retry Job knows which node to retry from.
+	// +optional
+	FailedNode string `json:"failedNode,omitempty"`
+
+	// Phase is the current phase of the upgrade operation.
+	// +optional
+	Phase UpgradeProgressPhase `json:"phase,omitempty"`
+}
+
 // UpgradePolicyStatus defines the observed state of UpgradePolicy.
 type UpgradePolicyStatus struct {
 	// ObservedGeneration is the generation of the spec last reconciled.
 	// +optional
 	ObservedGeneration int64 `json:"observedGeneration,omitempty"`
 
+	// RetryCount is the number of Job submission attempts that have failed so far.
+	// Reset to zero on successful Job completion.
+	// +optional
+	RetryCount int `json:"retryCount,omitempty"`
+
 	// JobName is the name of the Conductor executor Job submitted for this upgrade.
-	// Only set for the capi.enabled=false (non-CAPI) path.
 	// +optional
 	JobName string `json:"jobName,omitempty"`
 
@@ -118,8 +167,15 @@ type UpgradePolicyStatus struct {
 	// +optional
 	OperationResult string `json:"operationResult,omitempty"`
 
+	// Progress tracks per-node checkpoint state for a rolling upgrade.
+	// Written by the Conductor executor Job after each successful node step.
+	// Cleared when all nodes complete or when the UpgradePolicy is superseded.
+	// RECON-J6: enables retry Jobs to skip already-completed nodes.
+	// +optional
+	Progress *UpgradeProgress `json:"progress,omitempty"`
+
 	// Conditions is the list of status conditions for this UpgradePolicy.
-	// Condition types: Ready, Degraded, CAPIDelegated, LineageSynced.
+	// Condition types: Ready, Degraded, LineageSynced.
 	// +optional
 	// +listType=map
 	// +listMapKey=type
@@ -127,16 +183,10 @@ type UpgradePolicyStatus struct {
 }
 
 // UpgradePolicy governs Talos OS, Kubernetes, or combined stack upgrades.
+// Submits a talos-upgrade, kube-upgrade, or stack-upgrade Conductor executor Job.
 //
-// Dual-path CRD governed by spec.capi.enabled on the owning TalosCluster:
-//   - For CAPI-managed clusters (capi.enabled=true): updates TalosControlPlane
-//     version and MachineDeployment rolling upgrade settings natively through
-//     CAPI machinery. No Conductor Job is submitted.
-//   - For management cluster (capi.enabled=false): submits talos-upgrade,
-//     kube-upgrade, or stack-upgrade Conductor executor Job.
-//
-// Named Conductor capabilities (non-CAPI path): talos-upgrade, kube-upgrade,
-// stack-upgrade. platform-schema.md §5.
+// Named Conductor capabilities: talos-upgrade, kube-upgrade, stack-upgrade.
+// platform-schema.md §5.
 //
 // +kubebuilder:object:root=true
 // +kubebuilder:subresource:status

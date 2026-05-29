@@ -93,10 +93,15 @@ func (r *EtcdMaintenanceReconciler) Reconcile(ctx context.Context, req ctrl.Requ
 		)
 	}
 
-	// If already complete, do nothing — this is a one-shot CR.
+	// If already complete, self-delete after the day-2 TTL; requeue until then.
 	readyCond := platformv1alpha1.FindCondition(em.Status.Conditions, platformv1alpha1.ConditionTypeEtcdMaintenanceReady)
 	if readyCond != nil && readyCond.Status == metav1.ConditionTrue {
-		return ctrl.Result{}, nil
+		if expired, after := day2TTLExpired(readyCond.LastTransitionTime.Time); expired {
+			_ = r.Client.Delete(ctx, em)
+			return ctrl.Result{}, nil
+		} else {
+			return ctrl.Result{RequeueAfter: after}, nil
+		}
 	}
 
 	// Determine the Conductor capability for this operation.
@@ -150,7 +155,7 @@ func (r *EtcdMaintenanceReconciler) Reconcile(ctx context.Context, req ctrl.Requ
 		em.Generation,
 	)
 
-	jobName := operationalJobName(em.Name, capability)
+	jobName := retryJobName(em.Name, capability, em.Status.RetryCount)
 
 	// Check for an existing Job.
 	existingJob, err := getOperationalJob(ctx, r.Client, em.Namespace, jobName)
@@ -252,15 +257,8 @@ func (r *EtcdMaintenanceReconciler) Reconcile(ctx context.Context, req ctrl.Requ
 	// Job exists — check OperationResult ConfigMap.
 	complete, failed, result := readOperationRecord(ctx, r.Client, em.Spec.ClusterRef.Name, jobName)
 	if failed {
+		em.Status.RetryCount++
 		em.Status.OperationResult = result
-		platformv1alpha1.SetCondition(
-			&em.Status.Conditions,
-			platformv1alpha1.ConditionTypeEtcdMaintenanceDegraded,
-			metav1.ConditionTrue,
-			platformv1alpha1.ReasonEtcdJobFailed,
-			fmt.Sprintf("Conductor executor Job %s failed: %s", jobName, result),
-			em.Generation,
-		)
 		platformv1alpha1.SetCondition(
 			&em.Status.Conditions,
 			platformv1alpha1.ConditionTypeEtcdMaintenanceRunning,
@@ -269,15 +267,44 @@ func (r *EtcdMaintenanceReconciler) Reconcile(ctx context.Context, req ctrl.Requ
 			"Job failed.",
 			em.Generation,
 		)
+		if em.Status.RetryCount >= effectiveMaxRetry(em.Spec.MaxRetry) {
+			msg := fmt.Sprintf("Conductor executor Job %s failed after %d attempts: %s. Human intervention required.", jobName, em.Status.RetryCount, result)
+			platformv1alpha1.SetCondition(
+				&em.Status.Conditions,
+				platformv1alpha1.ConditionTypeEtcdMaintenanceDegraded,
+				metav1.ConditionTrue,
+				platformv1alpha1.ReasonEtcdPermanentFailure,
+				msg,
+				em.Generation,
+			)
+			r.Recorder.Eventf(em, nil, "Warning", "PermanentFailure", "PermanentFailure", "%s", msg)
+			clusterNS := em.Spec.ClusterRef.Namespace
+			if clusterNS == "" {
+				clusterNS = em.Namespace
+			}
+			_ = setTalosClusterHumanInterventionRequired(ctx, r.Client, em.Spec.ClusterRef.Name, clusterNS,
+				fmt.Sprintf("EtcdMaintenance %s/%s permanently failed after %d attempts.", em.Namespace, em.Name, em.Status.RetryCount),
+				em.Generation)
+			return ctrl.Result{}, nil
+		}
+		platformv1alpha1.SetCondition(
+			&em.Status.Conditions,
+			platformv1alpha1.ConditionTypeEtcdMaintenanceDegraded,
+			metav1.ConditionTrue,
+			platformv1alpha1.ReasonEtcdJobFailed,
+			fmt.Sprintf("Conductor executor Job %s failed (attempt %d/%d): %s. Retrying.", jobName, em.Status.RetryCount, effectiveMaxRetry(em.Spec.MaxRetry), result),
+			em.Generation,
+		)
 		r.Recorder.Eventf(em, nil, "Warning", "JobFailed", "JobFailed",
-			"Conductor executor Job %s failed: %s", jobName, result)
-		return ctrl.Result{}, nil
+			"Conductor executor Job %s failed (attempt %d/%d): %s", jobName, em.Status.RetryCount, effectiveMaxRetry(em.Spec.MaxRetry), result)
+		return ctrl.Result{RequeueAfter: retryJobRetryInterval}, nil
 	}
 	if !complete {
 		return ctrl.Result{RequeueAfter: operationalJobPollInterval}, nil
 	}
 
 	// Job complete.
+	em.Status.RetryCount = 0
 	em.Status.OperationResult = result
 	platformv1alpha1.SetCondition(
 		&em.Status.Conditions,

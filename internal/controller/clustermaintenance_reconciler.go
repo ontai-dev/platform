@@ -1,14 +1,8 @@
 package controller
 
 // ClusterMaintenanceReconciler reconciles ClusterMaintenance CRs. It evaluates
-// the current time against declared maintenance windows and enforces the gate:
-//
-//   - CAPI path (capi.enabled=true): sets cluster.x-k8s.io/paused=true on the
-//     CAPI Cluster when no active window exists and blockOutsideWindows=true.
-//     Lifts the pause annotation when a window opens.
-//
-//   - Non-CAPI path (capi.enabled=false): records the gate state in status.
-//     Conductor Job admission uses the ClusterMaintenance status to gate operations.
+// the current time against declared maintenance windows and records the gate state
+// in status. Conductor Job admission uses the ClusterMaintenance status to gate operations.
 //
 // platform-schema.md §5 ClusterMaintenance.
 
@@ -19,10 +13,7 @@ import (
 
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime"
-	"k8s.io/apimachinery/pkg/runtime/schema"
-	"k8s.io/apimachinery/pkg/types"
 	clientevents "k8s.io/client-go/tools/events"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -32,9 +23,6 @@ import (
 )
 
 const (
-	// capiPausedAnnotation is the CAPI annotation that pauses cluster reconciliation.
-	capiPausedAnnotation = "cluster.x-k8s.io/paused"
-
 	// maintenanceRecheckInterval is the requeue interval for window boundary checks.
 	maintenanceRecheckInterval = 60 * time.Second
 )
@@ -133,147 +121,31 @@ func (r *ClusterMaintenanceReconciler) Reconcile(ctx context.Context, req ctrl.R
 		return ctrl.Result{RequeueAfter: maintenanceRecheckInterval}, nil
 	}
 
-	// Determine CAPI path.
-	capiEnabled, err := r.maintenanceCAPIEnabled(ctx, cm)
-	if err != nil {
-		return ctrl.Result{}, fmt.Errorf("ClusterMaintenanceReconciler: read TalosCluster: %w", err)
-	}
-
-	if capiEnabled {
-		if err := r.reconcileCAPIPause(ctx, cm, windowActive); err != nil {
-			return ctrl.Result{}, fmt.Errorf("ClusterMaintenanceReconciler: CAPI pause: %w", err)
-		}
-	} else {
-		// Non-CAPI: record gate state in status. Conductor Job admission reads this.
-		if windowActive {
-			platformv1alpha1.SetCondition(
-				&cm.Status.Conditions,
-				platformv1alpha1.ConditionTypeClusterMaintenancePaused,
-				metav1.ConditionFalse,
-				platformv1alpha1.ReasonMaintenanceWindowOpen,
-				"Maintenance window is open: Conductor Job admission is permitted.",
-				cm.Generation,
-			)
-		} else {
-			platformv1alpha1.SetCondition(
-				&cm.Status.Conditions,
-				platformv1alpha1.ConditionTypeClusterMaintenancePaused,
-				metav1.ConditionTrue,
-				platformv1alpha1.ReasonConductorJobGateBlocked,
-				"Outside maintenance window: Conductor Job admission is blocked.",
-				cm.Generation,
-			)
-		}
-	}
-
-	logger.V(1).Info("ClusterMaintenance reconciled",
-		"name", cm.Name, "windowActive", windowActive,
-		"blockOutsideWindows", cm.Spec.BlockOutsideWindows, "capiEnabled", capiEnabled)
-	return ctrl.Result{RequeueAfter: maintenanceRecheckInterval}, nil
-}
-
-// reconcileCAPIPause sets or clears the CAPI pause annotation on the Cluster object.
-func (r *ClusterMaintenanceReconciler) reconcileCAPIPause(ctx context.Context, cm *platformv1alpha1.ClusterMaintenance, windowActive bool) error {
-	tenantNS := "seam-tenant-" + cm.Spec.ClusterRef.Name
-	capiCluster := &unstructured.Unstructured{}
-	capiCluster.SetGroupVersionKind(schema.GroupVersionKind{
-		Group:   "cluster.x-k8s.io",
-		Version: "v1beta1",
-		Kind:    "Cluster",
-	})
-	if err := r.Client.Get(ctx, types.NamespacedName{
-		Name:      cm.Spec.ClusterRef.Name,
-		Namespace: tenantNS,
-	}, capiCluster); err != nil {
-		if apierrors.IsNotFound(err) {
-			return nil // CAPI Cluster not yet visible — no-op.
-		}
-		return fmt.Errorf("get CAPI Cluster %s/%s: %w", tenantNS, cm.Spec.ClusterRef.Name, err)
-	}
-
-	annotations := capiCluster.GetAnnotations()
-	if annotations == nil {
-		annotations = make(map[string]string)
-	}
-	_, isPaused := annotations[capiPausedAnnotation]
-
-	patch := client.MergeFrom(capiCluster.DeepCopy())
-
-	if windowActive && isPaused {
-		// Window opened — lift the pause.
-		delete(annotations, capiPausedAnnotation)
-		capiCluster.SetAnnotations(annotations)
-		if err := r.Client.Patch(ctx, capiCluster, patch); err != nil {
-			return fmt.Errorf("lift CAPI pause annotation: %w", err)
-		}
-		platformv1alpha1.SetCondition(
-			&cm.Status.Conditions,
-			platformv1alpha1.ConditionTypeClusterMaintenancePaused,
-			metav1.ConditionFalse,
-			platformv1alpha1.ReasonCAPIResumed,
-			"Maintenance window opened: CAPI pause annotation removed.",
-			cm.Generation,
-		)
-		r.Recorder.Eventf(cm, nil, "Normal", "CAPIResumed", "CAPIResumed",
-			"Maintenance window opened for cluster %s — CAPI reconciliation resumed", cm.Spec.ClusterRef.Name)
-	} else if !windowActive && !isPaused {
-		// Outside window — set the pause.
-		annotations[capiPausedAnnotation] = "true"
-		capiCluster.SetAnnotations(annotations)
-		if err := r.Client.Patch(ctx, capiCluster, patch); err != nil {
-			return fmt.Errorf("set CAPI pause annotation: %w", err)
-		}
-		platformv1alpha1.SetCondition(
-			&cm.Status.Conditions,
-			platformv1alpha1.ConditionTypeClusterMaintenancePaused,
-			metav1.ConditionTrue,
-			platformv1alpha1.ReasonCAPIPaused,
-			"Outside maintenance window: cluster.x-k8s.io/paused=true set on CAPI Cluster.",
-			cm.Generation,
-		)
-		r.Recorder.Eventf(cm, nil, "Normal", "CAPIPaused", "CAPIPaused",
-			"Outside maintenance window for cluster %s — CAPI Cluster paused", cm.Spec.ClusterRef.Name)
-	} else if windowActive {
-		// Window is open and cluster is not paused — steady state.
+	// Record gate state in status. Conductor Job admission reads this.
+	if windowActive {
 		platformv1alpha1.SetCondition(
 			&cm.Status.Conditions,
 			platformv1alpha1.ConditionTypeClusterMaintenancePaused,
 			metav1.ConditionFalse,
 			platformv1alpha1.ReasonMaintenanceWindowOpen,
-			"Maintenance window is open.",
+			"Maintenance window is open: Conductor Job admission is permitted.",
 			cm.Generation,
 		)
 	} else {
-		// Outside window and already paused — steady state.
 		platformv1alpha1.SetCondition(
 			&cm.Status.Conditions,
 			platformv1alpha1.ConditionTypeClusterMaintenancePaused,
 			metav1.ConditionTrue,
-			platformv1alpha1.ReasonCAPIPaused,
-			"Outside maintenance window: CAPI Cluster remains paused.",
+			platformv1alpha1.ReasonConductorJobGateBlocked,
+			"Outside maintenance window: Conductor Job admission is blocked.",
 			cm.Generation,
 		)
 	}
-	return nil
-}
 
-// maintenanceCAPIEnabled reads the owning TalosCluster's capi.enabled field.
-func (r *ClusterMaintenanceReconciler) maintenanceCAPIEnabled(ctx context.Context, cm *platformv1alpha1.ClusterMaintenance) (bool, error) {
-	tc := &platformv1alpha1.TalosCluster{}
-	ns := cm.Spec.ClusterRef.Namespace
-	if ns == "" {
-		ns = cm.Namespace
-	}
-	if err := r.Client.Get(ctx, types.NamespacedName{
-		Name:      cm.Spec.ClusterRef.Name,
-		Namespace: ns,
-	}, tc); err != nil {
-		if apierrors.IsNotFound(err) {
-			return false, nil
-		}
-		return false, fmt.Errorf("get TalosCluster %s/%s: %w", ns, cm.Spec.ClusterRef.Name, err)
-	}
-	return tc.Spec.CAPI != nil && tc.Spec.CAPI.Enabled, nil
+	logger.V(1).Info("ClusterMaintenance reconciled",
+		"name", cm.Name, "windowActive", windowActive,
+		"blockOutsideWindows", cm.Spec.BlockOutsideWindows)
+	return ctrl.Result{RequeueAfter: maintenanceRecheckInterval}, nil
 }
 
 // now returns the current time using the configured clock function.

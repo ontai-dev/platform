@@ -31,7 +31,7 @@ const (
 	// bootstrapPollInterval is the requeue interval while waiting for a bootstrap Job.
 	bootstrapPollInterval = 15 * time.Second
 
-	// capiPollInterval is the requeue interval while waiting for CAPI status transitions.
+	// capiPollInterval is the requeue interval used by SeamInfrastructure reconcilers.
 	capiPollInterval = 20 * time.Second
 
 	// bootstrapCapability is the Conductor executor capability for cluster bootstrap.
@@ -47,12 +47,7 @@ const (
 
 	// conductorExecuteImageName is the base image name for the Conductor executor
 	// binary (debian-slim, used for executor Jobs). conductor-schema.md §3, Decision 12.
-	conductorExecuteImageName = "conductor-execute"
-
-	// devRevision is the image tag used for lab/development builds.
-	// Production releases use {talosVersion} for executor and agent images.
-	// conductor-schema.md §3, INV-011, INV-023.
-	devRevision = "dev"
+	conductorExecuteImageName = "conductor-exec"
 
 	// conductorRegistryEnv is the env var name for overriding the conductor image registry.
 	conductorRegistryEnv = "CONDUCTOR_REGISTRY"
@@ -67,14 +62,10 @@ const (
 // without error — the PhaseFailed condition is already written to tc.Status.
 var errTalosVersionRequired = errors.New("spec.talosVersion is required for conductor image derivation")
 
-// executorImageTag returns the conductor-execute (or conductor agent) image tag.
-// In dev/lab (devRevision=="dev"): returns "dev" regardless of talosVersion.
-// In production: returns talosVersion so the executor tracks the cluster's Talos version.
-// conductor-schema.md §3, INV-011, INV-023.
+// executorImageTag returns the conductor-exec image tag. Always returns talosVersion
+// so the executor tracks the cluster's Talos version in both lab and production.
+// conductor-schema.md §3, INV-011 (conductor exec uses conductor:<talos-version>).
 func executorImageTag(talosVersion string) string {
-	if devRevision == "dev" {
-		return devRevision
-	}
 	return talosVersion
 }
 
@@ -94,7 +85,7 @@ const bootstrapRunnerConfigNamespace = "ont-system"
 // is deleted before the TalosCluster is garbage-collected. Bug 3.
 const finalizerRunnerConfigCleanup = "platform.ontai.dev/runnerconfig-cleanup"
 
-// finalizerTenantNamespaceCleanup is placed on CAPI-enabled TalosCluster objects
+// finalizerTenantNamespaceCleanup is placed on role=tenant TalosCluster objects
 // so the seam-tenant-{name} namespace is deleted before the TalosCluster is
 // garbage-collected. Cross-namespace ownerReferences are not supported by the
 // Kubernetes GC controller; a finalizer is required. PLATFORM-BL-TENANT-GC.
@@ -135,12 +126,11 @@ func (r *TalosClusterReconciler) getBootstrapRunnerConfig(ctx context.Context, c
 // ensureBootstrapRunnerConfig creates the RunnerConfig CR in bootstrapRunnerConfigNamespace
 // (ont-system) for a management cluster bootstrap or import if it does not already exist.
 // Name equals TalosCluster.Name so Conductor can locate it by cluster-ref flag value.
-// RunnerImage uses conductorExecuteImageName (conductor-execute) with a tag derived from
-// tc.Spec.TalosVersion per INV-012 and conductor-schema.md §3:
+// RunnerImage uses conductorExecuteImageName (conductor-exec) with the Talos version tag
+// per INV-012, INV-011, and conductor-schema.md §3:
 //
-//	{CONDUCTOR_REGISTRY}/conductor-execute:{tag}
+//	{CONDUCTOR_REGISTRY}/conductor-exec:{talosVersion}
 //
-// In dev/lab: tag = "dev". In production: tag = tc.Spec.TalosVersion.
 // If TalosVersion is empty, sets ConditionTypePhaseFailed on tc and returns
 // errTalosVersionRequired — the caller must return ctrl.Result{}, nil.
 // Idempotent — returns nil when RunnerConfig already present.
@@ -214,8 +204,8 @@ func (r *TalosClusterReconciler) getBootstrapJob(ctx context.Context, namespace,
 }
 
 // submitBootstrapJob creates the bootstrap Conductor Job for a management cluster
-// TalosCluster (capi.enabled=false). The job runs the bootstrap capability in executor
-// mode. Image uses conductorExecuteImageName with executorImageTag derivation.
+// TalosCluster. The job runs the bootstrap capability in executor mode.
+// Image uses conductorExecuteImageName with executorImageTag derivation.
 // platform-design.md §5.
 func (r *TalosClusterReconciler) submitBootstrapJob(ctx context.Context, tc *platformv1alpha1.TalosCluster, jobName string) error {
 	registry := os.Getenv(conductorRegistryEnv)
@@ -317,446 +307,6 @@ func (r *TalosClusterReconciler) ensureTenantNamespace(ctx context.Context, tc *
 	return nil
 }
 
-// ensureSeamInfrastructureCluster creates the SeamInfrastructureCluster CR in
-// the tenant namespace if it does not exist. Owned by TalosCluster. CP-INV-008.
-// platform-schema.md §4.
-func (r *TalosClusterReconciler) ensureSeamInfrastructureCluster(ctx context.Context, tc *platformv1alpha1.TalosCluster) error {
-	nsName := "seam-tenant-" + tc.Name
-	sic := &unstructured.Unstructured{}
-	sic.SetGroupVersionKind(schema.GroupVersionKind{
-		Group:   "infrastructure.cluster.x-k8s.io",
-		Version: "v1alpha1",
-		Kind:    "SeamInfrastructureCluster",
-	})
-	if err := r.Client.Get(ctx, types.NamespacedName{Name: tc.Name, Namespace: nsName}, sic); err != nil {
-		if !apierrors.IsNotFound(err) {
-			return fmt.Errorf("ensureSeamInfrastructureCluster: get: %w", err)
-		}
-		// Create SeamInfrastructureCluster.
-		sic = &unstructured.Unstructured{}
-		sic.SetGroupVersionKind(schema.GroupVersionKind{
-			Group:   "infrastructure.cluster.x-k8s.io",
-			Version: "v1alpha1",
-			Kind:    "SeamInfrastructureCluster",
-		})
-		sic.SetName(tc.Name)
-		sic.SetNamespace(nsName)
-
-		// Set ownerReference to TalosCluster. CP-INV-008.
-		ownerRef := metav1.OwnerReference{
-			APIVersion:         platformv1alpha1.GroupVersion.String(),
-			Kind:               "TalosCluster",
-			Name:               tc.Name,
-			UID:                tc.UID,
-			Controller:         boolPtr(true),
-			BlockOwnerDeletion: boolPtr(true),
-		}
-		sic.SetOwnerReferences([]metav1.OwnerReference{ownerRef})
-
-		// controlPlaneEndpoint is derived from the first control plane
-		// SeamInfrastructureMachine address. Placeholder until SIM types are defined.
-		// TODO: read controlPlaneEndpoint from TalosControlPlane spec.endpointVIP.
-		if err := unstructured.SetNestedField(sic.Object, map[string]interface{}{
-			"host": "",
-			"port": int64(6443),
-		}, "spec", "controlPlaneEndpoint"); err != nil {
-			return fmt.Errorf("ensureSeamInfrastructureCluster: set controlPlaneEndpoint: %w", err)
-		}
-
-		lineage.SetDescendantLabels(sic, lineage.IndexName("TalosCluster", tc.Name), tc.Namespace, "platform", lineage.ClusterProvision, tc.GetAnnotations()[lineage.AnnotationDeclaringPrincipal])
-		if err := r.Client.Create(ctx, sic); err != nil && !apierrors.IsAlreadyExists(err) {
-			return fmt.Errorf("ensureSeamInfrastructureCluster: create: %w", err)
-		}
-	}
-	return nil
-}
-
-// ensureCAPICluster creates the CAPI Cluster object in the tenant namespace if
-// it does not exist. Owned by TalosCluster. CP-INV-008.
-func (r *TalosClusterReconciler) ensureCAPICluster(ctx context.Context, tc *platformv1alpha1.TalosCluster) error {
-	nsName := "seam-tenant-" + tc.Name
-	cluster := &unstructured.Unstructured{}
-	cluster.SetGroupVersionKind(schema.GroupVersionKind{
-		Group:   "cluster.x-k8s.io",
-		Version: "v1beta1",
-		Kind:    "Cluster",
-	})
-	if err := r.Client.Get(ctx, types.NamespacedName{Name: tc.Name, Namespace: nsName}, cluster); err != nil {
-		if !apierrors.IsNotFound(err) {
-			return fmt.Errorf("ensureCAPICluster: get: %w", err)
-		}
-		cluster = &unstructured.Unstructured{}
-		cluster.SetGroupVersionKind(schema.GroupVersionKind{
-			Group:   "cluster.x-k8s.io",
-			Version: "v1beta1",
-			Kind:    "Cluster",
-		})
-		cluster.SetName(tc.Name)
-		cluster.SetNamespace(nsName)
-
-		ownerRef := metav1.OwnerReference{
-			APIVersion:         platformv1alpha1.GroupVersion.String(),
-			Kind:               "TalosCluster",
-			Name:               tc.Name,
-			UID:                tc.UID,
-			Controller:         boolPtr(true),
-			BlockOwnerDeletion: boolPtr(true),
-		}
-		cluster.SetOwnerReferences([]metav1.OwnerReference{ownerRef})
-
-		// InfrastructureRef points to the SeamInfrastructureCluster.
-		if err := unstructured.SetNestedField(cluster.Object, map[string]interface{}{
-			"apiVersion": "infrastructure.cluster.x-k8s.io/v1alpha1",
-			"kind":       "SeamInfrastructureCluster",
-			"name":       tc.Name,
-			"namespace":  nsName,
-		}, "spec", "infrastructureRef"); err != nil {
-			return fmt.Errorf("ensureCAPICluster: set infrastructureRef: %w", err)
-		}
-
-		// ControlPlaneRef points to TalosControlPlane (CACPPT).
-		if err := unstructured.SetNestedField(cluster.Object, map[string]interface{}{
-			"apiVersion": "controlplane.cluster.x-k8s.io/v1alpha3",
-			"kind":       "TalosControlPlane",
-			"name":       tc.Name + "-control-plane",
-			"namespace":  nsName,
-		}, "spec", "controlPlaneRef"); err != nil {
-			return fmt.Errorf("ensureCAPICluster: set controlPlaneRef: %w", err)
-		}
-
-		lineage.SetDescendantLabels(cluster, lineage.IndexName("TalosCluster", tc.Name), tc.Namespace, "platform", lineage.ClusterProvision, tc.GetAnnotations()[lineage.AnnotationDeclaringPrincipal])
-		if err := r.Client.Create(ctx, cluster); err != nil && !apierrors.IsAlreadyExists(err) {
-			return fmt.Errorf("ensureCAPICluster: create: %w", err)
-		}
-	}
-	return nil
-}
-
-// ensureTalosConfigTemplate creates the TalosConfigTemplate (CABPT) in the
-// tenant namespace. Every template must include CNI=none and Cilium BPF params.
-// CP-INV-009.
-func (r *TalosClusterReconciler) ensureTalosConfigTemplate(ctx context.Context, tc *platformv1alpha1.TalosCluster) error {
-	nsName := "seam-tenant-" + tc.Name
-	tmplName := tc.Name + "-config-template"
-	tct := &unstructured.Unstructured{}
-	tct.SetGroupVersionKind(schema.GroupVersionKind{
-		Group:   "bootstrap.cluster.x-k8s.io",
-		Version: "v1alpha3",
-		Kind:    "TalosConfigTemplate",
-	})
-	if err := r.Client.Get(ctx, types.NamespacedName{Name: tmplName, Namespace: nsName}, tct); err != nil {
-		if !apierrors.IsNotFound(err) {
-			return fmt.Errorf("ensureTalosConfigTemplate: get: %w", err)
-		}
-		tct = &unstructured.Unstructured{}
-		tct.SetGroupVersionKind(schema.GroupVersionKind{
-			Group:   "bootstrap.cluster.x-k8s.io",
-			Version: "v1alpha3",
-			Kind:    "TalosConfigTemplate",
-		})
-		tct.SetName(tmplName)
-		tct.SetNamespace(nsName)
-
-		ownerRef := metav1.OwnerReference{
-			APIVersion:         platformv1alpha1.GroupVersion.String(),
-			Kind:               "TalosCluster",
-			Name:               tc.Name,
-			UID:                tc.UID,
-			Controller:         boolPtr(true),
-			BlockOwnerDeletion: boolPtr(true),
-		}
-		tct.SetOwnerReferences([]metav1.OwnerReference{ownerRef})
-
-		// CP-INV-009: CNI=none is mandatory. Cilium BPF kernel parameters required.
-		// platform-design.md §3.2.
-		// net.core.bpf_jit_harden=0: disable JIT hardening so Cilium BPF programs are
-		//   not blocked by the kernel JIT hardening security gate.
-		// kernel.unprivileged_bpf_disabled=0: allow non-privileged BPF, required for
-		//   Cilium's host networking and L3/L4 policy enforcement datapath.
-		baseSysctls := map[string]interface{}{
-			"net.core.bpf_jit_harden":         "0",
-			"kernel.unprivileged_bpf_disabled": "0",
-		}
-
-		var hardeningPatches []interface{}
-		if tc.Spec.HardeningProfileRef != nil {
-			hpNS := tc.Spec.HardeningProfileRef.Namespace
-			if hpNS == "" {
-				hpNS = tc.Namespace
-			}
-			hp := &platformv1alpha1.HardeningProfile{}
-			if err := r.Client.Get(ctx, types.NamespacedName{
-				Name:      tc.Spec.HardeningProfileRef.Name,
-				Namespace: hpNS,
-			}, hp); err != nil {
-				return fmt.Errorf("ensureTalosConfigTemplate: get HardeningProfile: %w", err)
-			}
-			for k, v := range hp.Spec.SysctlParams {
-				baseSysctls[k] = v
-			}
-			for _, patchStr := range hp.Spec.MachineConfigPatches {
-				var patchObj map[string]interface{}
-				if err := json.Unmarshal([]byte(patchStr), &patchObj); err != nil {
-					return fmt.Errorf("ensureTalosConfigTemplate: parse HardeningProfile patch: %w", err)
-				}
-				hardeningPatches = append(hardeningPatches, patchObj)
-			}
-		}
-
-		machineConfigPatches := []interface{}{
-			map[string]interface{}{
-				"op":    "replace",
-				"path":  "/cluster/network/cni/name",
-				"value": "none",
-			},
-			// Cilium-required BPF kernel parameters merged with HardeningProfile sysctlParams. CP-INV-009.
-			map[string]interface{}{
-				"op":    "add",
-				"path":  "/machine/sysctls",
-				"value": baseSysctls,
-			},
-		}
-		machineConfigPatches = append(machineConfigPatches, hardeningPatches...)
-
-		if err := unstructured.SetNestedField(tct.Object, map[string]interface{}{
-			"generateType": "worker",
-			"talosVersion": tc.Spec.CAPI.TalosVersion,
-			"configPatches": machineConfigPatches,
-		}, "spec", "template", "spec"); err != nil {
-			return fmt.Errorf("ensureTalosConfigTemplate: set spec: %w", err)
-		}
-
-		if err := r.Client.Create(ctx, tct); err != nil && !apierrors.IsAlreadyExists(err) {
-			return fmt.Errorf("ensureTalosConfigTemplate: create: %w", err)
-		}
-	}
-	return nil
-}
-
-// ensureTalosControlPlane creates the TalosControlPlane (CACPPT) in the tenant
-// namespace if it does not exist.
-func (r *TalosClusterReconciler) ensureTalosControlPlane(ctx context.Context, tc *platformv1alpha1.TalosCluster) error {
-	nsName := "seam-tenant-" + tc.Name
-	tcpName := tc.Name + "-control-plane"
-	tcp := &unstructured.Unstructured{}
-	tcp.SetGroupVersionKind(schema.GroupVersionKind{
-		Group:   "controlplane.cluster.x-k8s.io",
-		Version: "v1alpha3",
-		Kind:    "TalosControlPlane",
-	})
-	if err := r.Client.Get(ctx, types.NamespacedName{Name: tcpName, Namespace: nsName}, tcp); err != nil {
-		if !apierrors.IsNotFound(err) {
-			return fmt.Errorf("ensureTalosControlPlane: get: %w", err)
-		}
-		tcp = &unstructured.Unstructured{}
-		tcp.SetGroupVersionKind(schema.GroupVersionKind{
-			Group:   "controlplane.cluster.x-k8s.io",
-			Version: "v1alpha3",
-			Kind:    "TalosControlPlane",
-		})
-		tcp.SetName(tcpName)
-		tcp.SetNamespace(nsName)
-
-		ownerRef := metav1.OwnerReference{
-			APIVersion:         platformv1alpha1.GroupVersion.String(),
-			Kind:               "TalosCluster",
-			Name:               tc.Name,
-			UID:                tc.UID,
-			Controller:         boolPtr(true),
-			BlockOwnerDeletion: boolPtr(true),
-		}
-		tcp.SetOwnerReferences([]metav1.OwnerReference{ownerRef})
-
-		var replicas int64
-		if tc.Spec.CAPI.ControlPlane != nil {
-			replicas = int64(tc.Spec.CAPI.ControlPlane.Replicas)
-		}
-		if err := unstructured.SetNestedField(tcp.Object, map[string]interface{}{
-			"replicas": replicas,
-			"version":  tc.Spec.CAPI.KubernetesVersion,
-			"infrastructureTemplate": map[string]interface{}{
-				"apiVersion": "infrastructure.cluster.x-k8s.io/v1alpha1",
-				"kind":       "SeamInfrastructureMachineTemplate",
-				"name":       tc.Name + "-control-plane-template",
-				"namespace":  nsName,
-			},
-		}, "spec"); err != nil {
-			return fmt.Errorf("ensureTalosControlPlane: set spec: %w", err)
-		}
-
-		lineage.SetDescendantLabels(tcp, lineage.IndexName("TalosCluster", tc.Name), tc.Namespace, "platform", lineage.ClusterProvision, tc.GetAnnotations()[lineage.AnnotationDeclaringPrincipal])
-		if err := r.Client.Create(ctx, tcp); err != nil && !apierrors.IsAlreadyExists(err) {
-			return fmt.Errorf("ensureTalosControlPlane: create: %w", err)
-		}
-	}
-	return nil
-}
-
-// ensureWorkerPool creates the MachineDeployment and SeamInfrastructureMachineTemplate
-// for a worker pool if they do not exist. platform-schema.md §2.2.
-func (r *TalosClusterReconciler) ensureWorkerPool(ctx context.Context, tc *platformv1alpha1.TalosCluster, pool platformv1alpha1.CAPIWorkerPool) error {
-	nsName := "seam-tenant-" + tc.Name
-	mdName := fmt.Sprintf("%s-%s", tc.Name, pool.Name)
-
-	// Ensure SeamInfrastructureMachineTemplate for this pool.
-	simtName := mdName + "-template"
-	simt := &unstructured.Unstructured{}
-	simt.SetGroupVersionKind(schema.GroupVersionKind{
-		Group:   "infrastructure.cluster.x-k8s.io",
-		Version: "v1alpha1",
-		Kind:    "SeamInfrastructureMachineTemplate",
-	})
-	if err := r.Client.Get(ctx, types.NamespacedName{Name: simtName, Namespace: nsName}, simt); err != nil {
-		if !apierrors.IsNotFound(err) {
-			return fmt.Errorf("ensureWorkerPool %s: get SeamInfrastructureMachineTemplate: %w", pool.Name, err)
-		}
-		simt = &unstructured.Unstructured{}
-		simt.SetGroupVersionKind(schema.GroupVersionKind{
-			Group:   "infrastructure.cluster.x-k8s.io",
-			Version: "v1alpha1",
-			Kind:    "SeamInfrastructureMachineTemplate",
-		})
-		simt.SetName(simtName)
-		simt.SetNamespace(nsName)
-		simt.SetOwnerReferences([]metav1.OwnerReference{{
-			APIVersion:         platformv1alpha1.GroupVersion.String(),
-			Kind:               "TalosCluster",
-			Name:               tc.Name,
-			UID:                tc.UID,
-			Controller:         boolPtr(true),
-			BlockOwnerDeletion: boolPtr(true),
-		}})
-
-		if err := r.Client.Create(ctx, simt); err != nil && !apierrors.IsAlreadyExists(err) {
-			return fmt.Errorf("ensureWorkerPool %s: create SeamInfrastructureMachineTemplate: %w", pool.Name, err)
-		}
-	}
-
-	// Ensure MachineDeployment for this pool.
-	md := &unstructured.Unstructured{}
-	md.SetGroupVersionKind(schema.GroupVersionKind{
-		Group:   "cluster.x-k8s.io",
-		Version: "v1beta1",
-		Kind:    "MachineDeployment",
-	})
-	if err := r.Client.Get(ctx, types.NamespacedName{Name: mdName, Namespace: nsName}, md); err != nil {
-		if !apierrors.IsNotFound(err) {
-			return fmt.Errorf("ensureWorkerPool %s: get MachineDeployment: %w", pool.Name, err)
-		}
-		md = &unstructured.Unstructured{}
-		md.SetGroupVersionKind(schema.GroupVersionKind{
-			Group:   "cluster.x-k8s.io",
-			Version: "v1beta1",
-			Kind:    "MachineDeployment",
-		})
-		md.SetName(mdName)
-		md.SetNamespace(nsName)
-		md.SetOwnerReferences([]metav1.OwnerReference{{
-			APIVersion:         platformv1alpha1.GroupVersion.String(),
-			Kind:               "TalosCluster",
-			Name:               tc.Name,
-			UID:                tc.UID,
-			Controller:         boolPtr(true),
-			BlockOwnerDeletion: boolPtr(true),
-		}})
-
-		replicas := int64(pool.Replicas)
-		configTmplName := tc.Name + "-config-template"
-		if err := unstructured.SetNestedField(md.Object, map[string]interface{}{
-			"clusterName": tc.Name,
-			"replicas":    replicas,
-			"selector": map[string]interface{}{
-				"matchLabels": map[string]interface{}{
-					"cluster.x-k8s.io/cluster-name":      tc.Name,
-					"cluster.x-k8s.io/deployment-name":   mdName,
-				},
-			},
-			"template": map[string]interface{}{
-				"metadata": map[string]interface{}{
-					"labels": map[string]interface{}{
-						"cluster.x-k8s.io/cluster-name":    tc.Name,
-						"cluster.x-k8s.io/deployment-name": mdName,
-					},
-				},
-				"spec": map[string]interface{}{
-					"clusterName": tc.Name,
-					"bootstrap": map[string]interface{}{
-						"configRef": map[string]interface{}{
-							"apiVersion": "bootstrap.cluster.x-k8s.io/v1alpha3",
-							"kind":       "TalosConfigTemplate",
-							"name":       configTmplName,
-						},
-					},
-					"infrastructureRef": map[string]interface{}{
-						"apiVersion": "infrastructure.cluster.x-k8s.io/v1alpha1",
-						"kind":       "SeamInfrastructureMachineTemplate",
-						"name":       simtName,
-					},
-				},
-			},
-		}, "spec"); err != nil {
-			return fmt.Errorf("ensureWorkerPool %s: set MachineDeployment spec: %w", pool.Name, err)
-		}
-
-		lineage.SetDescendantLabels(md, lineage.IndexName("TalosCluster", tc.Name), tc.Namespace, "platform", lineage.ClusterProvision, tc.GetAnnotations()[lineage.AnnotationDeclaringPrincipal])
-		if err := r.Client.Create(ctx, md); err != nil && !apierrors.IsAlreadyExists(err) {
-			return fmt.Errorf("ensureWorkerPool %s: create MachineDeployment: %w", pool.Name, err)
-		}
-	}
-	return nil
-}
-
-// getCAPIClusterPhase reads the status.phase field of the CAPI Cluster object
-// for this TalosCluster. Returns the phase string or an error if the object
-// is not yet visible.
-func (r *TalosClusterReconciler) getCAPIClusterPhase(ctx context.Context, tc *platformv1alpha1.TalosCluster) (string, error) {
-	nsName := "seam-tenant-" + tc.Name
-	cluster := &unstructured.Unstructured{}
-	cluster.SetGroupVersionKind(schema.GroupVersionKind{
-		Group:   "cluster.x-k8s.io",
-		Version: "v1beta1",
-		Kind:    "Cluster",
-	})
-	if err := r.Client.Get(ctx, types.NamespacedName{Name: tc.Name, Namespace: nsName}, cluster); err != nil {
-		return "", fmt.Errorf("getCAPIClusterPhase: get CAPI Cluster: %w", err)
-	}
-	phase, _, _ := unstructured.NestedString(cluster.Object, "status", "phase")
-	return phase, nil
-}
-
-// isCiliumPackInstanceReady reads the PackInstance status for the Cilium pack
-// and returns true when the PackInstance has reached Ready status.
-// platform-design.md §4.
-func (r *TalosClusterReconciler) isCiliumPackInstanceReady(ctx context.Context, tc *platformv1alpha1.TalosCluster) (bool, error) {
-	if tc.Spec.CAPI.CiliumPackRef == nil {
-		return true, nil
-	}
-	// Look up the PackInstance for the Cilium ClusterPack in the tenant namespace.
-	// PackInstance is owned by infra.ontai.dev — we read it as unstructured.
-	// platform-schema.md §9: reads infra.ontai.dev/PackInstance.
-	nsName := "seam-tenant-" + tc.Name
-	packInstanceList := &unstructured.UnstructuredList{}
-	packInstanceList.SetGroupVersionKind(schema.GroupVersionKind{
-		Group:   "infra.ontai.dev",
-		Version: "v1alpha1",
-		Kind:    "PackInstanceList",
-	})
-	if err := r.Client.List(ctx, packInstanceList,
-		client.InNamespace(nsName),
-		client.MatchingLabels{"infra.ontai.dev/pack-name": tc.Spec.CAPI.CiliumPackRef.Name}); err != nil {
-		// PackInstance CRD not yet registered — not ready.
-		return false, nil
-	}
-
-	for _, pi := range packInstanceList.Items {
-		ready, _, _ := unstructured.NestedBool(pi.Object, "status", "ready")
-		if ready {
-			return true, nil
-		}
-	}
-	return false, nil
-}
-
 // conductorAgentNamespace is the namespace where Conductor runs on every cluster.
 // Locked namespace model: CONTEXT.md §4.
 const conductorAgentNamespace = "ont-system"
@@ -788,9 +338,8 @@ func (r *TalosClusterReconciler) EnsureRemoteConductorBootstrap(
 
 	tenantNS := "seam-tenant-" + tc.Name
 
-	// Both import and CAPI clusters: kubeconfig is at seam-mc-{cluster}-kubeconfig in
-	// seam-tenant-{cluster}. Import path writes it via ensureKubeconfigSecret.
-	// CAPI path writes it via ensureCAPIKubeconfig after the cluster reaches Running.
+	// Kubeconfig is at seam-mc-{cluster}-kubeconfig in seam-tenant-{cluster}.
+	// Import path writes it via ensureKubeconfigSecret.
 	kubeSecretName := kubeconfigSecretName(tc.Name)
 
 	// Get the kubeconfig Secret for the target cluster.
@@ -1057,9 +606,6 @@ func EnsureRemoteTalosClusterCopy(ctx context.Context, dynClient dynamic.Interfa
 	return nil
 }
 
-// boolPtr returns a pointer to a bool value.
-func boolPtr(b bool) *bool { return &b }
-
 // --- Bug 3: RunnerConfig cleanup finalizer ---
 
 // ensureRunnerConfigCleanupFinalizer adds finalizerRunnerConfigCleanup to tc when
@@ -1084,14 +630,14 @@ func (r *TalosClusterReconciler) ensureRunnerConfigCleanupFinalizer(
 }
 
 // ensureTenantNamespaceCleanupFinalizer adds finalizerTenantNamespaceCleanup to tc
-// when spec.capi.enabled=true and the finalizer is not yet present. The Update is
+// when spec.role=tenant and the finalizer is not yet present. The Update is
 // issued immediately so the finalizer is persisted before any reconcile logic proceeds.
 // PLATFORM-BL-TENANT-GC.
 func (r *TalosClusterReconciler) ensureTenantNamespaceCleanupFinalizer(
 	ctx context.Context,
 	tc *platformv1alpha1.TalosCluster,
 ) error {
-	if tc.Spec.CAPI == nil || !tc.Spec.CAPI.Enabled {
+	if tc.Spec.Role != platformv1alpha1.TalosClusterRoleTenant {
 		return nil
 	}
 	if controllerutil.ContainsFinalizer(tc, finalizerTenantNamespaceCleanup) {
@@ -1145,6 +691,53 @@ func (r *TalosClusterReconciler) ensureDecisionHCascadeFinalizer(
 	return nil
 }
 
+// deletionStageOrder defines the sequence of cascade stages in ascending order.
+// Used by deletionStageReached to determine whether a stage has already been
+// passed in the current cascade run. RECON-I1.
+var deletionStageOrder = []platformv1alpha1.DeletionStage{
+	platformv1alpha1.DeletionStageNone,
+	platformv1alpha1.DeletionStagePackExecution,
+	platformv1alpha1.DeletionStagePackInstalled,
+	platformv1alpha1.DeletionStagePackDelivery,
+	platformv1alpha1.DeletionStageRunnerConfig,
+	platformv1alpha1.DeletionStageComplete,
+}
+
+// deletionStageReached returns true when current >= target in cascade ordering.
+// A step whose stage has been reached does not need to re-execute. RECON-I1.
+func deletionStageReached(current, target platformv1alpha1.DeletionStage) bool {
+	ci, ti := -1, -1
+	for i, s := range deletionStageOrder {
+		if s == current {
+			ci = i
+		}
+		if s == target {
+			ti = i
+		}
+	}
+	return ci >= 0 && ti >= 0 && ci >= ti
+}
+
+// advanceDeletionStage writes the new stage to tc.Status.DeletionStage and
+// patches the status subresource. Called before each cascade step to record
+// progress for restart recovery. RECON-I1.
+func (r *TalosClusterReconciler) advanceDeletionStage(ctx context.Context, tc *platformv1alpha1.TalosCluster, stage platformv1alpha1.DeletionStage) error {
+	if tc.Status.DeletionStage == stage {
+		return nil
+	}
+	base := tc.DeepCopy()
+	tc.Status.DeletionStage = stage
+	if err := r.Client.Status().Patch(ctx, tc, client.MergeFrom(base)); err != nil {
+		// NotFound means the object was already GC'd (all finalizers removed +
+		// deletionTimestamp set). The stage write is visibility-only; treat as success.
+		if apierrors.IsNotFound(err) {
+			return nil
+		}
+		return fmt.Errorf("advanceDeletionStage: set stage %q: %w", stage, err)
+	}
+	return nil
+}
+
 // handleTalosClusterDeletion is called when tc.DeletionTimestamp is set. Handles
 // four finalizers in order:
 //  0. finalizerDecisionHCascade (role=tenant only): Decision H ordered teardown.
@@ -1152,7 +745,7 @@ func (r *TalosClusterReconciler) ensureDecisionHCascadeFinalizer(
 //     components (conductor-tenant RBACProfile, allowedClusters, targetClusters).
 //  1. finalizerRunnerConfigCleanup (annotation-gated): deletes the RunnerConfig in
 //     ont-system and cluster Secrets from seam-system. Bug 3.
-//  2. finalizerTenantNamespaceCleanup (CAPI-enabled only): deletes the
+//  2. finalizerTenantNamespaceCleanup (role=tenant only): deletes the
 //     seam-tenant-{name} namespace. PLATFORM-BL-TENANT-GC.
 //  3. finalizerWrapperRunnerCRBCleanup (role=tenant only): deletes the
 //     cluster-scoped wrapper-runner-cluster-scoped-{name} ClusterRoleBinding.
@@ -1160,6 +753,7 @@ func (r *TalosClusterReconciler) ensureDecisionHCascadeFinalizer(
 //
 // All steps are idempotent on NotFound. Finalizers are removed once their cleanup
 // is complete and all must be absent before the TalosCluster is released.
+// status.deletionStage is written before each step to allow restart recovery. RECON-I1.
 func (r *TalosClusterReconciler) handleTalosClusterDeletion(
 	ctx context.Context,
 	tc *platformv1alpha1.TalosCluster,
@@ -1172,36 +766,48 @@ func (r *TalosClusterReconciler) handleTalosClusterDeletion(
 		tenantNS := "seam-tenant-" + tc.Name
 
 		// Step 0a — Delete all InfrastructurePackExecutions in seam-tenant-{name}.
-		peList := &unstructured.UnstructuredList{}
-		peList.SetGroupVersionKind(schema.GroupVersionKind{
-			Group:   packExecutionTenantGVK.Group,
-			Version: packExecutionTenantGVK.Version,
-			Kind:    packExecutionTenantGVK.Kind + "List",
-		})
-		if err := r.Client.List(ctx, peList, client.InNamespace(tenantNS)); err != nil && !apierrors.IsNotFound(err) {
-			return ctrl.Result{}, fmt.Errorf("handleTalosClusterDeletion: list PackExecutions in %s: %w", tenantNS, err)
-		}
-		for i := range peList.Items {
-			pe := &peList.Items[i]
-			if delErr := r.Client.Delete(ctx, pe); delErr != nil && !apierrors.IsNotFound(delErr) {
-				return ctrl.Result{}, fmt.Errorf("handleTalosClusterDeletion: delete PackExecution %s/%s: %w", tenantNS, pe.GetName(), delErr)
+		// Skip if stage already passed (restart recovery). RECON-I1.
+		if !deletionStageReached(tc.Status.DeletionStage, platformv1alpha1.DeletionStagePackInstalled) {
+			if err := r.advanceDeletionStage(ctx, tc, platformv1alpha1.DeletionStagePackExecution); err != nil {
+				return ctrl.Result{}, err
+			}
+			peList := &unstructured.UnstructuredList{}
+			peList.SetGroupVersionKind(schema.GroupVersionKind{
+				Group:   packExecutionTenantGVK.Group,
+				Version: packExecutionTenantGVK.Version,
+				Kind:    packExecutionTenantGVK.Kind + "List",
+			})
+			if err := r.Client.List(ctx, peList, client.InNamespace(tenantNS)); err != nil && !apierrors.IsNotFound(err) {
+				return ctrl.Result{}, fmt.Errorf("handleTalosClusterDeletion: list PackExecutions in %s: %w", tenantNS, err)
+			}
+			for i := range peList.Items {
+				pe := &peList.Items[i]
+				if delErr := r.Client.Delete(ctx, pe); delErr != nil && !apierrors.IsNotFound(delErr) {
+					return ctrl.Result{}, fmt.Errorf("handleTalosClusterDeletion: delete PackExecution %s/%s: %w", tenantNS, pe.GetName(), delErr)
+				}
 			}
 		}
 
 		// Step 0b — Delete all InfrastructurePackInstances in seam-tenant-{name}.
-		piList := &unstructured.UnstructuredList{}
-		piList.SetGroupVersionKind(schema.GroupVersionKind{
-			Group:   packInstanceTenantGVK.Group,
-			Version: packInstanceTenantGVK.Version,
-			Kind:    packInstanceTenantGVK.Kind + "List",
-		})
-		if err := r.Client.List(ctx, piList, client.InNamespace(tenantNS)); err != nil && !apierrors.IsNotFound(err) {
-			return ctrl.Result{}, fmt.Errorf("handleTalosClusterDeletion: list PackInstances in %s: %w", tenantNS, err)
-		}
-		for i := range piList.Items {
-			pi := &piList.Items[i]
-			if delErr := r.Client.Delete(ctx, pi); delErr != nil && !apierrors.IsNotFound(delErr) {
-				return ctrl.Result{}, fmt.Errorf("handleTalosClusterDeletion: delete PackInstance %s/%s: %w", tenantNS, pi.GetName(), delErr)
+		// Skip if stage already passed (restart recovery). RECON-I1.
+		if !deletionStageReached(tc.Status.DeletionStage, platformv1alpha1.DeletionStagePackDelivery) {
+			if err := r.advanceDeletionStage(ctx, tc, platformv1alpha1.DeletionStagePackInstalled); err != nil {
+				return ctrl.Result{}, err
+			}
+			piList := &unstructured.UnstructuredList{}
+			piList.SetGroupVersionKind(schema.GroupVersionKind{
+				Group:   packInstanceTenantGVK.Group,
+				Version: packInstanceTenantGVK.Version,
+				Kind:    packInstanceTenantGVK.Kind + "List",
+			})
+			if err := r.Client.List(ctx, piList, client.InNamespace(tenantNS)); err != nil && !apierrors.IsNotFound(err) {
+				return ctrl.Result{}, fmt.Errorf("handleTalosClusterDeletion: list PackInstances in %s: %w", tenantNS, err)
+			}
+			for i := range piList.Items {
+				pi := &piList.Items[i]
+				if delErr := r.Client.Delete(ctx, pi); delErr != nil && !apierrors.IsNotFound(delErr) {
+					return ctrl.Result{}, fmt.Errorf("handleTalosClusterDeletion: delete PackInstance %s/%s: %w", tenantNS, pi.GetName(), delErr)
+				}
 			}
 		}
 
@@ -1244,7 +850,11 @@ func (r *TalosClusterReconciler) handleTalosClusterDeletion(
 	}
 
 	// Step 1 — RunnerConfig and Secret cleanup (annotation-gated).
+	// Advance deletion stage for restart recovery. RECON-I1.
 	if controllerutil.ContainsFinalizer(tc, finalizerRunnerConfigCleanup) {
+		if err := r.advanceDeletionStage(ctx, tc, platformv1alpha1.DeletionStageRunnerConfig); err != nil {
+			return ctrl.Result{}, err
+		}
 		rc := &OperationalRunnerConfig{}
 		err := r.Client.Get(ctx, types.NamespacedName{
 			Name:      tc.Name,
@@ -1287,7 +897,7 @@ func (r *TalosClusterReconciler) handleTalosClusterDeletion(
 		}
 	}
 
-	// Step 2 — Tenant namespace cleanup (CAPI-enabled only). PLATFORM-BL-TENANT-GC.
+	// Step 2 — Tenant namespace cleanup (role=tenant only). PLATFORM-BL-TENANT-GC.
 	if controllerutil.ContainsFinalizer(tc, finalizerTenantNamespaceCleanup) {
 		nsName := "seam-tenant-" + tc.Name
 		ns := &corev1.Namespace{}
@@ -1326,6 +936,13 @@ func (r *TalosClusterReconciler) handleTalosClusterDeletion(
 		controllerutil.RemoveFinalizer(tc, finalizerWrapperRunnerCRBCleanup)
 		if err := r.Client.Update(ctx, tc); err != nil {
 			return ctrl.Result{}, fmt.Errorf("handleTalosClusterDeletion: remove wrapper-runner-crb finalizer: %w", err)
+		}
+	}
+
+	// All finalizers removed. Mark cascade complete for visibility. RECON-I1.
+	if tc.Status.DeletionStage != platformv1alpha1.DeletionStageComplete {
+		if err := r.advanceDeletionStage(ctx, tc, platformv1alpha1.DeletionStageComplete); err != nil {
+			return ctrl.Result{}, err
 		}
 	}
 
@@ -1627,8 +1244,8 @@ func (r *TalosClusterReconciler) ensureExecutorTalosconfig(ctx context.Context, 
 
 // ensureTenantExecutorResources creates the platform-executor ServiceAccount,
 // Role, and RoleBinding in seam-tenant-{clusterName} so that day-2 Conductor
-// executor Jobs can write InfrastructureTalosClusterOperationResult CRs and
-// read platform CRDs (NodeOperation, NodeMaintenance, etc.) in that namespace.
+// executor Jobs can write ClusterLog CRs and read platform CRDs (NodeOperation,
+// NodeMaintenance, etc.) in that namespace.
 // CP-INV-003, CP-INV-004: RBAC is Guardian-governed; this creates the minimal
 // namespace-scoped resources required for executor Job pods.
 func (r *TalosClusterReconciler) ensureTenantExecutorResources(ctx context.Context, tc *platformv1alpha1.TalosCluster) error {
@@ -1651,6 +1268,23 @@ func (r *TalosClusterReconciler) ensureTenantExecutorResources(ctx context.Conte
 		}
 	}
 
+	executorRules := []rbacv1.PolicyRule{
+		{
+			APIGroups: []string{"seam.ontai.dev"},
+			Resources: []string{"clusterlogs"},
+			Verbs:     []string{"get", "create", "update", "patch"},
+		},
+		{
+			APIGroups: []string{"platform.ontai.dev"},
+			Resources: []string{"etcdmaintenances", "hardeningprofiles", "nodemaintenances", "nodeoperations", "pkirotations", "upgradepolicies"},
+			Verbs:     []string{"get", "list", "watch"},
+		},
+		{
+			APIGroups: []string{""},
+			Resources: []string{"secrets"},
+			Verbs:     []string{"get", "create", "update", "patch"},
+		},
+	}
 	role := &rbacv1.Role{}
 	if err := r.Client.Get(ctx, types.NamespacedName{Name: "platform-executor", Namespace: tenantNS}, role); err != nil {
 		if !apierrors.IsNotFound(err) {
@@ -1662,26 +1296,15 @@ func (r *TalosClusterReconciler) ensureTenantExecutorResources(ctx context.Conte
 				Namespace: tenantNS,
 				Labels:    map[string]string{"platform.ontai.dev/cluster": tc.Name},
 			},
-			Rules: []rbacv1.PolicyRule{
-				{
-					APIGroups: []string{"infrastructure.ontai.dev"},
-					Resources: []string{"infrastructuretalosclusteroperationresults"},
-					Verbs:     []string{"get", "create", "update", "patch"},
-				},
-				{
-					APIGroups: []string{"platform.ontai.dev"},
-					Resources: []string{"etcdmaintenances", "hardeningprofiles", "nodemaintenances", "nodeoperations", "pkirotations", "upgradepolicies"},
-					Verbs:     []string{"get", "list", "watch"},
-				},
-				{
-					APIGroups: []string{""},
-					Resources: []string{"secrets"},
-					Verbs:     []string{"get", "create", "update", "patch"},
-				},
-			},
+			Rules: executorRules,
 		}
 		if err := r.Client.Create(ctx, role); err != nil && !apierrors.IsAlreadyExists(err) {
 			return fmt.Errorf("ensureTenantExecutorResources: create Role: %w", err)
+		}
+	} else {
+		role.Rules = executorRules
+		if err := r.Client.Update(ctx, role); err != nil {
+			return fmt.Errorf("ensureTenantExecutorResources: update Role: %w", err)
 		}
 	}
 
@@ -1836,82 +1459,3 @@ func (r *TalosClusterReconciler) ensureWrapperRunnerResources(ctx context.Contex
 	return nil
 }
 
-// ensureCAPIKubeconfig copies the CAPI-generated kubeconfig Secret to the canonical
-// seam-mc-{cluster}-kubeconfig name in seam-tenant-{cluster}. CAPI writes
-// {cluster}-kubeconfig in the cluster namespace after the cluster reaches Running state.
-// All platform operations (EnsureRemoteConductorBootstrap, PKI rotation, conductor-execute
-// Jobs) read from the canonical name. Idempotent. Called from reconcileCAPIPath after
-// CAPI Cluster reaches Running.
-func (r *TalosClusterReconciler) ensureCAPIKubeconfig(ctx context.Context, tc *platformv1alpha1.TalosCluster) error {
-	tenantNS := "seam-tenant-" + tc.Name
-	dstName := kubeconfigSecretName(tc.Name)
-
-	if err := r.Client.Get(ctx, types.NamespacedName{Name: dstName, Namespace: tenantNS}, &corev1.Secret{}); err == nil {
-		return nil
-	} else if !apierrors.IsNotFound(err) {
-		return fmt.Errorf("ensureCAPIKubeconfig: check %s/%s: %w", tenantNS, dstName, err)
-	}
-
-	srcName := tc.Name + "-kubeconfig"
-	src := &corev1.Secret{}
-	if err := r.Client.Get(ctx, types.NamespacedName{Name: srcName, Namespace: tenantNS}, src); err != nil {
-		if apierrors.IsNotFound(err) {
-			return nil // CAPI not yet written; reconcile will retry
-		}
-		return fmt.Errorf("ensureCAPIKubeconfig: get source %s/%s: %w", tenantNS, srcName, err)
-	}
-
-	dst := &corev1.Secret{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      dstName,
-			Namespace: tenantNS,
-			Labels:    map[string]string{"platform.ontai.dev/cluster": tc.Name},
-		},
-		Type: corev1.SecretTypeOpaque,
-		Data: src.Data,
-	}
-	if err := r.Client.Create(ctx, dst); err != nil && !apierrors.IsAlreadyExists(err) {
-		return fmt.Errorf("ensureCAPIKubeconfig: create %s/%s: %w", tenantNS, dstName, err)
-	}
-	return nil
-}
-
-// ensureCAPITalosconfig copies the TALM-generated talosconfig Secret to the canonical
-// seam-mc-{cluster}-talosconfig name in seam-tenant-{cluster}. TALM writes
-// {cluster}-talosconfig in the cluster namespace. The canonical name is what
-// ensureExecutorTalosconfig reads as its source, so day-2 executor Jobs receive
-// the correct talosconfig in seam-tenant-{cluster}. Idempotent. Called from
-// reconcileCAPIPath after CAPI Cluster reaches Running.
-func (r *TalosClusterReconciler) ensureCAPITalosconfig(ctx context.Context, tc *platformv1alpha1.TalosCluster) error {
-	tenantNS := "seam-tenant-" + tc.Name
-	dstName := talosconfigSecretName(tc.Name)
-
-	if err := r.Client.Get(ctx, types.NamespacedName{Name: dstName, Namespace: tenantNS}, &corev1.Secret{}); err == nil {
-		return nil
-	} else if !apierrors.IsNotFound(err) {
-		return fmt.Errorf("ensureCAPITalosconfig: check %s/%s: %w", tenantNS, dstName, err)
-	}
-
-	srcName := tc.Name + "-talosconfig"
-	src := &corev1.Secret{}
-	if err := r.Client.Get(ctx, types.NamespacedName{Name: srcName, Namespace: tenantNS}, src); err != nil {
-		if apierrors.IsNotFound(err) {
-			return nil // TALM not yet written; reconcile will retry
-		}
-		return fmt.Errorf("ensureCAPITalosconfig: get source %s/%s: %w", tenantNS, srcName, err)
-	}
-
-	dst := &corev1.Secret{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      dstName,
-			Namespace: tenantNS,
-			Labels:    map[string]string{"platform.ontai.dev/cluster": tc.Name},
-		},
-		Type: corev1.SecretTypeOpaque,
-		Data: src.Data,
-	}
-	if err := r.Client.Create(ctx, dst); err != nil && !apierrors.IsAlreadyExists(err) {
-		return fmt.Errorf("ensureCAPITalosconfig: create %s/%s: %w", tenantNS, dstName, err)
-	}
-	return nil
-}

@@ -87,10 +87,15 @@ func (r *NodeMaintenanceReconciler) Reconcile(ctx context.Context, req ctrl.Requ
 		)
 	}
 
-	// If already complete, do nothing.
+	// If already complete, self-delete after the day-2 TTL; requeue until then.
 	readyCond := platformv1alpha1.FindCondition(nm.Status.Conditions, platformv1alpha1.ConditionTypeNodeMaintenanceReady)
 	if readyCond != nil && readyCond.Status == metav1.ConditionTrue {
-		return ctrl.Result{}, nil
+		if expired, after := day2TTLExpired(readyCond.LastTransitionTime.Time); expired {
+			_ = r.Client.Delete(ctx, nm)
+			return ctrl.Result{}, nil
+		} else {
+			return ctrl.Result{RequeueAfter: after}, nil
+		}
 	}
 
 	capability, err := nodeMaintenanceCapability(nm.Spec.Operation)
@@ -142,7 +147,7 @@ func (r *NodeMaintenanceReconciler) Reconcile(ctx context.Context, req ctrl.Requ
 		nm.Generation,
 	)
 
-	jobName := operationalJobName(nm.Name, capability)
+	jobName := retryJobName(nm.Name, capability, nm.Status.RetryCount)
 
 	existingJob, err := getOperationalJob(ctx, r.Client, nm.Namespace, jobName)
 	if err != nil {
@@ -182,23 +187,45 @@ func (r *NodeMaintenanceReconciler) Reconcile(ctx context.Context, req ctrl.Requ
 	// Job exists — check OperationResult ConfigMap.
 	complete, failed, result := readOperationRecord(ctx, r.Client, nm.Spec.ClusterRef.Name, jobName)
 	if failed {
+		nm.Status.RetryCount++
 		nm.Status.OperationResult = result
+		if nm.Status.RetryCount >= effectiveMaxRetry(nm.Spec.MaxRetry) {
+			msg := fmt.Sprintf("Conductor executor Job %s failed after %d attempts: %s. Human intervention required.", jobName, nm.Status.RetryCount, result)
+			platformv1alpha1.SetCondition(
+				&nm.Status.Conditions,
+				platformv1alpha1.ConditionTypeNodeMaintenanceDegraded,
+				metav1.ConditionTrue,
+				platformv1alpha1.ReasonNodePermanentFailure,
+				msg,
+				nm.Generation,
+			)
+			r.Recorder.Eventf(nm, nil, "Warning", "PermanentFailure", "PermanentFailure", "%s", msg)
+			clusterNS := nm.Spec.ClusterRef.Namespace
+			if clusterNS == "" {
+				clusterNS = nm.Namespace
+			}
+			_ = setTalosClusterHumanInterventionRequired(ctx, r.Client, nm.Spec.ClusterRef.Name, clusterNS,
+				fmt.Sprintf("NodeMaintenance %s/%s permanently failed after %d attempts.", nm.Namespace, nm.Name, nm.Status.RetryCount),
+				nm.Generation)
+			return ctrl.Result{}, nil
+		}
 		platformv1alpha1.SetCondition(
 			&nm.Status.Conditions,
 			platformv1alpha1.ConditionTypeNodeMaintenanceDegraded,
 			metav1.ConditionTrue,
 			platformv1alpha1.ReasonNodeJobFailed,
-			fmt.Sprintf("Conductor executor Job %s failed: %s", jobName, result),
+			fmt.Sprintf("Conductor executor Job %s failed (attempt %d/%d): %s. Retrying.", jobName, nm.Status.RetryCount, effectiveMaxRetry(nm.Spec.MaxRetry), result),
 			nm.Generation,
 		)
 		r.Recorder.Eventf(nm, nil, "Warning", "JobFailed", "JobFailed",
-			"Conductor executor Job %s failed: %s", jobName, result)
-		return ctrl.Result{}, nil
+			"Conductor executor Job %s failed (attempt %d/%d): %s", jobName, nm.Status.RetryCount, effectiveMaxRetry(nm.Spec.MaxRetry), result)
+		return ctrl.Result{RequeueAfter: retryJobRetryInterval}, nil
 	}
 	if !complete {
 		return ctrl.Result{RequeueAfter: operationalJobPollInterval}, nil
 	}
 
+	nm.Status.RetryCount = 0
 	nm.Status.OperationResult = result
 	platformv1alpha1.SetCondition(
 		&nm.Status.Conditions,

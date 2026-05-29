@@ -5,7 +5,10 @@ package controller_test
 
 import (
 	"context"
+	"crypto/sha256"
+	"fmt"
 	"testing"
+	"time"
 
 	batchv1 "k8s.io/api/batch/v1"
 	coordinationv1 "k8s.io/api/coordination/v1"
@@ -57,15 +60,15 @@ func buildDay2Scheme(t *testing.T) *runtime.Scheme {
 // clusterRC builds a cluster RunnerConfig in ont-system with the given capabilities.
 // Day-2 reconcilers gate on this before submitting any Job. conductor-schema.md §5 CR-INV-005.
 func clusterRC(clusterName string, capabilities ...string) *controller.OperationalRunnerConfig {
-	caps := make([]controller.CapabilityEntry, len(capabilities))
-	for i, c := range capabilities {
-		caps[i] = controller.CapabilityEntry{Name: c, Version: "1.0.0"}
-	}
 	rc := &controller.OperationalRunnerConfig{
 		ObjectMeta: metav1.ObjectMeta{Name: clusterName, Namespace: "ont-system"},
 	}
 	rc.Spec.RunnerImage = "10.20.0.1:5000/ontai-dev/conductor:v1.9.3-dev"
-	rc.Status.Capabilities = caps
+	entries := make([]seamcorev1alpha1.RunnerCapabilityEntry, len(capabilities))
+	for i, name := range capabilities {
+		entries[i] = seamcorev1alpha1.RunnerCapabilityEntry{Name: name, Version: "1.0.0"}
+	}
+	rc.Status.Capabilities = entries
 	return rc
 }
 
@@ -970,7 +973,7 @@ func TestNodeMaintenanceReconcile_IdempotentAfterReady(t *testing.T) {
 					Status:             metav1.ConditionTrue,
 					Reason:             platformv1alpha1.ReasonNodeJobComplete,
 					Message:            "complete",
-					LastTransitionTime: metav1.Now(),
+					LastTransitionTime: metav1.NewTime(time.Now().Add(-7 * time.Hour)),
 				},
 			},
 		},
@@ -1046,7 +1049,7 @@ func TestClusterMaintenanceReconcile_NoBlockOutsideWindows(t *testing.T) {
 
 // TestClusterMaintenanceReconcile_BlockOutsideWindowsNoWindow verifies that when
 // blockOutsideWindows=true and no maintenance window is active, the reconciler
-// sets Paused=True/ConductorJobGateBlocked on the non-CAPI path.
+// sets Paused=True/ConductorJobGateBlocked.
 func TestClusterMaintenanceReconcile_BlockOutsideWindowsNoWindow(t *testing.T) {
 	scheme := buildDay2Scheme(t)
 	cm := &platformv1alpha1.ClusterMaintenance{
@@ -1089,8 +1092,7 @@ func TestClusterMaintenanceReconcile_BlockOutsideWindowsNoWindow(t *testing.T) {
 
 // --- UpgradePolicy tests ---
 
-// TestUpgradePolicyReconcile_DirectPath verifies that for a non-CAPI cluster,
-// a talos-upgrade Conductor executor Job is submitted directly.
+// TestUpgradePolicyReconcile_DirectPath verifies that a talos-upgrade Conductor executor Job is submitted.
 func TestUpgradePolicyReconcile_DirectPath(t *testing.T) {
 	scheme := buildDay2Scheme(t)
 	up := &platformv1alpha1.UpgradePolicy{
@@ -1183,7 +1185,7 @@ func TestUpgradePolicyReconcile_StackUpgradeSingleJob(t *testing.T) {
 }
 
 // TestUpgradePolicyReconcile_KubeUpgradeJob verifies that a kube-upgrade type
-// UpgradePolicy on a non-CAPI cluster submits a single kube-upgrade Job.
+// UpgradePolicy submits a single kube-upgrade Job.
 func TestUpgradePolicyReconcile_KubeUpgradeJob(t *testing.T) {
 	scheme := buildDay2Scheme(t)
 	up := &platformv1alpha1.UpgradePolicy{
@@ -1222,58 +1224,6 @@ func TestUpgradePolicyReconcile_KubeUpgradeJob(t *testing.T) {
 	if len(jobList.Items) > 0 && jobList.Items[0].Labels["platform.ontai.dev/capability"] != "kube-upgrade" {
 		t.Errorf("Job capability label = %q, want kube-upgrade",
 			jobList.Items[0].Labels["platform.ontai.dev/capability"])
-	}
-}
-
-// TestUpgradePolicyReconcile_CAPIPath verifies that when the owning TalosCluster
-// has capi.enabled=true, the reconciler sets CAPIDelegated=True instead of
-// submitting a Job.
-func TestUpgradePolicyReconcile_CAPIPath(t *testing.T) {
-	scheme := buildDay2Scheme(t)
-	tc := &platformv1alpha1.TalosCluster{
-		ObjectMeta: metav1.ObjectMeta{Name: "ccs-target", Namespace: "ont-system"},
-		Spec: platformv1alpha1.TalosClusterSpec{
-			CAPI: &platformv1alpha1.CAPIConfig{Enabled: true},
-		},
-	}
-	up := &platformv1alpha1.UpgradePolicy{
-		ObjectMeta: metav1.ObjectMeta{Name: "capi-up-1", Namespace: "ont-system", Generation: 1},
-		Spec: platformv1alpha1.UpgradePolicySpec{
-			ClusterRef:      platformv1alpha1.LocalObjectRef{Name: "ccs-target"},
-			UpgradeType:     platformv1alpha1.UpgradeTypeTalos,
-			RollingStrategy: platformv1alpha1.RollingStrategySequential,
-		},
-	}
-	c := fake.NewClientBuilder().WithScheme(scheme).WithObjects(tc, up).WithStatusSubresource(up).Build()
-	r := &controller.UpgradePolicyReconciler{Client: c, Scheme: scheme, Recorder: fakeRecorder()}
-
-	result, err := r.Reconcile(context.Background(), ctrl.Request{
-		NamespacedName: types.NamespacedName{Name: "capi-up-1", Namespace: "ont-system"},
-	})
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	if result.RequeueAfter != 0 {
-		t.Errorf("CAPI path should not requeue, got %v", result.RequeueAfter)
-	}
-
-	jobList := &batchv1.JobList{}
-	if err := c.List(context.Background(), jobList); err != nil {
-		t.Fatalf("list Jobs: %v", err)
-	}
-	if len(jobList.Items) != 0 {
-		t.Errorf("expected 0 Jobs on CAPI path, got %d", len(jobList.Items))
-	}
-
-	got := &platformv1alpha1.UpgradePolicy{}
-	if err := c.Get(context.Background(), types.NamespacedName{
-		Name: "capi-up-1", Namespace: "ont-system",
-	}, got); err != nil {
-		t.Fatalf("get: %v", err)
-	}
-	cond := platformv1alpha1.FindCondition(got.Status.Conditions, platformv1alpha1.ConditionTypeUpgradePolicyCAPIDelegated)
-	if cond == nil || cond.Status != metav1.ConditionTrue {
-		t.Error("expected CAPIDelegated=True on CAPI upgrade path")
 	}
 }
 
@@ -1327,8 +1277,7 @@ func TestUpgradePolicyReconcile_Failed(t *testing.T) {
 
 // --- NodeOperation tests ---
 
-// TestNodeOperationReconcile_DirectScaleUp verifies that for a non-CAPI cluster,
-// a node-scale-up Conductor executor Job is submitted.
+// TestNodeOperationReconcile_DirectScaleUp verifies that a node-scale-up Conductor executor Job is submitted.
 func TestNodeOperationReconcile_DirectScaleUp(t *testing.T) {
 	scheme := buildDay2Scheme(t)
 	nop := &platformv1alpha1.NodeOperation{
@@ -2037,7 +1986,7 @@ func TestEtcdMaintenanceReconcile_IdempotentAfterReady(t *testing.T) {
 					Status:             metav1.ConditionTrue,
 					Reason:             platformv1alpha1.ReasonEtcdJobComplete,
 					Message:            "complete",
-					LastTransitionTime: metav1.Now(),
+					LastTransitionTime: metav1.NewTime(time.Now().Add(-7 * time.Hour)),
 				},
 			},
 		},
@@ -2081,7 +2030,7 @@ func TestMaintenanceBundleReconcile_IdempotentAfterSuccess(t *testing.T) {
 					Status:             metav1.ConditionTrue,
 					Reason:             platformv1alpha1.ReasonMaintenanceBundleJobComplete,
 					Message:            "complete",
-					LastTransitionTime: metav1.Now(),
+					LastTransitionTime: metav1.NewTime(time.Now().Add(-7 * time.Hour)),
 				},
 			},
 		},
@@ -2208,5 +2157,313 @@ func TestJobSpec_ConductorEnvInterface(t *testing.T) {
 	}
 	if !foundVol {
 		t.Error("talosconfig volume not found or wrong Secret name")
+	}
+}
+
+// --- MachineConfigSync tests ---
+
+// mcSyncSecret builds a machineconfig source-of-truth Secret with the given content
+// and optional sync labels. namespace is seam-tenant-{clusterRef}.
+func mcSyncSecret(clusterRef, nodeClass string, content []byte, labels map[string]string) *corev1.Secret {
+	s := &corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "seam-mc-" + clusterRef + "-" + nodeClass,
+			Namespace: "seam-tenant-" + clusterRef,
+			Labels:    labels,
+		},
+		Data: map[string][]byte{
+			"machineconfig": content,
+		},
+	}
+	return s
+}
+
+// TestMachineConfigSyncReconcile_SecretNotFound verifies that a missing source-of-truth
+// Secret sets Degraded=True without submitting a Job.
+func TestMachineConfigSyncReconcile_SecretNotFound(t *testing.T) {
+	scheme := buildDay2Scheme(t)
+	mcs := &platformv1alpha1.MachineConfigSync{
+		ObjectMeta: metav1.ObjectMeta{Name: "mcs-1", Namespace: "seam-tenant-ccs-mgmt", Generation: 1},
+		Spec: platformv1alpha1.MachineConfigSyncSpec{
+			ClusterRef: platformv1alpha1.LocalObjectRef{Name: "ccs-mgmt"},
+			NodeClass:  "controlplane",
+		},
+	}
+	c := fake.NewClientBuilder().WithScheme(scheme).WithObjects(mcs).WithStatusSubresource(mcs).Build()
+	r := &controller.MachineConfigSyncReconciler{Client: c, Scheme: scheme, Recorder: fakeRecorder()}
+
+	_, err := r.Reconcile(context.Background(), ctrl.Request{
+		NamespacedName: types.NamespacedName{Name: "mcs-1", Namespace: "seam-tenant-ccs-mgmt"},
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	got := &platformv1alpha1.MachineConfigSync{}
+	if err := c.Get(context.Background(), types.NamespacedName{
+		Name: "mcs-1", Namespace: "seam-tenant-ccs-mgmt",
+	}, got); err != nil {
+		t.Fatalf("get: %v", err)
+	}
+	cond := platformv1alpha1.FindCondition(got.Status.Conditions, platformv1alpha1.ConditionTypeMachineConfigSyncDegraded)
+	if cond == nil || cond.Status != metav1.ConditionTrue {
+		t.Errorf("expected Degraded=True, got %v", cond)
+	}
+
+	// No Job should have been submitted.
+	jobs := &batchv1.JobList{}
+	if err := c.List(context.Background(), jobs); err != nil {
+		t.Fatalf("list jobs: %v", err)
+	}
+	if len(jobs.Items) != 0 {
+		t.Errorf("expected no Jobs, got %d", len(jobs.Items))
+	}
+}
+
+// TestMachineConfigSyncReconcile_SkipsHashMatch verifies that when the Secret hash
+// label matches the content hash and sync-status=synced, a no-op Ready=True result
+// is returned without submitting a Conductor Job.
+func TestMachineConfigSyncReconcile_SkipsHashMatch(t *testing.T) {
+	content := []byte("machine:\n  type: controlplane\n")
+	// Pre-compute the hex-encoded SHA-256 hash the reconciler would compute.
+	rawHash := sha256.Sum256(content)
+	import_sha := fmt.Sprintf("%x", rawHash)
+
+	scheme := buildDay2Scheme(t)
+	secret := mcSyncSecret("ccs-mgmt", "controlplane", content, map[string]string{
+		"platform.ontai.dev/sync-status": "synced",
+		"platform.ontai.dev/sync-hash":   import_sha,
+	})
+	mcs := &platformv1alpha1.MachineConfigSync{
+		ObjectMeta: metav1.ObjectMeta{Name: "mcs-hash", Namespace: "seam-tenant-ccs-mgmt", Generation: 1},
+		Spec: platformv1alpha1.MachineConfigSyncSpec{
+			ClusterRef: platformv1alpha1.LocalObjectRef{Name: "ccs-mgmt"},
+			NodeClass:  "controlplane",
+			ForceApply: false,
+		},
+	}
+	c := fake.NewClientBuilder().WithScheme(scheme).WithObjects(mcs, secret).WithStatusSubresource(mcs).Build()
+	r := &controller.MachineConfigSyncReconciler{Client: c, Scheme: scheme, Recorder: fakeRecorder()}
+
+	_, err := r.Reconcile(context.Background(), ctrl.Request{
+		NamespacedName: types.NamespacedName{Name: "mcs-hash", Namespace: "seam-tenant-ccs-mgmt"},
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	got := &platformv1alpha1.MachineConfigSync{}
+	if err := c.Get(context.Background(), types.NamespacedName{
+		Name: "mcs-hash", Namespace: "seam-tenant-ccs-mgmt",
+	}, got); err != nil {
+		t.Fatalf("get: %v", err)
+	}
+	cond := platformv1alpha1.FindCondition(got.Status.Conditions, platformv1alpha1.ConditionTypeMachineConfigSyncReady)
+	if cond == nil || cond.Status != metav1.ConditionTrue {
+		t.Errorf("expected Ready=True, got %v", cond)
+	}
+	if cond.Reason != platformv1alpha1.ReasonMachineConfigSyncHashMatch {
+		t.Errorf("expected reason %q, got %q", platformv1alpha1.ReasonMachineConfigSyncHashMatch, cond.Reason)
+	}
+
+	jobs := &batchv1.JobList{}
+	if err := c.List(context.Background(), jobs); err != nil {
+		t.Fatalf("list jobs: %v", err)
+	}
+	if len(jobs.Items) != 0 {
+		t.Errorf("expected no Jobs on hash match, got %d", len(jobs.Items))
+	}
+}
+
+// TestMachineConfigSyncReconcile_SubmitsJob verifies that a Conductor executor Job
+// is submitted when the Secret exists, the hash is stale, and the capability is
+// published in the cluster RunnerConfig.
+func TestMachineConfigSyncReconcile_SubmitsJob(t *testing.T) {
+	scheme := buildDay2Scheme(t)
+	secret := mcSyncSecret("ccs-mgmt", "controlplane", []byte("machine:\n  type: controlplane\n"), nil)
+	mcs := &platformv1alpha1.MachineConfigSync{
+		ObjectMeta: metav1.ObjectMeta{Name: "mcs-submit", Namespace: "seam-tenant-ccs-mgmt", Generation: 1},
+		Spec: platformv1alpha1.MachineConfigSyncSpec{
+			ClusterRef: platformv1alpha1.LocalObjectRef{Name: "ccs-mgmt"},
+			NodeClass:  "controlplane",
+		},
+	}
+	c := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithObjects(mcs, secret, clusterRC("ccs-mgmt", "machineconfig-sync")).
+		WithStatusSubresource(mcs).
+		Build()
+	r := &controller.MachineConfigSyncReconciler{Client: c, Scheme: scheme, Recorder: fakeRecorder()}
+
+	_, err := r.Reconcile(context.Background(), ctrl.Request{
+		NamespacedName: types.NamespacedName{Name: "mcs-submit", Namespace: "seam-tenant-ccs-mgmt"},
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	jobs := &batchv1.JobList{}
+	if err := c.List(context.Background(), jobs); err != nil {
+		t.Fatalf("list jobs: %v", err)
+	}
+	if len(jobs.Items) != 1 {
+		t.Fatalf("expected 1 Job, got %d", len(jobs.Items))
+	}
+	job := jobs.Items[0]
+	if job.Namespace != "seam-tenant-ccs-mgmt" {
+		t.Errorf("Job namespace = %q, want seam-tenant-ccs-mgmt", job.Namespace)
+	}
+
+	// Verify MC_NODE_CLASS env var is injected.
+	container := job.Spec.Template.Spec.Containers[0]
+	var found bool
+	for _, env := range container.Env {
+		if env.Name == "MC_NODE_CLASS" && env.Value == "controlplane" {
+			found = true
+		}
+	}
+	if !found {
+		t.Error("MC_NODE_CLASS=controlplane not found in Job container env")
+	}
+}
+
+// TestMachineConfigSyncReconcile_CapabilityUnavailable verifies that when the
+// cluster RunnerConfig is absent, CapabilityUnavailable=True is set and no Job
+// is submitted. CR-INV-005.
+func TestMachineConfigSyncReconcile_CapabilityUnavailable(t *testing.T) {
+	scheme := buildDay2Scheme(t)
+	secret := mcSyncSecret("ccs-mgmt", "controlplane", []byte("machine:\n  type: controlplane\n"), nil)
+	mcs := &platformv1alpha1.MachineConfigSync{
+		ObjectMeta: metav1.ObjectMeta{Name: "mcs-cap", Namespace: "seam-tenant-ccs-mgmt", Generation: 1},
+		Spec: platformv1alpha1.MachineConfigSyncSpec{
+			ClusterRef: platformv1alpha1.LocalObjectRef{Name: "ccs-mgmt"},
+			NodeClass:  "controlplane",
+		},
+	}
+	// No RunnerConfig in the cluster.
+	c := fake.NewClientBuilder().WithScheme(scheme).WithObjects(mcs, secret).WithStatusSubresource(mcs).Build()
+	r := &controller.MachineConfigSyncReconciler{Client: c, Scheme: scheme, Recorder: fakeRecorder()}
+
+	_, err := r.Reconcile(context.Background(), ctrl.Request{
+		NamespacedName: types.NamespacedName{Name: "mcs-cap", Namespace: "seam-tenant-ccs-mgmt"},
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	got := &platformv1alpha1.MachineConfigSync{}
+	if err := c.Get(context.Background(), types.NamespacedName{
+		Name: "mcs-cap", Namespace: "seam-tenant-ccs-mgmt",
+	}, got); err != nil {
+		t.Fatalf("get: %v", err)
+	}
+	cond := platformv1alpha1.FindCondition(got.Status.Conditions, platformv1alpha1.ConditionTypeCapabilityUnavailable)
+	if cond == nil || cond.Status != metav1.ConditionTrue {
+		t.Errorf("expected CapabilityUnavailable=True, got %v", cond)
+	}
+}
+
+// TestMachineConfigSyncReconcile_JobComplete_UpdatesSecretLabels verifies that on
+// Job completion the machineconfig Secret sync-status/sync-hash/synced-at labels are
+// updated and Ready=True is set on the MachineConfigSync.
+func TestMachineConfigSyncReconcile_JobComplete_UpdatesSecretLabels(t *testing.T) {
+	scheme := buildDay2Scheme(t)
+	content := []byte("machine:\n  type: controlplane\n")
+	secret := mcSyncSecret("ccs-mgmt", "controlplane", content, nil)
+	mcs := &platformv1alpha1.MachineConfigSync{
+		ObjectMeta: metav1.ObjectMeta{Name: "mcs-done", Namespace: "seam-tenant-ccs-mgmt", Generation: 1},
+		Spec: platformv1alpha1.MachineConfigSyncSpec{
+			ClusterRef: platformv1alpha1.LocalObjectRef{Name: "ccs-mgmt"},
+			NodeClass:  "controlplane",
+		},
+	}
+	jobName := "mcs-done-machineconfig-sync"
+	c := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithObjects(
+			mcs, secret,
+			clusterRC("ccs-mgmt", "machineconfig-sync"),
+			preExistingJob(jobName, "seam-tenant-ccs-mgmt"),
+			successResultTCOR("ccs-mgmt", jobName),
+		).
+		WithStatusSubresource(mcs).
+		Build()
+	r := &controller.MachineConfigSyncReconciler{Client: c, Scheme: scheme, Recorder: fakeRecorder()}
+
+	_, err := r.Reconcile(context.Background(), ctrl.Request{
+		NamespacedName: types.NamespacedName{Name: "mcs-done", Namespace: "seam-tenant-ccs-mgmt"},
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	// MachineConfigSync should be Ready=True.
+	got := &platformv1alpha1.MachineConfigSync{}
+	if err := c.Get(context.Background(), types.NamespacedName{
+		Name: "mcs-done", Namespace: "seam-tenant-ccs-mgmt",
+	}, got); err != nil {
+		t.Fatalf("get mcs: %v", err)
+	}
+	readyCond := platformv1alpha1.FindCondition(got.Status.Conditions, platformv1alpha1.ConditionTypeMachineConfigSyncReady)
+	if readyCond == nil || readyCond.Status != metav1.ConditionTrue {
+		t.Errorf("expected Ready=True, got %v", readyCond)
+	}
+
+	// Secret should have sync-status=synced label.
+	updatedSecret := &corev1.Secret{}
+	if err := c.Get(context.Background(), types.NamespacedName{
+		Name: "seam-mc-ccs-mgmt-controlplane", Namespace: "seam-tenant-ccs-mgmt",
+	}, updatedSecret); err != nil {
+		t.Fatalf("get secret: %v", err)
+	}
+	if updatedSecret.Labels["platform.ontai.dev/sync-status"] != "synced" {
+		t.Errorf("sync-status = %q, want synced", updatedSecret.Labels["platform.ontai.dev/sync-status"])
+	}
+	if updatedSecret.Labels["platform.ontai.dev/sync-hash"] == "" {
+		t.Error("sync-hash label not set")
+	}
+	if updatedSecret.Labels["platform.ontai.dev/synced-at"] == "" {
+		t.Error("synced-at label not set")
+	}
+}
+
+// TestMachineConfigSyncReconcile_TTLExpiry verifies that a completed MachineConfigSync
+// self-deletes after the day-2 TTL.
+func TestMachineConfigSyncReconcile_TTLExpiry(t *testing.T) {
+	scheme := buildDay2Scheme(t)
+	pastReadyTime := time.Now().Add(-7 * time.Hour)
+	mcs := &platformv1alpha1.MachineConfigSync{
+		ObjectMeta: metav1.ObjectMeta{Name: "mcs-ttl", Namespace: "seam-tenant-ccs-mgmt", Generation: 1},
+		Spec: platformv1alpha1.MachineConfigSyncSpec{
+			ClusterRef: platformv1alpha1.LocalObjectRef{Name: "ccs-mgmt"},
+			NodeClass:  "controlplane",
+		},
+		Status: platformv1alpha1.MachineConfigSyncStatus{
+			Conditions: []metav1.Condition{
+				{
+					Type:               platformv1alpha1.ConditionTypeMachineConfigSyncReady,
+					Status:             metav1.ConditionTrue,
+					Reason:             "JobComplete",
+					LastTransitionTime: metav1.NewTime(pastReadyTime),
+				},
+			},
+		},
+	}
+	c := fake.NewClientBuilder().WithScheme(scheme).WithObjects(mcs).WithStatusSubresource(mcs).Build()
+	r := &controller.MachineConfigSyncReconciler{Client: c, Scheme: scheme, Recorder: fakeRecorder()}
+
+	_, err := r.Reconcile(context.Background(), ctrl.Request{
+		NamespacedName: types.NamespacedName{Name: "mcs-ttl", Namespace: "seam-tenant-ccs-mgmt"},
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	got := &platformv1alpha1.MachineConfigSync{}
+	getErr := c.Get(context.Background(), types.NamespacedName{
+		Name: "mcs-ttl", Namespace: "seam-tenant-ccs-mgmt",
+	}, got)
+	if getErr == nil {
+		t.Error("expected MachineConfigSync to be deleted after TTL expiry, but it still exists")
 	}
 }

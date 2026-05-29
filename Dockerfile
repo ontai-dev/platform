@@ -9,7 +9,9 @@ FROM golang:1.25 AS builder
 WORKDIR /build
 COPY platform/ .
 COPY conductor/ ../conductor/
-COPY seam-core/ ../seam-core/
+COPY seam/ ../seam/
+COPY seam-sdk/ ../seam-sdk/
+COPY conductor-sdk/ ../conductor-sdk/
 RUN CGO_ENABLED=0 GOOS=linux go build \
     -trimpath \
     -ldflags="-s -w" \

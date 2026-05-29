@@ -88,10 +88,6 @@ func perOpS3Secret(name, ns string) *corev1.Secret {
 // it on WithObjects (not registered with WithStatusSubresource). All day-2 reconcilers
 // gate on this object before submitting a Conductor executor Job.
 func fakeClusterRC(clusterName string, caps ...string) *controller.OperationalRunnerConfig {
-	capEntries := make([]controller.CapabilityEntry, len(caps))
-	for i, c := range caps {
-		capEntries[i] = controller.CapabilityEntry{Name: c, Version: "1.0.0"}
-	}
 	rc := &controller.OperationalRunnerConfig{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      clusterName,
@@ -102,7 +98,11 @@ func fakeClusterRC(clusterName string, caps ...string) *controller.OperationalRu
 			RunnerImage: "ghcr.io/ontai-dev/conductor-execute:dev",
 		},
 	}
-	rc.Status.Capabilities = capEntries
+	entries := make([]seamcorev1alpha1.RunnerCapabilityEntry, len(caps))
+	for i, name := range caps {
+		entries[i] = seamcorev1alpha1.RunnerCapabilityEntry{Name: name, Version: "1.0.0"}
+	}
+	rc.Status.Capabilities = entries
 	return rc
 }
 

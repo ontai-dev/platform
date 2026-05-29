@@ -20,9 +20,6 @@ type (
 	// OperationalStep is an alias for RunnerConfigStep.
 	OperationalStep = seamcorev1alpha1.RunnerConfigStep
 
-	// CapabilityEntry is an alias for RunnerCapabilityEntry.
-	CapabilityEntry = seamcorev1alpha1.RunnerCapabilityEntry
-
 	// OperationalRunnerConfigStatus is an alias for RunnerConfigStatus.
 	OperationalRunnerConfigStatus = seamcorev1alpha1.RunnerConfigStatus
 

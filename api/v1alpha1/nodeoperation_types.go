@@ -8,7 +8,7 @@ import (
 
 // NodeOperationType declares the node lifecycle operation to perform.
 //
-// +kubebuilder:validation:Enum=scale-up;decommission;reboot
+// +kubebuilder:validation:Enum=scale-up;decommission;reboot;rollback
 type NodeOperationType string
 
 const (
@@ -20,6 +20,10 @@ const (
 
 	// NodeOperationTypeReboot reboots specific nodes.
 	NodeOperationTypeReboot NodeOperationType = "reboot"
+
+	// NodeOperationTypeRollback rolls target nodes back to the previous Talos OS image.
+	// Used after a failed upgrade to restore the prior version. RECON-H4.
+	NodeOperationTypeRollback NodeOperationType = "rollback"
 )
 
 // Condition type and reason constants for NodeOperation.
@@ -30,10 +34,6 @@ const (
 	// ConditionTypeNodeOperationDegraded indicates the operation failed.
 	ConditionTypeNodeOperationDegraded = "Degraded"
 
-	// ConditionTypeNodeOperationCAPIDelegated indicates the operation has been
-	// delegated to CAPI native machinery (capi.enabled=true path).
-	ConditionTypeNodeOperationCAPIDelegated = "CAPIDelegated"
-
 	// ReasonNodeOpJobSubmitted is set when the Conductor executor Job has been submitted.
 	ReasonNodeOpJobSubmitted = "JobSubmitted"
 
@@ -43,12 +43,12 @@ const (
 	// ReasonNodeOpJobFailed is set when the Conductor executor Job failed. INV-018 applies.
 	ReasonNodeOpJobFailed = "JobFailed"
 
-	// ReasonNodeOpCAPIDelegated is set when the operation is delegated to CAPI
-	// for capi.enabled=true clusters.
-	ReasonNodeOpCAPIDelegated = "CAPIDelegated"
-
 	// ReasonNodeOpPending is set before the first action.
 	ReasonNodeOpPending = "Pending"
+
+	// ReasonNodeOpPermanentFailure is set when the Job has failed maxRetry times.
+	// No further Jobs will be submitted. Human intervention required.
+	ReasonNodeOpPermanentFailure = "PermanentFailure"
 )
 
 // NodeOperationSpec defines the desired state of NodeOperation.
@@ -57,7 +57,7 @@ type NodeOperationSpec struct {
 	ClusterRef LocalObjectRef `json:"clusterRef"`
 
 	// Operation declares the node lifecycle operation to perform.
-	// +kubebuilder:validation:Enum=scale-up;decommission;reboot
+	// +kubebuilder:validation:Enum=scale-up;decommission;reboot;rollback
 	Operation NodeOperationType `json:"operation"`
 
 	// TargetNodes is the list of node names to target for decommission or reboot.
@@ -65,10 +65,36 @@ type NodeOperationSpec struct {
 	// +optional
 	TargetNodes []string `json:"targetNodes,omitempty"`
 
+	// TargetNodeIP is the IP address of the new node in Talos maintenance mode.
+	// Required when operation=scale-up.
+	// +optional
+	TargetNodeIP string `json:"targetNodeIP,omitempty"`
+
+	// NodeRole declares the role of the node for scale-up operations.
+	// Valid values are "controlplane" and "worker". Defaults to "worker" when unset.
+	// +optional
+	// +kubebuilder:validation:Enum=controlplane;worker
+	NodeRole string `json:"nodeRole,omitempty"`
+
+	// MaxRetry is the maximum number of times the reconciler will re-submit the
+	// Conductor executor Job after a failure before declaring permanent failure
+	// and setting HumanInterventionRequired on the owning TalosCluster.
+	// Defaults to 3 when unset or zero.
+	// +optional
+	// +kubebuilder:default=3
+	// +kubebuilder:validation:Minimum=1
+	MaxRetry int `json:"maxRetry,omitempty"`
+
 	// ReplicaCount is the desired number of worker replicas after scale-up.
 	// Required when operation=scale-up.
 	// +optional
 	ReplicaCount int32 `json:"replicaCount,omitempty"`
+
+	// PerformWipe enables a secure disk wipe after decommission reset.
+	// Only valid when operation=decommission. Caller must satisfy INV-007 approval
+	// gate before setting this field. RECON-H4.
+	// +optional
+	PerformWipe bool `json:"performWipe,omitempty"`
 
 	// Lineage is the sealed causal chain record for this root declaration.
 	// Authored once at object creation time and immutable thereafter.
@@ -83,8 +109,12 @@ type NodeOperationStatus struct {
 	// +optional
 	ObservedGeneration int64 `json:"observedGeneration,omitempty"`
 
+	// RetryCount is the number of Job submission attempts that have failed so far.
+	// Reset to zero on successful Job completion.
+	// +optional
+	RetryCount int `json:"retryCount,omitempty"`
+
 	// JobName is the name of the Conductor executor Job submitted for this operation.
-	// Only set for the capi.enabled=false (non-CAPI) path.
 	// +optional
 	JobName string `json:"jobName,omitempty"`
 
@@ -93,7 +123,7 @@ type NodeOperationStatus struct {
 	OperationResult string `json:"operationResult,omitempty"`
 
 	// Conditions is the list of status conditions for this NodeOperation.
-	// Condition types: Ready, Degraded, CAPIDelegated, LineageSynced.
+	// Condition types: Ready, Degraded, LineageSynced.
 	// +optional
 	// +listType=map
 	// +listMapKey=type
@@ -101,16 +131,10 @@ type NodeOperationStatus struct {
 }
 
 // NodeOperation governs node lifecycle operations: scale-up, decommission, reboot.
+// Submits a node-scale-up, node-decommission, or node-reboot Conductor executor Job.
 //
-// Dual-path CRD governed by spec.capi.enabled on the owning TalosCluster:
-//   - For CAPI-managed clusters (capi.enabled=true): modifies MachineDeployment
-//     replicas for scale-up, deletes specific Machine objects for decommission,
-//     or sets the Machine reboot annotation — all handled natively by CAPI.
-//   - For management cluster (capi.enabled=false): submits node-scale-up,
-//     node-decommission, or node-reboot Conductor executor Job.
-//
-// Named Conductor capabilities (non-CAPI path): node-scale-up, node-decommission,
-// node-reboot. platform-schema.md §5.
+// Named Conductor capabilities: node-scale-up, node-decommission, node-reboot.
+// platform-schema.md §5.
 //
 // +kubebuilder:object:root=true
 // +kubebuilder:subresource:status

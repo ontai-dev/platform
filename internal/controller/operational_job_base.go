@@ -24,6 +24,7 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
+	platformv1alpha1 "github.com/ontai-dev/platform/api/v1alpha1"
 	seamplatformv1alpha1 "github.com/ontai-dev/platform/api/seam/v1alpha1"
 )
 
@@ -41,6 +42,11 @@ const (
 	// The reconciler reads the OperationResult before this expires.
 	operationalJobTTL = int32(600)
 
+	// day2OperationTTL is the time-to-live for a completed day-2 operation CR.
+	// Reconcilers self-delete the CR this long after its ready condition transitions
+	// to True. ClusterLog retains the result permanently.
+	day2OperationTTL = 6 * time.Hour
+
 	// operationalJobBackoffLimit enforces INV-018: gate failures are permanent.
 	operationalJobBackoffLimit = int32(0)
 
@@ -49,6 +55,12 @@ const (
 
 	// executorTalosconfigEnvPath is the TALOSCONFIG_PATH value injected into executor Jobs.
 	executorTalosconfigEnvPath = executorTalosconfigMountPath + "/talosconfig"
+
+	// executorKubeconfigMountPath is the container mount path for the kubeconfig file
+	// mounted from the seam-mc-{cluster}-kubeconfig Secret (SubPath: "value").
+	// Used by upgrade capabilities that need to reach the target cluster Kubernetes API.
+	// RECON-J2, RECON-J7.
+	executorKubeconfigMountPath = "/var/run/secrets/kubeconfig"
 )
 
 // jobSpec builds a Conductor executor Job spec for the given capability and cluster.
@@ -361,4 +373,108 @@ func getOperationalRunnerConfig(ctx context.Context, c client.Client, namespace,
 		return nil, fmt.Errorf("get RunnerConfig %s/%s: %w", namespace, name, err)
 	}
 	return rc, nil
+}
+
+// day2TTLExpired reports whether the day-2 operation TTL has elapsed since completionTime.
+// When true the caller should delete the CR and return ctrl.Result{}.
+// When false the caller should requeue at the returned RequeueAfter so the reconciler
+// wakes up exactly when the TTL expires.
+func day2TTLExpired(completionTime time.Time) (expired bool, requeueAfter time.Duration) {
+	remaining := time.Until(completionTime.Add(day2OperationTTL))
+	if remaining <= 0 {
+		return true, 0
+	}
+	return false, remaining
+}
+
+// defaultMaxRetry is the number of Job re-submissions attempted before a day-2
+// operation is declared permanently failed and HumanInterventionRequired is set
+// on the owning TalosCluster. RECON-I3.
+const defaultMaxRetry = 3
+
+// retryJobRetryInterval is the requeue delay between a failed Job and the next retry.
+const retryJobRetryInterval = 10 * time.Second
+
+// retryJobName returns the deterministic Job name for the Nth attempt.
+// For attempt 0 (first submission) the name is identical to operationalJobName.
+// For attempts 1..N the suffix -r{N} is appended, allowing a fresh Job to be
+// submitted without waiting for the previous failed Job's TTL GC window.
+func retryJobName(crName, capability string, retryCount int) string {
+	if retryCount == 0 {
+		return fmt.Sprintf("%s-%s", crName, capability)
+	}
+	return fmt.Sprintf("%s-%s-r%d", crName, capability, retryCount)
+}
+
+// effectiveMaxRetry returns specMaxRetry when > 0, otherwise defaultMaxRetry.
+func effectiveMaxRetry(specMaxRetry int) int {
+	if specMaxRetry > 0 {
+		return specMaxRetry
+	}
+	return defaultMaxRetry
+}
+
+// setTalosClusterHumanInterventionRequired patches HumanInterventionRequired=True
+// on the named TalosCluster. Called by day-2 reconcilers when a Job permanently
+// fails after exhausting all retries. RECON-I3.
+func setTalosClusterHumanInterventionRequired(ctx context.Context, c client.Client, clusterName, namespace, message string, generation int64) error {
+	tc := &platformv1alpha1.TalosCluster{}
+	if err := c.Get(ctx, types.NamespacedName{Name: clusterName, Namespace: namespace}, tc); err != nil {
+		if apierrors.IsNotFound(err) {
+			return nil
+		}
+		return fmt.Errorf("setTalosClusterHumanInterventionRequired: get TalosCluster %s/%s: %w", namespace, clusterName, err)
+	}
+	patch := client.MergeFrom(tc.DeepCopy())
+	platformv1alpha1.SetCondition(
+		&tc.Status.Conditions,
+		seamplatformv1alpha1.ConditionTypeHumanInterventionRequired,
+		metav1.ConditionTrue,
+		seamplatformv1alpha1.ReasonHumanInterventionNeeded,
+		message,
+		generation,
+	)
+	if err := c.Status().Patch(ctx, tc, patch); err != nil {
+		if apierrors.IsNotFound(err) {
+			return nil
+		}
+		return fmt.Errorf("setTalosClusterHumanInterventionRequired: patch TalosCluster %s/%s: %w", namespace, clusterName, err)
+	}
+	return nil
+}
+
+// addKubeconfigMount adds the seam-mc-{clusterName}-kubeconfig Secret as a volume on
+// the Job pod and mounts it at executorKubeconfigMountPath in the first container.
+// The Secret's "value" data key is projected directly to the mount path via SubPath,
+// so the kubeconfig file is readable at exactly executorKubeconfigMountPath.
+// KUBECONFIG is set to that path so client-go auto-detects it from the environment.
+//
+// Called by reconcileDirectUpgrade for upgrade-class Jobs that need target cluster
+// Kubernetes API access (drain, node ready check). RECON-J2, RECON-J7.
+func addKubeconfigMount(job *batchv1.Job, clusterName string) {
+	secretName := "seam-mc-" + clusterName + "-kubeconfig"
+	job.Spec.Template.Spec.Volumes = append(job.Spec.Template.Spec.Volumes, corev1.Volume{
+		Name: "kubeconfig",
+		VolumeSource: corev1.VolumeSource{
+			Secret: &corev1.SecretVolumeSource{
+				SecretName: secretName,
+			},
+		},
+	})
+	if len(job.Spec.Template.Spec.Containers) == 0 {
+		return
+	}
+	job.Spec.Template.Spec.Containers[0].VolumeMounts = append(
+		job.Spec.Template.Spec.Containers[0].VolumeMounts,
+		corev1.VolumeMount{
+			Name:      "kubeconfig",
+			MountPath: executorKubeconfigMountPath,
+			SubPath:   "value",
+			ReadOnly:  true,
+		},
+	)
+	job.Spec.Template.Spec.Containers[0].Env = append(
+		job.Spec.Template.Spec.Containers[0].Env,
+		corev1.EnvVar{Name: "KUBECONFIG", Value: executorKubeconfigMountPath},
+	)
 }

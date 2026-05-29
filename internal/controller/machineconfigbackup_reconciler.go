@@ -87,10 +87,15 @@ func (r *MachineConfigBackupReconciler) Reconcile(ctx context.Context, req ctrl.
 		)
 	}
 
-	// Already complete -- one-shot CR.
+	// If already complete, self-delete after the day-2 TTL; requeue until then.
 	readyCond := platformv1alpha1.FindCondition(mcb.Status.Conditions, platformv1alpha1.ConditionTypeMachineConfigBackupReady)
 	if readyCond != nil && readyCond.Status == metav1.ConditionTrue {
-		return ctrl.Result{}, nil
+		if expired, after := day2TTLExpired(readyCond.LastTransitionTime.Time); expired {
+			_ = r.Client.Delete(ctx, mcb)
+			return ctrl.Result{}, nil
+		} else {
+			return ctrl.Result{RequeueAfter: after}, nil
+		}
 	}
 
 	// Gate: S3 bucket must be non-empty.

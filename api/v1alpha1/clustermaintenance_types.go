@@ -8,8 +8,8 @@ import (
 
 // Condition type and reason constants for ClusterMaintenance.
 const (
-	// ConditionTypeClusterMaintenancePaused indicates the cluster is currently paused
-	// (CAPI path: cluster.x-k8s.io/paused=true annotation set).
+	// ConditionTypeClusterMaintenancePaused indicates the cluster is outside an active
+	// maintenance window and Conductor Job admission is blocked.
 	ConditionTypeClusterMaintenancePaused = "Paused"
 
 	// ConditionTypeClusterMaintenanceWindowActive indicates a maintenance window
@@ -23,14 +23,7 @@ const (
 	// blockOutsideWindows=true is configured.
 	ReasonMaintenanceWindowClosed = "MaintenanceWindowClosed"
 
-	// ReasonCAPIPaused is set when the CAPI Cluster object has been paused by
-	// setting cluster.x-k8s.io/paused=true.
-	ReasonCAPIPaused = "CAPIPaused"
-
-	// ReasonCAPIResumed is set when the CAPI Cluster pause annotation has been removed.
-	ReasonCAPIResumed = "CAPIResumed"
-
-	// ReasonConductorJobGateBlocked is set when the non-CAPI conductor Job admission
+	// ReasonConductorJobGateBlocked is set when the conductor Job admission
 	// gate is blocking operations for this cluster.
 	ReasonConductorJobGateBlocked = "ConductorJobGateBlocked"
 )
@@ -68,10 +61,7 @@ type ClusterMaintenanceSpec struct {
 
 	// BlockOutsideWindows controls whether operations are blocked when no active
 	// window exists. When false (default), operations are permitted at any time.
-	// When true and no active window exists:
-	//   - CAPI path: sets cluster.x-k8s.io/paused=true on the CAPI Cluster, halting
-	//     all CAPI reconciliation until the window opens.
-	//   - Non-CAPI path: blocks Conductor Job admission for this cluster.
+	// When true and no active window exists: blocks Conductor Job admission for this cluster.
 	// +optional
 	BlockOutsideWindows bool `json:"blockOutsideWindows,omitempty"`
 
@@ -102,14 +92,8 @@ type ClusterMaintenanceStatus struct {
 }
 
 // ClusterMaintenance is a maintenance window gate for a Talos cluster.
-//
-// Dual-path CRD governed by spec.capi.enabled on the owning TalosCluster:
-//   - For CAPI-managed clusters (capi.enabled=true): sets
-//     cluster.x-k8s.io/paused=true on the CAPI Cluster when no active window
-//     exists and blockOutsideWindows=true. Pause halts all CAPI reconciliation
-//     until the window opens and the annotation is lifted.
-//   - For management cluster (capi.enabled=false): blocks Conductor Job
-//     admission for the cluster during restricted periods.
+// Records gate state in status; Conductor Job admission is blocked outside
+// active windows when blockOutsideWindows=true.
 //
 // platform-schema.md §5.
 //
