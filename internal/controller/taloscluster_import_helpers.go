@@ -343,15 +343,63 @@ func (r *TalosClusterReconciler) buildMachineConfigNodeReader(
 			return nil, "", fmt.Errorf("parse machineconfig YAML: %w", yErr)
 		}
 
+		stripped, sErr := stripPerNodeNetworkConfig(configBytes)
+		if sErr != nil {
+			return nil, "", fmt.Errorf("stripPerNodeNetworkConfig: %w", sErr)
+		}
+
 		switch extract.Machine.Type {
 		case "controlplane", "init":
-			return configBytes, MachineConfigClassControlPlane, nil
+			return stripped, MachineConfigClassControlPlane, nil
 		case "worker":
-			return configBytes, MachineConfigClassWorker, nil
+			return stripped, MachineConfigClassWorker, nil
 		default:
 			return nil, "", fmt.Errorf("unknown machine.type %q", extract.Machine.Type)
 		}
 	}
+}
+
+// stripPerNodeNetworkConfig removes per-node-specific fields from a raw Talos machineconfig
+// YAML before it is stored as the class-level source-of-truth secret.
+//
+// Per-node fields that must be absent from the class secret:
+//   - machine.network.hostname  (unique per node)
+//   - machine.network.interfaces (node-specific IP, routes, VIP)
+//
+// Shared fields such as machine.network.nameservers are preserved.
+// When machineconfig-sync applies the class secret to all nodes, Talos performs a
+// strategic merge: fields absent in the applied config are not cleared on the running
+// node, so each node retains its own hostname and interface configuration.
+func stripPerNodeNetworkConfig(configBytes []byte) ([]byte, error) {
+	var doc map[string]interface{}
+	if err := sigsyaml.Unmarshal(configBytes, &doc); err != nil {
+		return nil, fmt.Errorf("unmarshal: %w", err)
+	}
+
+	machine, ok := doc["machine"].(map[string]interface{})
+	if !ok {
+		// No machine section -- nothing to strip.
+		return configBytes, nil
+	}
+
+	network, ok := machine["network"].(map[string]interface{})
+	if !ok {
+		// No network section -- nothing to strip.
+		return configBytes, nil
+	}
+
+	delete(network, "hostname")
+	delete(network, "interfaces")
+
+	if len(network) == 0 {
+		delete(machine, "network")
+	}
+
+	out, err := sigsyaml.Marshal(doc)
+	if err != nil {
+		return nil, fmt.Errorf("marshal: %w", err)
+	}
+	return out, nil
 }
 
 // writeMachineConfigSecret creates or skips the machineconfig source-of-truth Secret
@@ -406,7 +454,7 @@ func (r *TalosClusterReconciler) writeMachineConfigSecret(
 		LabelMachineConfigCluster:    clusterName,
 		LabelMachineConfigClass:      class,
 		LabelMachineConfigSyncStatus: MachineConfigSyncStatusPending,
-		LabelMachineConfigSyncHash:   hashHex,
+		LabelMachineConfigSyncHash:   labelSafeHash(hashHex),
 	}
 	if compressionLabel != "" {
 		labels[LabelMachineConfigCompression] = compressionLabel
@@ -517,7 +565,7 @@ func (r *TalosClusterReconciler) reconcileMachineConfigSync(ctx context.Context,
 		sum := sha256.Sum256(hashBytes)
 		newHash := hex.EncodeToString(sum[:])
 		prevHash := secret.Labels[LabelMachineConfigSyncHash]
-		if newHash == prevHash {
+		if labelSafeHash(newHash) == prevHash {
 			// Content unchanged since last sync attempt. No action needed.
 			continue
 		}
@@ -556,7 +604,7 @@ func (r *TalosClusterReconciler) reconcileMachineConfigSync(ctx context.Context,
 		// Mark Secret as pending so observers know a sync is imminent.
 		patch := secret.DeepCopy()
 		patch.Labels[LabelMachineConfigSyncStatus] = MachineConfigSyncStatusPending
-		patch.Labels[LabelMachineConfigSyncHash] = newHash
+		patch.Labels[LabelMachineConfigSyncHash] = labelSafeHash(newHash)
 		if pErr := r.Client.Update(ctx, patch); pErr != nil {
 			logger.Info("reconcileMachineConfigSync: failed to patch Secret labels (non-fatal)",
 				"secret", secret.Name, "error", pErr.Error())
