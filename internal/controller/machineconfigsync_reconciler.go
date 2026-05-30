@@ -13,9 +13,12 @@ package controller
 // INV-018: gate failures are permanent -- backoffLimit=0, no retries.
 
 import (
+	"bytes"
+	"compress/gzip"
 	"context"
 	"crypto/sha256"
 	"fmt"
+	"io"
 	"strconv"
 	"time"
 
@@ -99,6 +102,14 @@ func (r *MachineConfigSyncReconciler) Reconcile(ctx context.Context, req ctrl.Re
 		)
 	}
 
+	// If permanently failed, do not re-submit jobs. Human intervention resolves this by
+	// deleting the CR; the TalosCluster reconciler will create a new one on next reconcile.
+	degradedCond := platformv1alpha1.FindCondition(mcs.Status.Conditions, platformv1alpha1.ConditionTypeMachineConfigSyncDegraded)
+	if degradedCond != nil && degradedCond.Status == metav1.ConditionTrue &&
+		degradedCond.Reason == platformv1alpha1.ReasonMachineConfigSyncPermanentFailure {
+		return ctrl.Result{}, nil
+	}
+
 	// If already complete, self-delete after the day-2 TTL.
 	readyCond := platformv1alpha1.FindCondition(mcs.Status.Conditions, platformv1alpha1.ConditionTypeMachineConfigSyncReady)
 	if readyCond != nil && readyCond.Status == metav1.ConditionTrue {
@@ -145,15 +156,25 @@ func (r *MachineConfigSyncReconciler) Reconcile(ctx context.Context, req ctrl.Re
 		return ctrl.Result{}, nil
 	}
 
-	// Compute SHA-256 of machineconfig content.
-	sum := sha256.Sum256(mcBytes)
+	// Compute SHA-256 over uncompressed bytes (RECON-F5): hash is always over the
+	// uncompressed machineconfig so the reconcileMachineConfigSync trigger in the
+	// TalosCluster reconciler (which also decompresses before hashing) stays consistent.
+	hashBytes := mcBytes
+	if mcSecret.Labels[LabelMachineConfigCompression] == MachineConfigCompressionGzip {
+		if gr, grErr := gzip.NewReader(bytes.NewReader(mcBytes)); grErr == nil {
+			if uncompressed, readErr := io.ReadAll(gr); readErr == nil {
+				hashBytes = uncompressed
+			}
+		}
+	}
+	sum := sha256.Sum256(hashBytes)
 	contentHash := fmt.Sprintf("%x", sum)
 
 	// Hash-equality check: skip Job if hash matches and forceApply=false.
 	if !mcs.Spec.ForceApply {
 		lastHash := mcSecret.Labels[LabelMachineConfigSyncHash]
 		lastStatus := mcSecret.Labels[LabelMachineConfigSyncStatus]
-		if lastHash == contentHash && lastStatus == MachineConfigSyncStatusSynced {
+		if lastHash == labelSafeHash(contentHash) && lastStatus == MachineConfigSyncStatusSynced {
 			platformv1alpha1.SetCondition(
 				&mcs.Status.Conditions,
 				platformv1alpha1.ConditionTypeMachineConfigSyncReady,
@@ -341,8 +362,8 @@ func (r *MachineConfigSyncReconciler) updateSecretSyncLabels(ctx context.Context
 		secret.Labels = make(map[string]string)
 	}
 	secret.Labels[LabelMachineConfigSyncStatus] = MachineConfigSyncStatusSynced
-	secret.Labels[LabelMachineConfigSyncHash] = contentHash
-	secret.Labels[LabelMachineConfigSyncedAt] = time.Now().UTC().Format(time.RFC3339)
+	secret.Labels[LabelMachineConfigSyncHash] = labelSafeHash(contentHash)
+	secret.Labels[LabelMachineConfigSyncedAt] = time.Now().UTC().Format("20060102-150405Z")
 	return r.Client.Patch(ctx, secret, patch)
 }
 

@@ -8,6 +8,7 @@ import (
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
+	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 
 	platformv1alpha1 "github.com/ontai-dev/platform/api/v1alpha1"
@@ -184,6 +185,57 @@ func TestRetryCounter_PermanentFailureAtMax(t *testing.T) {
 	if cond.Reason != platformv1alpha1.ReasonMachineConfigSyncPermanentFailure {
 		t.Errorf("reason = %q, want %q", cond.Reason,
 			platformv1alpha1.ReasonMachineConfigSyncPermanentFailure)
+	}
+}
+
+// TestMachineConfigSync_PermanentFailure_ShortCircuit verifies that the reconciler
+// exits immediately without submitting new jobs when Degraded=PermanentFailure is already set.
+// This guards against the runaway retry loop where each status update triggers another reconcile
+// that submits another job, incrementing RetryCount indefinitely past maxRetry.
+func TestMachineConfigSync_PermanentFailure_ShortCircuit(t *testing.T) {
+	s := buildRetryTestScheme(t)
+
+	mcs := &platformv1alpha1.MachineConfigSync{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "ccs-dev-mc-sync-controlplane",
+			Namespace: "seam-tenant-ccs-dev",
+		},
+		Spec: platformv1alpha1.MachineConfigSyncSpec{
+			ClusterRef: platformv1alpha1.LocalObjectRef{Name: "ccs-dev"},
+			NodeClass:  "controlplane",
+			MaxRetry:   3,
+		},
+		Status: platformv1alpha1.MachineConfigSyncStatus{
+			RetryCount: 10,
+		},
+	}
+	platformv1alpha1.SetCondition(
+		&mcs.Status.Conditions,
+		platformv1alpha1.ConditionTypeMachineConfigSyncDegraded,
+		metav1.ConditionTrue,
+		platformv1alpha1.ReasonMachineConfigSyncPermanentFailure,
+		"permanently failed after 3 attempts",
+		mcs.Generation,
+	)
+
+	c := fake.NewClientBuilder().WithScheme(s).WithStatusSubresource(mcs).WithObjects(mcs).Build()
+	r := &MachineConfigSyncReconciler{Client: c}
+
+	result, err := r.Reconcile(context.Background(), ctrl.Request{
+		NamespacedName: types.NamespacedName{Namespace: mcs.Namespace, Name: mcs.Name},
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if result.RequeueAfter != 0 {
+		t.Errorf("expected empty result (no requeue), got %+v", result)
+	}
+
+	// RetryCount must not have increased.
+	updated := &platformv1alpha1.MachineConfigSync{}
+	_ = c.Get(context.Background(), types.NamespacedName{Name: mcs.Name, Namespace: mcs.Namespace}, updated)
+	if updated.Status.RetryCount > 10 {
+		t.Errorf("RetryCount increased to %d after PermanentFailure short-circuit", updated.Status.RetryCount)
 	}
 }
 
