@@ -161,6 +161,15 @@ spec:
                 - rootNamespace
                 - rootUID
                 type: object
+              maxRetry:
+                default: 3
+                description: |-
+                  MaxRetry is the maximum number of times the reconciler will re-submit the
+                  Conductor executor Job after a failure before declaring permanent failure
+                  and setting HumanInterventionRequired on the owning TalosCluster.
+                  Defaults to 3 when unset or zero.
+                minimum: 1
+                type: integer
               operation:
                 allOf:
                 - enum:
@@ -291,6 +300,11 @@ spec:
                 description: OperationResult is the message from the Conductor OperationResult
                   ConfigMap.
                 type: string
+              retryCount:
+                description: |-
+                  RetryCount is the number of Job submission attempts that have failed so far.
+                  Reset to zero on successful Job completion.
+                type: integer
             type: object
         type: object
     served: true

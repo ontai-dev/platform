@@ -155,11 +155,30 @@ spec:
                 - rootNamespace
                 - rootUID
                 type: object
+              maxRetry:
+                default: 3
+                description: |-
+                  MaxRetry is the maximum number of times the reconciler will re-submit the
+                  Conductor executor Job after a failure before declaring permanent failure
+                  and setting HumanInterventionRequired on the owning TalosCluster.
+                  Defaults to 3 when unset or zero.
+                minimum: 1
+                type: integer
               nodeClass:
                 description: |-
                   NodeClass identifies which class of machineconfig to sync.
-                  Values: "controlplane", "worker", or "node-{node-name}".
+                  Values: "controlplane", "worker", "node-{node-name}", or a compiler-generated
+                  per-node short name such as "cp1", "cp2", "cp3".
                 minLength: 1
+                type: string
+              nodeRef:
+                description: |-
+                  NodeRef is the IP address of the specific node that this sync targets.
+                  When set, the Conductor executor applies the machineconfig to only this node
+                  rather than all nodes enumerated in the cluster talosconfig. Used for
+                  per-node import targeting (PLT-BUG-3-ARCH): one MachineConfigSync CR per
+                  node, each pointing at a compiler-generated per-node secret via NodeClass.
+                  When empty, the conductor applies to all nodes in the cluster talosconfig.
                 type: string
               reason:
                 description: |-
@@ -253,6 +272,11 @@ spec:
                 description: OperationResult is the result message from the Conductor
                   OperationResult ConfigMap.
                 type: string
+              retryCount:
+                description: |-
+                  RetryCount is the number of Job submission attempts that have failed so far.
+                  Reset to zero on successful Job completion.
+                type: integer
             type: object
         type: object
     served: true

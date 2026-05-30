@@ -47,6 +47,12 @@ const (
 
 	// envMCForceApply controls whether the hash-equality check is skipped.
 	envMCForceApply = "MC_FORCE_APPLY"
+
+	// envMCNodeIP is the env var key injected when MachineConfigSync.spec.nodeRef is set.
+	// When present in the executor Job, the conductor applies the machineconfig to only
+	// this specific node IP rather than all nodes in the cluster talosconfig.
+	// PLT-BUG-3-ARCH.
+	envMCNodeIP = "MC_NODE_IP"
 )
 
 // MachineConfigSyncReconciler reconciles MachineConfigSync objects.
@@ -143,14 +149,22 @@ func (r *MachineConfigSyncReconciler) Reconcile(ctx context.Context, req ctrl.Re
 		return ctrl.Result{}, fmt.Errorf("get MachineConfig Secret %s/%s: %w", secretNS, secretName, err)
 	}
 
+	// Read machineconfig bytes: platform-generated secrets use MachineConfigDataKey
+	// ("machineconfig"), compiler-generated per-node secrets use MachineConfigDataKeyYAML
+	// ("machineconfig.yaml"). Try the primary key first. PLT-BUG-3-ARCH.
 	mcBytes := mcSecret.Data[MachineConfigDataKey]
+	usingYAMLKey := false
+	if len(mcBytes) == 0 {
+		mcBytes = mcSecret.Data[MachineConfigDataKeyYAML]
+		usingYAMLKey = true
+	}
 	if len(mcBytes) == 0 {
 		platformv1alpha1.SetCondition(
 			&mcs.Status.Conditions,
 			platformv1alpha1.ConditionTypeMachineConfigSyncDegraded,
 			metav1.ConditionTrue,
 			platformv1alpha1.ReasonMachineConfigSyncJobFailed,
-			fmt.Sprintf("MachineConfig Secret %s/%s has no data key %q.", secretNS, secretName, MachineConfigDataKey),
+			fmt.Sprintf("MachineConfig Secret %s/%s has no data key %q or %q.", secretNS, secretName, MachineConfigDataKey, MachineConfigDataKeyYAML),
 			mcs.Generation,
 		)
 		return ctrl.Result{}, nil
@@ -159,8 +173,9 @@ func (r *MachineConfigSyncReconciler) Reconcile(ctx context.Context, req ctrl.Re
 	// Compute SHA-256 over uncompressed bytes (RECON-F5): hash is always over the
 	// uncompressed machineconfig so the reconcileMachineConfigSync trigger in the
 	// TalosCluster reconciler (which also decompresses before hashing) stays consistent.
+	// Compiler-generated secrets (usingYAMLKey) are not gzip-compressed.
 	hashBytes := mcBytes
-	if mcSecret.Labels[LabelMachineConfigCompression] == MachineConfigCompressionGzip {
+	if !usingYAMLKey && mcSecret.Labels[LabelMachineConfigCompression] == MachineConfigCompressionGzip {
 		if gr, grErr := gzip.NewReader(bytes.NewReader(mcBytes)); grErr == nil {
 			if uncompressed, readErr := io.ReadAll(gr); readErr == nil {
 				hashBytes = uncompressed
@@ -241,7 +256,7 @@ func (r *MachineConfigSyncReconciler) Reconcile(ctx context.Context, req ctrl.Re
 		nodeExclusions := buildNodeExclusions(nil, leaderNode)
 
 		job := jobSpecWithExclusions(jobName, mcs.Namespace, clusterRef, capabilityMachineConfigSync, nodeExclusions, clusterRC.Spec.RunnerImage)
-		appendMCSyncEnvVars(job, nodeClass, mcs.Spec.ForceApply)
+		appendMCSyncEnvVars(job, nodeClass, mcs.Spec.NodeRef, mcs.Spec.ForceApply)
 
 		if err := controllerutil.SetControllerReference(mcs, job, r.Scheme); err != nil {
 			return ctrl.Result{}, fmt.Errorf("MachineConfigSyncReconciler: set owner reference: %w", err)
@@ -344,13 +359,21 @@ func (r *MachineConfigSyncReconciler) Reconcile(ctx context.Context, req ctrl.Re
 	return ctrl.Result{}, nil
 }
 
-// appendMCSyncEnvVars injects MC_NODE_CLASS and MC_FORCE_APPLY env vars into
-// the executor Job's first container. Called after jobSpecWithExclusions.
-func appendMCSyncEnvVars(job *batchv1.Job, nodeClass string, forceApply bool) {
+// appendMCSyncEnvVars injects MC_NODE_CLASS, MC_FORCE_APPLY, and optionally MC_NODE_IP
+// env vars into the executor Job's first container. nodeRef is the value for MC_NODE_IP
+// from spec.nodeRef; when empty no MC_NODE_IP var is injected and the conductor applies
+// to all nodes in the cluster talosconfig (default). PLT-BUG-3-ARCH.
+func appendMCSyncEnvVars(job *batchv1.Job, nodeClass, nodeRef string, forceApply bool) {
+	envVars := []corev1.EnvVar{
+		{Name: envMCNodeClass, Value: nodeClass},
+		{Name: envMCForceApply, Value: strconv.FormatBool(forceApply)},
+	}
+	if nodeRef != "" {
+		envVars = append(envVars, corev1.EnvVar{Name: envMCNodeIP, Value: nodeRef})
+	}
 	job.Spec.Template.Spec.Containers[0].Env = append(
 		job.Spec.Template.Spec.Containers[0].Env,
-		corev1.EnvVar{Name: envMCNodeClass, Value: nodeClass},
-		corev1.EnvVar{Name: envMCForceApply, Value: strconv.FormatBool(forceApply)},
+		envVars...,
 	)
 }
 

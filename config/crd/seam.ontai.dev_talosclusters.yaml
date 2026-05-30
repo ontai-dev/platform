@@ -58,75 +58,6 @@ spec:
               TalosClusterSpec is the declared desired state of a TalosCluster.
               platform-schema.md §4.
             properties:
-              capi:
-                description: CAPI holds CAPI integration settings. When absent, direct
-                  bootstrap is used.
-                properties:
-                  ciliumPackRef:
-                    description: CiliumPackRef references the cluster-specific Cilium
-                      PackDelivery.
-                    properties:
-                      name:
-                        description: Name is the PackDelivery CR name for the Cilium
-                          pack.
-                        type: string
-                      version:
-                        description: Version is the PackDelivery version string.
-                        type: string
-                    required:
-                    - name
-                    - version
-                    type: object
-                  controlPlane:
-                    description: ControlPlane holds control plane configuration. Required
-                      when Enabled=true.
-                    properties:
-                      replicas:
-                        description: Replicas is the desired number of control plane
-                          nodes.
-                        format: int32
-                        type: integer
-                    type: object
-                  enabled:
-                    description: Enabled determines whether this TalosCluster uses
-                      the CAPI path.
-                    type: boolean
-                  kubernetesVersion:
-                    description: KubernetesVersion is the Kubernetes version for TalosControlPlane.
-                    type: string
-                  talosVersion:
-                    description: TalosVersion is the Talos version to use for TalosConfigTemplate
-                      generation.
-                    type: string
-                  workers:
-                    description: Workers is the list of worker node pools.
-                    items:
-                      description: CAPIWorkerPool declares a worker node pool for
-                        a CAPI-managed target cluster.
-                      properties:
-                        name:
-                          description: Name is the pool identifier. Used as the MachineDeployment
-                            name suffix.
-                          type: string
-                        replicas:
-                          description: Replicas is the desired number of worker nodes
-                            in this pool.
-                          format: int32
-                          type: integer
-                        seamInfrastructureMachineNames:
-                          description: |-
-                            SeamInfrastructureMachineNames lists the SeamInfrastructureMachine CR names
-                            pre-provisioned for this pool. One per node.
-                          items:
-                            type: string
-                          type: array
-                      required:
-                      - name
-                      type: object
-                    type: array
-                required:
-                - enabled
-                type: object
               clusterEndpoint:
                 description: ClusterEndpoint is the cluster VIP or primary API endpoint
                   IP.
@@ -150,7 +81,6 @@ spec:
                 allOf:
                 - enum:
                   - native
-                  - capi
                   - screen
                 - enum:
                   - native
@@ -255,24 +185,32 @@ spec:
                   scratch or imported.
                 type: string
               nodeAddresses:
-                description: NodeAddresses is the classified list of node IPs for
-                  this cluster. Each entry carries the node IP, its role (controlplane
-                  or worker), and an optional hostname. Populated by import flow and
-                  bootstrap compiler. RECON-A9.
+                description: |-
+                  NodeAddresses is the classified list of node IPs for this cluster.
+                  Each entry carries the node IP, its role (controlplane or worker),
+                  and an optional hostname. Populated by the import flow and bootstrap
+                  compiler; updated on node enrollment changes. RECON-A9.
                 items:
-                  description: NodeAddress is a classified node IP entry in TalosClusterSpec.NodeAddresses.
+                  description: |-
+                    NodeAddress is a classified node IP entry in TalosClusterSpec.NodeAddresses.
+                    RECON-A9.
                   properties:
                     ip:
                       description: IP is the node's primary IPv4 address.
                       type: string
                     name:
-                      description: Name is the optional node hostname.
+                      description: Name is the optional node hostname. Used for per-node
+                        machineconfig secret targeting.
                       type: string
                     role:
+                      allOf:
+                      - enum:
+                        - controlplane
+                        - worker
+                      - enum:
+                        - controlplane
+                        - worker
                       description: Role classifies the node as controlplane or worker.
-                      enum:
-                      - controlplane
-                      - worker
                       type: string
                   required:
                   - ip
@@ -323,21 +261,6 @@ spec:
           status:
             description: TalosClusterStatus is the observed state of a TalosCluster.
             properties:
-              capiClusterRef:
-                description: |-
-                  CAPIClusterRef is a reference to the owned CAPI Cluster object.
-                  Only set for CAPI-managed clusters (capi.enabled=true).
-                properties:
-                  name:
-                    description: Name is the object name.
-                    type: string
-                  namespace:
-                    description: Namespace is the object namespace. May be empty for
-                      cluster-scoped objects.
-                    type: string
-                required:
-                - name
-                type: object
               conditions:
                 description: Conditions is the list of status conditions for this
                   TalosCluster.
@@ -396,6 +319,19 @@ spec:
                   - type
                   type: object
                 type: array
+              deletionStage:
+                description: |-
+                  DeletionStage is the current step in the deletion cascade. Written before
+                  each step so the reconciler can resume from the correct step after a restart.
+                  Empty when no deletion is in progress. RECON-I1.
+                enum:
+                - ""
+                - pack-execution
+                - pack-installed
+                - pack-delivery
+                - runner-config
+                - complete
+                type: string
               observedGeneration:
                 description: ObservedGeneration is the generation most recently reconciled.
                 format: int64

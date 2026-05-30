@@ -34,16 +34,10 @@ spec:
       openAPIV3Schema:
         description: |-
           UpgradePolicy governs Talos OS, Kubernetes, or combined stack upgrades.
+          Submits a talos-upgrade, kube-upgrade, or stack-upgrade Conductor executor Job.
 
-          Dual-path CRD governed by spec.capi.enabled on the owning TalosCluster:
-            - For CAPI-managed clusters (capi.enabled=true): updates TalosControlPlane
-              version and MachineDeployment rolling upgrade settings natively through
-              CAPI machinery. No Conductor Job is submitted.
-            - For management cluster (capi.enabled=false): submits talos-upgrade,
-              kube-upgrade, or stack-upgrade Conductor executor Job.
-
-          Named Conductor capabilities (non-CAPI path): talos-upgrade, kube-upgrade,
-          stack-upgrade. platform-schema.md §5.
+          Named Conductor capabilities: talos-upgrade, kube-upgrade, stack-upgrade.
+          platform-schema.md §5.
         properties:
           apiVersion:
             description: |-
@@ -159,6 +153,15 @@ spec:
                 - rootNamespace
                 - rootUID
                 type: object
+              maxRetry:
+                default: 3
+                description: |-
+                  MaxRetry is the maximum number of times the reconciler will re-submit the
+                  Conductor executor Job after a failure before declaring permanent failure
+                  and setting HumanInterventionRequired on the owning TalosCluster.
+                  Defaults to 3 when unset or zero.
+                minimum: 1
+                type: integer
               rollingStrategy:
                 default: sequential
                 description: |-
@@ -200,7 +203,7 @@ spec:
               conditions:
                 description: |-
                   Conditions is the list of status conditions for this UpgradePolicy.
-                  Condition types: Ready, Degraded, CAPIDelegated, LineageSynced.
+                  Condition types: Ready, Degraded, LineageSynced.
                 items:
                   description: Condition contains details for one aspect of the current
                     state of this API Resource.
@@ -260,9 +263,8 @@ spec:
                 - type
                 x-kubernetes-list-type: map
               jobName:
-                description: |-
-                  JobName is the name of the Conductor executor Job submitted for this upgrade.
-                  Only set for the capi.enabled=false (non-CAPI) path.
+                description: JobName is the name of the Conductor executor Job submitted
+                  for this upgrade.
                 type: string
               observedGeneration:
                 description: ObservedGeneration is the generation of the spec last
@@ -273,6 +275,43 @@ spec:
                 description: OperationResult is the message from the Conductor OperationResult
                   ConfigMap.
                 type: string
+              progress:
+                description: |-
+                  Progress tracks per-node checkpoint state for a rolling upgrade.
+                  Written by the Conductor executor Job after each successful node step.
+                  Cleared when all nodes complete or when the UpgradePolicy is superseded.
+                  RECON-J6: enables retry Jobs to skip already-completed nodes.
+                properties:
+                  completedNodes:
+                    description: |-
+                      CompletedNodes is the list of node IPs or names that have been successfully
+                      upgraded to the target version in this upgrade operation.
+                    items:
+                      type: string
+                    type: array
+                  currentNode:
+                    description: |-
+                      CurrentNode is the node IP or name currently being upgraded.
+                      Empty between node steps or when no upgrade is in progress.
+                    type: string
+                  failedNode:
+                    description: |-
+                      FailedNode is the node IP or name that caused the upgrade Job to fail.
+                      Set by the Conductor executor before returning failure so that the next
+                      retry Job knows which node to retry from.
+                    type: string
+                  phase:
+                    description: Phase is the current phase of the upgrade operation.
+                    enum:
+                    - upgrading
+                    - complete
+                    type: string
+                type: object
+              retryCount:
+                description: |-
+                  RetryCount is the number of Job submission attempts that have failed so far.
+                  Reset to zero on successful Job completion.
+                type: integer
             type: object
         type: object
     served: true

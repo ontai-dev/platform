@@ -2232,7 +2232,7 @@ func TestMachineConfigSyncReconcile_SkipsHashMatch(t *testing.T) {
 	scheme := buildDay2Scheme(t)
 	secret := mcSyncSecret("ccs-mgmt", "controlplane", content, map[string]string{
 		"platform.ontai.dev/sync-status": "synced",
-		"platform.ontai.dev/sync-hash":   import_sha,
+		"platform.ontai.dev/sync-hash":   import_sha[:63],
 	})
 	mcs := &platformv1alpha1.MachineConfigSync{
 		ObjectMeta: metav1.ObjectMeta{Name: "mcs-hash", Namespace: "seam-tenant-ccs-mgmt", Generation: 1},

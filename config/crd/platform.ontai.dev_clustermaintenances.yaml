@@ -34,14 +34,8 @@ spec:
       openAPIV3Schema:
         description: |-
           ClusterMaintenance is a maintenance window gate for a Talos cluster.
-
-          Dual-path CRD governed by spec.capi.enabled on the owning TalosCluster:
-            - For CAPI-managed clusters (capi.enabled=true): sets
-              cluster.x-k8s.io/paused=true on the CAPI Cluster when no active window
-              exists and blockOutsideWindows=true. Pause halts all CAPI reconciliation
-              until the window opens and the annotation is lifted.
-            - For management cluster (capi.enabled=false): blocks Conductor Job
-              admission for the cluster during restricted periods.
+          Records gate state in status; Conductor Job admission is blocked outside
+          active windows when blockOutsideWindows=true.
 
           platform-schema.md §5.
         properties:
@@ -69,10 +63,7 @@ spec:
                 description: |-
                   BlockOutsideWindows controls whether operations are blocked when no active
                   window exists. When false (default), operations are permitted at any time.
-                  When true and no active window exists:
-                    - CAPI path: sets cluster.x-k8s.io/paused=true on the CAPI Cluster, halting
-                      all CAPI reconciliation until the window opens.
-                    - Non-CAPI path: blocks Conductor Job admission for this cluster.
+                  When true and no active window exists: blocks Conductor Job admission for this cluster.
                 type: boolean
               clusterRef:
                 description: ClusterRef references the TalosCluster this maintenance

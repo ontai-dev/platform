@@ -26,11 +26,16 @@ import (
 	"github.com/ontai-dev/platform/internal/controller"
 )
 
-// computeTestHash returns the hex SHA-256 of b. Used to build pre-existing Secret
-// labels that match or differ from test content in RECON-A6 tests.
+// computeTestHash returns the label-safe (63-char) hex SHA-256 of b. Used to build
+// pre-existing Secret labels that match or differ from test content in RECON-A6 tests.
+// Must match labelSafeHash in machineconfig_labels.go: truncated to 63 chars.
 func computeTestHash(b []byte) string {
 	sum := sha256.Sum256(b)
-	return hex.EncodeToString(sum[:])
+	h := hex.EncodeToString(sum[:])
+	if len(h) > 63 {
+		return h[:63]
+	}
+	return h
 }
 
 // buildMachineConfigSecretSynced creates a pre-existing machineconfig Secret that
@@ -580,6 +585,184 @@ func TestMCSOT_ImportMode_NodeAddressesPopulatedWithRoles(t *testing.T) {
 		if na.Role != platformv1alpha1.NodeRoleControlPlane {
 			t.Errorf("NodeAddress %q: expected role=controlplane, got %q", na.IP, na.Role)
 		}
+	}
+}
+
+// --- PLT-BUG-3-ARCH: per-node MachineConfigSync import path ---
+
+// buildCompilerPerNodeSecret creates a fake compiler-generated per-node machineconfig
+// Secret in the style the Compiler produces. Uses the machineconfig.yaml data key.
+// PLT-BUG-3-ARCH.
+func buildCompilerPerNodeSecret(clusterName, shortName, nodeRole string, content []byte) *corev1.Secret {
+	return &corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "seam-mc-" + clusterName + "-" + shortName,
+			Namespace: "seam-tenant-" + clusterName,
+			Labels: map[string]string{
+				"ontai.dev/managed-by": "compiler",
+				"ontai.dev/cluster":    clusterName,
+				"ontai.dev/node":       clusterName + "-" + shortName,
+				"ontai.dev/node-role":  nodeRole,
+			},
+		},
+		Data: map[string][]byte{
+			controller.MachineConfigDataKeyYAML: content,
+		},
+	}
+}
+
+// TestMCSOT_ImportMode_CompilerSecretsCreatePerNodeMCS verifies that when compiler-
+// generated per-node secrets exist in seam-tenant-{cluster}, the import helper
+// creates per-node MachineConfigSync CRs with spec.nodeRef set to the node IP,
+// rather than class-level MCS CRs. PLT-BUG-3-ARCH.
+func TestMCSOT_ImportMode_CompilerSecretsCreatePerNodeMCS(t *testing.T) {
+	const cluster = "plt-arch-3"
+	scheme := buildDay2Scheme(t)
+	tc := buildImportTalosCluster(cluster, "seam-system")
+	talosSecret := buildFakeTalosconfigSecretWithEndpoints(cluster, []string{"10.20.0.11", "10.20.0.12", "10.20.0.13"})
+
+	cpContent := []byte("version: v1alpha1\nmachine:\n  type: controlplane\n")
+	cp1Secret := buildCompilerPerNodeSecret(cluster, "cp1", "init", cpContent)
+	cp2Secret := buildCompilerPerNodeSecret(cluster, "cp2", "controlplane", cpContent)
+	cp3Secret := buildCompilerPerNodeSecret(cluster, "cp3", "controlplane", cpContent)
+
+	c := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithObjects(tc, talosSecret, cp1Secret, cp2Secret, cp3Secret).
+		WithStatusSubresource(tc).
+		Build()
+	r := &controller.TalosClusterReconciler{
+		Client:                c,
+		Scheme:                scheme,
+		Recorder:              clientevents.NewFakeRecorder(16),
+		KubeconfigGeneratorFn: fakeKubeconfigGenerator,
+		// MachineConfigReaderFn is intentionally NOT set: compiler path must not call it.
+	}
+
+	if _, err := r.Reconcile(context.Background(), ctrl.Request{
+		NamespacedName: types.NamespacedName{Name: cluster, Namespace: "seam-system"},
+	}); err != nil {
+		t.Fatalf("Reconcile: %v", err)
+	}
+
+	ns := "seam-tenant-" + cluster
+
+	// Expect per-node MCS CRs for cp1, cp2, cp3 -- NOT a class-level CR.
+	for i, nodeShort := range []string{"cp1", "cp2", "cp3"} {
+		expectedIP := []string{"10.20.0.11", "10.20.0.12", "10.20.0.13"}[i]
+		crName := cluster + "-mc-import-" + nodeShort
+		mcs := &platformv1alpha1.MachineConfigSync{}
+		if err := c.Get(context.Background(), types.NamespacedName{Name: crName, Namespace: ns}, mcs); err != nil {
+			t.Fatalf("per-node MachineConfigSync CR %q not found: %v", crName, err)
+		}
+		if mcs.Spec.NodeClass != nodeShort {
+			t.Errorf("CR %q: NodeClass = %q, want %q", crName, mcs.Spec.NodeClass, nodeShort)
+		}
+		if mcs.Spec.NodeRef != expectedIP {
+			t.Errorf("CR %q: NodeRef = %q, want %q", crName, mcs.Spec.NodeRef, expectedIP)
+		}
+		if mcs.Spec.Reason != "import-initial-sync" {
+			t.Errorf("CR %q: Reason = %q, want import-initial-sync", crName, mcs.Spec.Reason)
+		}
+	}
+
+	// Verify that no class-level MCS CR was created.
+	classCRName := cluster + "-mc-import-controlplane"
+	classMCS := &platformv1alpha1.MachineConfigSync{}
+	err := c.Get(context.Background(), types.NamespacedName{Name: classCRName, Namespace: ns}, classMCS)
+	if err == nil {
+		t.Errorf("class-level MachineConfigSync CR %q must not be created when compiler per-node secrets exist", classCRName)
+	}
+}
+
+// TestMCSOT_ImportMode_CompilerSecretsPopulateNodeAddresses verifies that when the
+// compiler path is taken, spec.nodeAddresses is populated from endpoints and role labels.
+// PLT-BUG-3-ARCH.
+func TestMCSOT_ImportMode_CompilerSecretsPopulateNodeAddresses(t *testing.T) {
+	const cluster = "plt-arch-3-addr"
+	scheme := buildDay2Scheme(t)
+	tc := buildImportTalosCluster(cluster, "seam-system")
+	talosSecret := buildFakeTalosconfigSecretWithEndpoints(cluster, []string{"10.20.0.11", "10.20.0.12"})
+
+	cpContent := []byte("version: v1alpha1\nmachine:\n  type: controlplane\n")
+	cp1Secret := buildCompilerPerNodeSecret(cluster, "cp1", "init", cpContent)
+	cp2Secret := buildCompilerPerNodeSecret(cluster, "cp2", "controlplane", cpContent)
+
+	c := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithObjects(tc, talosSecret, cp1Secret, cp2Secret).
+		WithStatusSubresource(tc).
+		Build()
+	r := &controller.TalosClusterReconciler{
+		Client:                c,
+		Scheme:                scheme,
+		Recorder:              clientevents.NewFakeRecorder(16),
+		KubeconfigGeneratorFn: fakeKubeconfigGenerator,
+	}
+
+	if _, err := r.Reconcile(context.Background(), ctrl.Request{
+		NamespacedName: types.NamespacedName{Name: cluster, Namespace: "seam-system"},
+	}); err != nil {
+		t.Fatalf("Reconcile: %v", err)
+	}
+
+	updated := &platformv1alpha1.TalosCluster{}
+	if err := c.Get(context.Background(), types.NamespacedName{Name: cluster, Namespace: "seam-system"}, updated); err != nil {
+		t.Fatalf("get updated TalosCluster: %v", err)
+	}
+	if len(updated.Spec.NodeAddresses) != 2 {
+		t.Fatalf("expected 2 NodeAddresses, got %d", len(updated.Spec.NodeAddresses))
+	}
+	for _, na := range updated.Spec.NodeAddresses {
+		if na.Role != platformv1alpha1.NodeRoleControlPlane {
+			t.Errorf("NodeAddress %q: expected role=controlplane, got %q", na.IP, na.Role)
+		}
+	}
+}
+
+// TestMCSOT_ImportMode_CompilerSecretsIdempotent verifies that running import twice
+// when compiler secrets exist does not duplicate per-node MCS CRs. PLT-BUG-3-ARCH.
+func TestMCSOT_ImportMode_CompilerSecretsIdempotent(t *testing.T) {
+	const cluster = "plt-arch-3-idem"
+	scheme := buildDay2Scheme(t)
+	tc := buildImportTalosCluster(cluster, "seam-system")
+	talosSecret := buildFakeTalosconfigSecretWithEndpoints(cluster, []string{"10.20.0.11"})
+	cpContent := []byte("version: v1alpha1\nmachine:\n  type: controlplane\n")
+	cp1Secret := buildCompilerPerNodeSecret(cluster, "cp1", "init", cpContent)
+
+	c := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithObjects(tc, talosSecret, cp1Secret).
+		WithStatusSubresource(tc).
+		Build()
+	r := &controller.TalosClusterReconciler{
+		Client:                c,
+		Scheme:                scheme,
+		Recorder:              clientevents.NewFakeRecorder(16),
+		KubeconfigGeneratorFn: fakeKubeconfigGenerator,
+	}
+
+	req := ctrl.Request{NamespacedName: types.NamespacedName{Name: cluster, Namespace: "seam-system"}}
+	if _, err := r.Reconcile(context.Background(), req); err != nil {
+		t.Fatalf("first Reconcile: %v", err)
+	}
+	if _, err := r.Reconcile(context.Background(), req); err != nil {
+		t.Fatalf("second Reconcile: %v", err)
+	}
+
+	ns := "seam-tenant-" + cluster
+	mcsList := &platformv1alpha1.MachineConfigSyncList{}
+	if err := c.List(context.Background(), mcsList); err != nil {
+		t.Fatalf("list MachineConfigSync: %v", err)
+	}
+	cp1CRs := 0
+	for _, cr := range mcsList.Items {
+		if cr.Namespace == ns && cr.Spec.NodeClass == "cp1" {
+			cp1CRs++
+		}
+	}
+	if cp1CRs != 1 {
+		t.Errorf("expected exactly 1 per-node MachineConfigSync CR for cp1, got %d", cp1CRs)
 	}
 }
 

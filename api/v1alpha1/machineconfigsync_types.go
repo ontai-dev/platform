@@ -49,9 +49,20 @@ type MachineConfigSyncSpec struct {
 	ClusterRef LocalObjectRef `json:"clusterRef"`
 
 	// NodeClass identifies which class of machineconfig to sync.
-	// Values: "controlplane", "worker", or "node-{node-name}".
+	// Values: "controlplane", "worker", "node-{node-name}", or a compiler-generated
+	// per-node short name such as "cp1", "cp2", "cp3".
 	// +kubebuilder:validation:MinLength=1
 	NodeClass string `json:"nodeClass"`
+
+	// NodeRef is the IP address of the specific node that this sync targets.
+	// When set, the Conductor executor applies the machineconfig to only this node
+	// rather than all nodes enumerated in the cluster talosconfig. Used for
+	// per-node import targeting (PLT-BUG-3-ARCH): one MachineConfigSync CR per
+	// node, each pointing at a compiler-generated per-node secret via NodeClass.
+	// When empty, the conductor applies to all nodes in the cluster talosconfig
+	// (default class-based behavior).
+	// +optional
+	NodeRef string `json:"nodeRef,omitempty"`
 
 	// MaxRetry is the maximum number of times the reconciler will re-submit the
 	// Conductor executor Job after a failure before declaring permanent failure

@@ -20,6 +20,8 @@ import (
 	"encoding/hex"
 	"fmt"
 	"io"
+	"sort"
+	"strings"
 
 	talos_client "github.com/siderolabs/talos/pkg/machinery/client"
 	clientconfig "github.com/siderolabs/talos/pkg/machinery/client/config"
@@ -242,6 +244,17 @@ func (r *TalosClusterReconciler) ensureMachineConfigSecrets(ctx context.Context,
 		return fmt.Errorf("ensureMachineConfigSecrets: talosconfig has no endpoints in context %q", cfg.Context)
 	}
 
+	// PLT-BUG-3-ARCH: detect compiler-generated per-node secrets before attempting
+	// live node reads. If they exist, bypass the Talos API entirely and create one
+	// MachineConfigSync CR per node pointing at the specific node's IP.
+	compilerSecrets, csErr := r.listCompilerPerNodeSecrets(ctx, tc.Name, secretsNS)
+	if csErr != nil {
+		return fmt.Errorf("ensureMachineConfigSecrets: list compiler per-node secrets: %w", csErr)
+	}
+	if len(compilerSecrets) > 0 {
+		return r.ensureMachineConfigSecretsFromCompiler(ctx, tc, secretsNS, compilerSecrets, activeCtx.Endpoints)
+	}
+
 	// Build a per-node reader. When MachineConfigReaderFn is set (unit tests),
 	// use it to avoid establishing a real talos goclient connection.
 	readNode := r.buildMachineConfigNodeReader(ctx, tc.Name, talosconfigBytes)
@@ -298,6 +311,130 @@ func (r *TalosClusterReconciler) ensureMachineConfigSecrets(ctx context.Context,
 			"cluster", tc.Name, "count", len(nodeAddresses))
 	}
 
+	return nil
+}
+
+// listCompilerPerNodeSecrets returns all compiler-generated per-node machineconfig
+// secrets in secretsNS. These are identified by the ontai.dev/managed-by=compiler
+// label. PLT-BUG-3-ARCH.
+func (r *TalosClusterReconciler) listCompilerPerNodeSecrets(
+	ctx context.Context,
+	clusterName, secretsNS string,
+) ([]corev1.Secret, error) {
+	secretList := &corev1.SecretList{}
+	if err := r.Client.List(ctx, secretList,
+		client.InNamespace(secretsNS),
+		client.MatchingLabels{
+			LabelCompilerManagedBy: "compiler",
+			LabelCompilerCluster:   clusterName,
+		},
+	); err != nil {
+		return nil, fmt.Errorf("list compiler per-node secrets in %s: %w", secretsNS, err)
+	}
+	return secretList.Items, nil
+}
+
+// ensureMachineConfigSecretsFromCompiler handles the PLT-BUG-3-ARCH import path when
+// compiler-generated per-node secrets are present. It pairs each compiler secret
+// with a talosconfig endpoint by sorted name order, then creates one per-node
+// MachineConfigSync CR per node with spec.nodeRef set to the node's IP address.
+// The Talos API is never called in this path.
+//
+// Pairing assumption: compiler secrets sorted by name (cp1, cp2, cp3) correspond to
+// talosconfig endpoints in list order. This invariant is maintained by the Compiler
+// and the lab cluster-input.yaml declaration order. PLT-BUG-3-ARCH.
+func (r *TalosClusterReconciler) ensureMachineConfigSecretsFromCompiler(
+	ctx context.Context,
+	tc *platformv1alpha1.TalosCluster,
+	secretsNS string,
+	compilerSecrets []corev1.Secret,
+	endpoints []string,
+) error {
+	logger := log.FromContext(ctx)
+
+	// Sort by name so cp1 < cp2 < cp3 always maps to endpoints[0] < [1] < [2].
+	sort.Slice(compilerSecrets, func(i, j int) bool {
+		return compilerSecrets[i].Name < compilerSecrets[j].Name
+	})
+
+	var nodeAddresses []platformv1alpha1.NodeAddress
+
+	for i, secret := range compilerSecrets {
+		if i >= len(endpoints) {
+			logger.Info("ensureMachineConfigSecretsFromCompiler: more compiler secrets than endpoints, skipping",
+				"secret", secret.Name)
+			break
+		}
+		nodeIP := endpoints[i]
+
+		// Extract short name: "seam-mc-ccs-dev-cp1" -> "cp1".
+		shortName := strings.TrimPrefix(secret.Name, MachineConfigSecretNamePrefix+tc.Name+"-")
+		if shortName == secret.Name {
+			// TrimPrefix did nothing: secret name does not follow convention. Skip.
+			logger.Info("ensureMachineConfigSecretsFromCompiler: unexpected secret name format, skipping",
+				"secret", secret.Name)
+			continue
+		}
+
+		// Determine node role from compiler label.
+		role := platformv1alpha1.NodeRoleControlPlane
+		if secret.Labels[LabelCompilerNodeRole] == "worker" {
+			role = platformv1alpha1.NodeRoleWorker
+		}
+		nodeAddresses = append(nodeAddresses, platformv1alpha1.NodeAddress{IP: nodeIP, Role: role})
+
+		// Create per-node MachineConfigSync CR with nodeRef = node IP.
+		if err := r.createPerNodeMachineConfigSyncCR(ctx, tc.Name, secretsNS, shortName, nodeIP); err != nil {
+			return fmt.Errorf("ensureMachineConfigSecretsFromCompiler: create per-node MCS for %s: %w", shortName, err)
+		}
+	}
+
+	// Write classified node IPs to spec.nodeAddresses if not already populated.
+	if len(nodeAddresses) > 0 && len(tc.Spec.NodeAddresses) == 0 {
+		patch := client.MergeFrom(tc.DeepCopy())
+		tc.Spec.NodeAddresses = nodeAddresses
+		if err := r.Client.Patch(ctx, tc, patch); err != nil {
+			return fmt.Errorf("ensureMachineConfigSecretsFromCompiler: patch nodeAddresses: %w", err)
+		}
+		logger.Info("ensureMachineConfigSecretsFromCompiler: wrote nodeAddresses",
+			"cluster", tc.Name, "count", len(nodeAddresses))
+	}
+
+	return nil
+}
+
+// createPerNodeMachineConfigSyncCR creates a per-node MachineConfigSync CR that
+// targets a specific node IP via spec.nodeRef. Used in the PLT-BUG-3-ARCH import
+// path when compiler-generated per-node secrets are present. Idempotent.
+func (r *TalosClusterReconciler) createPerNodeMachineConfigSyncCR(
+	ctx context.Context,
+	clusterName, secretsNS, nodeShortName, nodeRef string,
+) error {
+	crName := clusterName + "-mc-import-" + nodeShortName
+	existing := &platformv1alpha1.MachineConfigSync{}
+	if err := r.Client.Get(ctx, types.NamespacedName{Name: crName, Namespace: secretsNS}, existing); err == nil {
+		return nil
+	} else if !apierrors.IsNotFound(err) {
+		return fmt.Errorf("check MachineConfigSync %s/%s: %w", secretsNS, crName, err)
+	}
+
+	mcs := &platformv1alpha1.MachineConfigSync{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      crName,
+			Namespace: secretsNS,
+		},
+		Spec: platformv1alpha1.MachineConfigSyncSpec{
+			ClusterRef: platformv1alpha1.LocalObjectRef{Name: clusterName},
+			NodeClass:  nodeShortName,
+			NodeRef:    nodeRef,
+			Reason:     "import-initial-sync",
+		},
+	}
+	if err := r.Client.Create(ctx, mcs); err != nil {
+		return fmt.Errorf("create MachineConfigSync %s/%s: %w", secretsNS, crName, err)
+	}
+	log.FromContext(ctx).Info("ensureMachineConfigSecrets: created per-node MachineConfigSync CR",
+		"cluster", clusterName, "nodeShortName", nodeShortName, "nodeRef", nodeRef)
 	return nil
 }
 

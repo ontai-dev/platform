@@ -21,7 +21,9 @@ const (
 	// Written by platform after each confirmed MachineConfigSync Job completion.
 	LabelMachineConfigSyncHash = "platform.ontai.dev/sync-hash"
 
-	// LabelMachineConfigSyncedAt is the RFC3339 timestamp of the last confirmed sync.
+	// LabelMachineConfigSyncedAt is the UTC timestamp of the last confirmed sync,
+	// formatted as "20060102-150405Z" (ISO 8601 basic with dashes, no colons)
+	// so the value is valid as a Kubernetes label.
 	LabelMachineConfigSyncedAt = "platform.ontai.dev/synced-at"
 )
 
@@ -64,7 +66,29 @@ const MachineConfigCompressionGzip = "gzip"
 const MachineConfigSecretNamePrefix = "seam-mc-"
 
 // MachineConfigDataKey is the key in the Secret's data map that holds the raw Talos machineconfig YAML.
+// Used by platform-generated machineconfig secrets (gzip-compressed).
 const MachineConfigDataKey = "machineconfig"
+
+// MachineConfigDataKeyYAML is the data key used by compiler-generated per-node secrets.
+// Compiler generates secrets with key "machineconfig.yaml" containing raw uncompressed YAML.
+// The MachineConfigSync reconciler and conductor capability fall back to this key when
+// the primary MachineConfigDataKey is absent. PLT-BUG-3-ARCH.
+const MachineConfigDataKeyYAML = "machineconfig.yaml"
+
+// LabelCompilerManagedBy is the label key used by compiler-generated secrets.
+// Value is always "compiler". Used to detect compiler per-node secrets in the import path.
+const LabelCompilerManagedBy = "ontai.dev/managed-by"
+
+// LabelCompilerNodeRole is the label on compiler-generated per-node secrets.
+// Values: "init" (first control-plane node), "controlplane", "worker".
+const LabelCompilerNodeRole = "ontai.dev/node-role"
+
+// LabelCompilerNode is the label carrying the full node name on compiler-generated secrets.
+// Example value: "ccs-dev-cp1".
+const LabelCompilerNode = "ontai.dev/node"
+
+// LabelCompilerCluster is the label carrying the cluster name on compiler-generated secrets.
+const LabelCompilerCluster = "ontai.dev/cluster"
 
 // MachineConfigNodeLabel is the Talos node label injected by the machineconfig-sync conductor capability.
 // Its presence on a node proves that the node accepted an ONT-governed machineconfig.
@@ -74,4 +98,14 @@ const MachineConfigNodeLabel = "ont.platform.dev/controlled"
 // class should be MachineConfigClassControlPlane, MachineConfigClassWorker, or "node-{name}".
 func MachineConfigSecretName(cluster, class string) string {
 	return MachineConfigSecretNamePrefix + cluster + "-" + class
+}
+
+// labelSafeHash truncates a hex-encoded SHA-256 digest to 63 characters so it
+// fits within the Kubernetes label value length limit. 63 hex chars = 252 bits,
+// sufficient for collision resistance in any realistic label context.
+func labelSafeHash(hexDigest string) string {
+	if len(hexDigest) > 63 {
+		return hexDigest[:63]
+	}
+	return hexDigest
 }
