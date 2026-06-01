@@ -1250,13 +1250,8 @@ func (r *TalosClusterReconciler) ensureTenantExecutorResources(ctx context.Conte
 		},
 		{
 			APIGroups: []string{"platform.ontai.dev"},
-			Resources: []string{"etcdmaintenances", "hardeningprofiles", "nodemaintenances", "nodeoperations", "pkirotations", "upgradepolicies"},
+			Resources: []string{"etcdmaintenances", "hardeningprofiles", "machineconfigs", "nodemaintenances", "nodeoperations", "pkirotations", "upgradepolicies"},
 			Verbs:     []string{"get", "list", "watch"},
-		},
-		{
-			APIGroups: []string{""},
-			Resources: []string{"secrets"},
-			Verbs:     []string{"get", "create", "update", "patch"},
 		},
 	}
 	role := &rbacv1.Role{}

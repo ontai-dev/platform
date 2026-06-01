@@ -96,6 +96,13 @@ func jobSpec(jobName, namespace, clusterName, capability, runnerImage string) *b
 				Spec: corev1.PodSpec{
 					RestartPolicy:      corev1.RestartPolicyNever,
 					ServiceAccountName: "platform-executor",
+					Tolerations: []corev1.Toleration{
+						{
+							Key:      "node-role.kubernetes.io/control-plane",
+							Operator: corev1.TolerationOpExists,
+							Effect:   corev1.TaintEffectNoSchedule,
+						},
+					},
 					Volumes: []corev1.Volume{
 						{
 							Name: "talosconfig",
