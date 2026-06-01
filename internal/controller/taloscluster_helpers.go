@@ -39,12 +39,6 @@ const (
 	// WS2: was incorrectly "cluster-bootstrap" — corrected to "bootstrap".
 	bootstrapCapability = "bootstrap"
 
-	// tenantNamespaceLabel is the namespace label applied to all tenant namespaces.
-	tenantNamespaceLabel = "ontai.dev/tenant"
-
-	// clusterNamespaceLabel is the namespace label applied to identify the cluster.
-	clusterNamespaceLabel = "ontai.dev/cluster"
-
 	// conductorExecuteImageName is the base image name for the Conductor executor
 	// binary (debian-slim, used for executor Jobs). conductor-schema.md §3, Decision 12.
 	conductorExecuteImageName = "conductor-exec"

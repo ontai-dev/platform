@@ -111,12 +111,4 @@ func MachineConfigCRName(cluster, hostname string) string {
 	return MachineConfigSecretNamePrefix + cluster + "-" + hostname
 }
 
-// labelSafeHash truncates a hex-encoded SHA-256 digest to 63 characters so it
-// fits within the Kubernetes label value length limit. 63 hex chars = 252 bits,
-// sufficient for collision resistance in any realistic label context.
-func labelSafeHash(hexDigest string) string {
-	if len(hexDigest) > 63 {
-		return hexDigest[:63]
-	}
-	return hexDigest
-}
+

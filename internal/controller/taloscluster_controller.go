@@ -65,9 +65,6 @@ type TalosClusterReconciler struct {
 	// a live talos endpoint. CP-INV-001 extension: authorized by Governor 2026-04-10.
 	KubeconfigGeneratorFn func(ctx context.Context, clusterName, endpoint string) ([]byte, error)
 
-	// mcSyncCoalescer is retained for future use but currently unused after the
-	// migration from Secret-hash-based to MachineConfig-generation-based sync detection.
-	mcSyncCoalescer *MCSyncCoalescer
 }
 
 // Reconcile is the main reconciliation loop for TalosCluster.
