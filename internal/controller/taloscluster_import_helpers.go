@@ -15,6 +15,7 @@ package controller
 import (
 	"context"
 	"fmt"
+	"strings"
 
 	talos_client "github.com/siderolabs/talos/pkg/machinery/client"
 	clientconfig "github.com/siderolabs/talos/pkg/machinery/client/config"
@@ -323,6 +324,58 @@ func (r *TalosClusterReconciler) reconcileMachineConfigSync(ctx context.Context,
 		}
 		logger.Info("reconcileMachineConfigSync: created MachineConfigSync CR for generation change",
 			"cluster", tc.Name, "hostname", mc.Spec.NodeHostname, "generation", mc.Generation)
+	}
+	return nil
+}
+
+// pruneImportMachineConfigSyncCRs deletes {cluster}-mc-import-{hostname} CRs once
+// the corresponding {cluster}-mc-sync-{hostname} CR is READY=True. The import CR
+// serves only the initial one-time sync; after the sync CR takes ownership, the
+// import CR has no further purpose and confuses the status view.
+func (r *TalosClusterReconciler) pruneImportMachineConfigSyncCRs(ctx context.Context, tc *platformv1alpha1.TalosCluster) error {
+	ns := importSecretsNamespace(tc.Name)
+	logger := log.FromContext(ctx)
+
+	mcList := &platformv1alpha1.MachineConfigSyncList{}
+	if err := r.Client.List(ctx, mcList, client.InNamespace(ns)); err != nil {
+		return fmt.Errorf("pruneImportMachineConfigSyncCRs: list MachineConfigSync CRs: %w", err)
+	}
+
+	for i := range mcList.Items {
+		mcs := &mcList.Items[i]
+		if mcs.Spec.ClusterRef.Name != tc.Name {
+			continue
+		}
+		// Only target import CRs (named {cluster}-mc-import-{hostname}).
+		importPrefix := tc.Name + "-mc-import-"
+		if !strings.HasPrefix(mcs.Name, importPrefix) {
+			continue
+		}
+		hostname := strings.TrimPrefix(mcs.Name, importPrefix)
+
+		// Check if the corresponding sync CR is READY=True.
+		syncName := tc.Name + "-mc-sync-" + hostname
+		syncCR := &platformv1alpha1.MachineConfigSync{}
+		if err := r.Client.Get(ctx, types.NamespacedName{Name: syncName, Namespace: ns}, syncCR); err != nil {
+			continue // sync CR does not exist yet; keep the import CR
+		}
+
+		ready := false
+		for _, cond := range syncCR.Status.Conditions {
+			if cond.Type == "Ready" && cond.Status == "True" {
+				ready = true
+				break
+			}
+		}
+		if !ready {
+			continue
+		}
+
+		if err := r.Client.Delete(ctx, mcs); err != nil && !apierrors.IsNotFound(err) {
+			return fmt.Errorf("pruneImportMachineConfigSyncCRs: delete import CR %s/%s: %w", ns, mcs.Name, err)
+		}
+		logger.Info("pruneImportMachineConfigSyncCRs: deleted import CR (sync CR is READY)",
+			"importCR", mcs.Name, "syncCR", syncName)
 	}
 	return nil
 }

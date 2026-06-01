@@ -378,6 +378,13 @@ func (r *TalosClusterReconciler) reconcileDirectBootstrap(ctx context.Context, t
 				"name", tc.Name, "error", mcErr.Error())
 		}
 
+		// Delete import MachineConfigSync CRs whose sync CRs are READY=True.
+		// Non-fatal: import CRs are cosmetic after initial sync completes.
+		if mcErr := r.pruneImportMachineConfigSyncCRs(ctx, tc); mcErr != nil {
+			logger.Info("pruneImportMachineConfigSyncCRs: error pruning import CRs (non-fatal)",
+				"name", tc.Name, "error", mcErr.Error())
+		}
+
 		// Role=tenant on the direct path: register the cluster for RBAC and pack delivery.
 		// CP-INV-004 amendment (Governor 2026-05-31): namespace is created by admin/compiler.
 		if tc.Spec.Role == platformv1alpha1.TalosClusterRoleTenant {
