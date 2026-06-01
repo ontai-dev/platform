@@ -2,9 +2,10 @@ package controller
 
 // MachineConfigSyncReconciler reconciles MachineConfigSync CRs.
 //
-// Pattern: read the cluster RunnerConfig from ont-system, gate on machineconfig-sync
-// capability, submit a Conductor executor Job, poll OperationResult for completion,
-// then update the source-of-truth Secret sync labels. platform-schema.md §15.
+// Pattern: read the source-of-truth MachineConfig CR from seam-tenant-{cluster},
+// compute content hash, gate on machineconfig-sync capability in the cluster RunnerConfig,
+// submit a Conductor executor Job, poll OperationResult for completion,
+// then record ObservedHash on the MachineConfigSync status. platform-schema.md §15.
 //
 // Named Conductor capability: machineconfig-sync. RECON-A5.
 //
@@ -13,14 +14,10 @@ package controller
 // INV-018: gate failures are permanent -- backoffLimit=0, no retries.
 
 import (
-	"bytes"
-	"compress/gzip"
 	"context"
 	"crypto/sha256"
 	"fmt"
-	"io"
 	"strconv"
-	"time"
 
 	batchv1 "k8s.io/api/batch/v1"
 	corev1 "k8s.io/api/core/v1"
@@ -71,7 +68,7 @@ type MachineConfigSyncReconciler struct {
 // +kubebuilder:rbac:groups=infrastructure.ontai.dev,resources=infrastructuretalosclusteroperationresults,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=batch,resources=jobs,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups="",resources=configmaps,verbs=get;list;watch
-// +kubebuilder:rbac:groups="",resources=secrets,verbs=get;list;watch;update;patch
+// +kubebuilder:rbac:groups=platform.ontai.dev,resources=machineconfigs,verbs=get;list;watch
 
 func (r *MachineConfigSyncReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
 	logger := log.FromContext(ctx)
@@ -130,79 +127,50 @@ func (r *MachineConfigSyncReconciler) Reconcile(ctx context.Context, req ctrl.Re
 	clusterRef := mcs.Spec.ClusterRef.Name
 	nodeClass := mcs.Spec.NodeClass
 
-	// Read the source-of-truth machineconfig Secret from seam-tenant-{clusterRef}.
-	secretName := MachineConfigSecretName(clusterRef, nodeClass)
-	secretNS := tenantNS(clusterRef)
-	mcSecret := &corev1.Secret{}
-	if err := r.Client.Get(ctx, types.NamespacedName{Name: secretName, Namespace: secretNS}, mcSecret); err != nil {
+	// Read the source-of-truth MachineConfig CR from seam-tenant-{clusterRef}.
+	mcCRName := MachineConfigCRName(clusterRef, nodeClass)
+	mcNS := tenantNS(clusterRef)
+	mc := &platformv1alpha1.MachineConfig{}
+	if err := r.Client.Get(ctx, types.NamespacedName{Name: mcCRName, Namespace: mcNS}, mc); err != nil {
 		if apierrors.IsNotFound(err) {
 			platformv1alpha1.SetCondition(
 				&mcs.Status.Conditions,
 				platformv1alpha1.ConditionTypeMachineConfigSyncDegraded,
 				metav1.ConditionTrue,
 				platformv1alpha1.ReasonMachineConfigSyncJobFailed,
-				fmt.Sprintf("MachineConfig Secret %s/%s not found. Create the secret with key %q before triggering sync.", secretNS, secretName, MachineConfigDataKey),
+				fmt.Sprintf("MachineConfig CR %s/%s not found. Admin must apply MachineConfig CRs before triggering sync.", mcNS, mcCRName),
 				mcs.Generation,
 			)
 			return ctrl.Result{}, nil
 		}
-		return ctrl.Result{}, fmt.Errorf("get MachineConfig Secret %s/%s: %w", secretNS, secretName, err)
+		return ctrl.Result{}, fmt.Errorf("get MachineConfig CR %s/%s: %w", mcNS, mcCRName, err)
 	}
 
-	// Read machineconfig bytes: platform-generated secrets use MachineConfigDataKey
-	// ("machineconfig"), compiler-generated per-node secrets use MachineConfigDataKeyYAML
-	// ("machineconfig.yaml"). Try the primary key first. PLT-BUG-3-ARCH.
-	mcBytes := mcSecret.Data[MachineConfigDataKey]
-	usingYAMLKey := false
-	if len(mcBytes) == 0 {
-		mcBytes = mcSecret.Data[MachineConfigDataKeyYAML]
-		usingYAMLKey = true
+	// Compute SHA-256 content hash over the raw JSON of machine and cluster sections.
+	var machineRaw, clusterRaw []byte
+	if mc.Spec.Machine != nil {
+		machineRaw = mc.Spec.Machine.Raw
 	}
-	if len(mcBytes) == 0 {
-		platformv1alpha1.SetCondition(
-			&mcs.Status.Conditions,
-			platformv1alpha1.ConditionTypeMachineConfigSyncDegraded,
-			metav1.ConditionTrue,
-			platformv1alpha1.ReasonMachineConfigSyncJobFailed,
-			fmt.Sprintf("MachineConfig Secret %s/%s has no data key %q or %q.", secretNS, secretName, MachineConfigDataKey, MachineConfigDataKeyYAML),
-			mcs.Generation,
-		)
-		return ctrl.Result{}, nil
+	if mc.Spec.Cluster != nil {
+		clusterRaw = mc.Spec.Cluster.Raw
 	}
-
-	// Compute SHA-256 over uncompressed bytes (RECON-F5): hash is always over the
-	// uncompressed machineconfig so the reconcileMachineConfigSync trigger in the
-	// TalosCluster reconciler (which also decompresses before hashing) stays consistent.
-	// Compiler-generated secrets (usingYAMLKey) are not gzip-compressed.
-	hashBytes := mcBytes
-	if !usingYAMLKey && mcSecret.Labels[LabelMachineConfigCompression] == MachineConfigCompressionGzip {
-		if gr, grErr := gzip.NewReader(bytes.NewReader(mcBytes)); grErr == nil {
-			if uncompressed, readErr := io.ReadAll(gr); readErr == nil {
-				hashBytes = uncompressed
-			}
-		}
-	}
-	sum := sha256.Sum256(hashBytes)
+	sum := sha256.Sum256(append(machineRaw, clusterRaw...))
 	contentHash := fmt.Sprintf("%x", sum)
 
-	// Hash-equality check: skip Job if hash matches and forceApply=false.
-	if !mcs.Spec.ForceApply {
-		lastHash := mcSecret.Labels[LabelMachineConfigSyncHash]
-		lastStatus := mcSecret.Labels[LabelMachineConfigSyncStatus]
-		if lastHash == labelSafeHash(contentHash) && lastStatus == MachineConfigSyncStatusSynced {
-			platformv1alpha1.SetCondition(
-				&mcs.Status.Conditions,
-				platformv1alpha1.ConditionTypeMachineConfigSyncReady,
-				metav1.ConditionTrue,
-				platformv1alpha1.ReasonMachineConfigSyncHashMatch,
-				"MachineConfig content hash matches last confirmed sync. No apply needed.",
-				mcs.Generation,
-			)
-			mcs.Status.ObservedHash = contentHash
-			logger.Info("MachineConfigSync skipped: hash match",
-				"name", mcs.Name, "hash", contentHash)
-			return ctrl.Result{}, nil
-		}
+	// Hash-equality check: skip Job if content matches last confirmed sync and forceApply=false.
+	if !mcs.Spec.ForceApply && mcs.Status.ObservedHash == contentHash {
+		platformv1alpha1.SetCondition(
+			&mcs.Status.Conditions,
+			platformv1alpha1.ConditionTypeMachineConfigSyncReady,
+			metav1.ConditionTrue,
+			platformv1alpha1.ReasonMachineConfigSyncHashMatch,
+			"MachineConfig content hash matches last confirmed sync. No apply needed.",
+			mcs.Generation,
+		)
+		mcs.Status.ObservedHash = contentHash
+		logger.Info("MachineConfigSync skipped: hash match",
+			"name", mcs.Name, "hash", contentHash)
+		return ctrl.Result{}, nil
 	}
 
 	// Gate: read cluster RunnerConfig and verify machineconfig-sync capability.
@@ -329,13 +297,10 @@ func (r *MachineConfigSyncReconciler) Reconcile(ctx context.Context, req ctrl.Re
 		return ctrl.Result{RequeueAfter: operationalJobPollInterval}, nil
 	}
 
-	// Job complete -- update Secret sync labels and MachineConfigSync status.
+	// Job complete -- update MachineConfigSync status.
 	mcs.Status.RetryCount = 0
 	mcs.Status.OperationResult = result
 	mcs.Status.ObservedHash = contentHash
-	if err := r.updateSecretSyncLabels(ctx, mcSecret, contentHash); err != nil {
-		return ctrl.Result{}, fmt.Errorf("MachineConfigSyncReconciler: update Secret sync labels: %w", err)
-	}
 	platformv1alpha1.SetCondition(
 		&mcs.Status.Conditions,
 		platformv1alpha1.ConditionTypeMachineConfigSyncRunning,
@@ -375,19 +340,6 @@ func appendMCSyncEnvVars(job *batchv1.Job, nodeClass, nodeRef string, forceApply
 		job.Spec.Template.Spec.Containers[0].Env,
 		envVars...,
 	)
-}
-
-// updateSecretSyncLabels patches the machineconfig Secret with confirmed sync labels.
-// Called by the reconciler after a successful MachineConfigSync Job completion.
-func (r *MachineConfigSyncReconciler) updateSecretSyncLabels(ctx context.Context, secret *corev1.Secret, contentHash string) error {
-	patch := client.MergeFrom(secret.DeepCopy())
-	if secret.Labels == nil {
-		secret.Labels = make(map[string]string)
-	}
-	secret.Labels[LabelMachineConfigSyncStatus] = MachineConfigSyncStatusSynced
-	secret.Labels[LabelMachineConfigSyncHash] = labelSafeHash(contentHash)
-	secret.Labels[LabelMachineConfigSyncedAt] = time.Now().UTC().Format("20060102-150405Z")
-	return r.Client.Patch(ctx, secret, patch)
 }
 
 // SetupWithManager registers MachineConfigSyncReconciler with the manager.

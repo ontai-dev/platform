@@ -13,42 +13,38 @@ import (
 	platformv1alpha1 "github.com/ontai-dev/platform/api/v1alpha1"
 )
 
-// buildRosterTestScheme builds a scheme for node roster tests.
+// buildRosterTestScheme builds a fake client builder with the helper test scheme.
 func buildRosterTestScheme(t *testing.T) *fake.ClientBuilder {
 	t.Helper()
 	scheme := buildHelperTestScheme(t)
 	return fake.NewClientBuilder().WithScheme(scheme)
 }
 
-// buildRosterReconciler builds a TalosClusterReconciler with the given client for roster tests.
+// buildRosterReconciler builds a TalosClusterReconciler for roster tests.
 func buildRosterReconciler(t *testing.T, c client.Client) *TalosClusterReconciler {
 	t.Helper()
 	return &TalosClusterReconciler{
 		Client:   c,
 		Scheme:   buildHelperTestScheme(t),
 		Recorder: clientevents.NewFakeRecorder(8),
-		MachineConfigReaderFn: func(ctx context.Context, clusterName, endpoint string) ([]byte, string, error) {
-			// Simulate a single controlplane node returning a machineconfig.
-			return []byte("machine:\n  type: controlplane\n"), "controlplane", nil
-		},
 	}
 }
 
-// buildNodeSecret creates a per-node machineconfig secret with the given sync status.
-func buildNodeSecret(ns, clusterName, nodeClass, syncStatus string) *corev1.Secret {
-	return &corev1.Secret{
+// buildRosterMachineConfigCR creates a MachineConfig CR for roster tests.
+func buildRosterMachineConfigCR(clusterName, hostname, nodeIP string, order int32) *platformv1alpha1.MachineConfig {
+	return &platformv1alpha1.MachineConfig{
 		ObjectMeta: metav1.ObjectMeta{
-			Name:      MachineConfigSecretName(clusterName, nodeClass),
-			Namespace: ns,
-			Labels: map[string]string{
-				LabelMachineConfigCluster:    clusterName,
-				LabelMachineConfigClass:      nodeClass,
-				LabelMachineConfigSyncStatus: syncStatus,
-			},
+			Name:            "seam-mc-" + clusterName + "-" + hostname,
+			Namespace:       importSecretsNamespace(clusterName),
+			Generation:      1,
 			ResourceVersion: "1",
 		},
-		Data: map[string][]byte{
-			MachineConfigDataKey: []byte("machine:\n  type: controlplane\n"),
+		Spec: platformv1alpha1.MachineConfigSpec{
+			Role:         platformv1alpha1.MachineConfigRoleControlPlane,
+			Order:        order,
+			NodeIP:       nodeIP,
+			NodeHostname: hostname,
+			ClusterRef:   corev1.LocalObjectReference{Name: clusterName},
 		},
 	}
 }
@@ -70,7 +66,6 @@ func TestReconcileNodeRosterRefresh_NoAnnotation(t *testing.T) {
 	if err := r.reconcileNodeRosterRefresh(context.Background(), tc); err != nil {
 		t.Errorf("expected no error for missing annotation, got %v", err)
 	}
-	// No changes -- annotation absent, no secrets should be touched.
 }
 
 // TestReconcileNodeRosterRefresh_AnnotationFalse verifies that a false annotation
@@ -95,18 +90,17 @@ func TestReconcileNodeRosterRefresh_AnnotationFalse(t *testing.T) {
 	}
 }
 
-// TestReconcileNodeRosterRefresh_DecommissionsVanishedNode verifies that a per-node
-// secret for a node no longer in the live roster is marked decommissioned. RECON-C9.
-func TestReconcileNodeRosterRefresh_DecommissionsVanishedNode(t *testing.T) {
-	clusterName := "ccs-dev"
-	ns := importSecretsNamespace(clusterName)
-
-	// A per-node secret for a node that the MachineConfigReaderFn won't return.
-	vanishedNodeSecret := buildNodeSecret(ns, clusterName, "node-old-node", MachineConfigSyncStatusSynced)
+// TestReconcileNodeRosterRefresh_CreatesMCSCRForMachineConfigCR verifies that
+// when the refresh annotation is set and MachineConfig CRs exist, the roster
+// refresh creates per-node MachineConfigSync CRs and clears the annotation. RECON-C9.
+func TestReconcileNodeRosterRefresh_CreatesMCSCRForMachineConfigCR(t *testing.T) {
+	const cluster = "ccs-dev"
+	mc1 := buildRosterMachineConfigCR(cluster, "cp1", "10.20.0.11", 0)
+	mc2 := buildRosterMachineConfigCR(cluster, "cp2", "10.20.0.12", 1)
 
 	tc := &platformv1alpha1.TalosCluster{
 		ObjectMeta: metav1.ObjectMeta{
-			Name:      clusterName,
+			Name:      cluster,
 			Namespace: "seam-system",
 			Annotations: map[string]string{
 				AnnotationRefreshNodeRoster: "true",
@@ -115,47 +109,41 @@ func TestReconcileNodeRosterRefresh_DecommissionsVanishedNode(t *testing.T) {
 		},
 	}
 
-	// Need to provide talosconfig secret so ensureMachineConfigSecrets can read endpoints.
-	talosconfigSecret := buildFakeTalosconfigSecret(clusterName, ns, []string{})
-
 	c := buildRosterTestScheme(t).
-		WithObjects(tc, vanishedNodeSecret, talosconfigSecret).
+		WithObjects(tc, mc1, mc2).
 		WithStatusSubresource(&platformv1alpha1.TalosCluster{}).Build()
 	r := buildRosterReconciler(t, c)
 
-	// ensureMachineConfigSecrets will return early with "no endpoints" -- that's OK for
-	// this test; we want to verify the decommission logic runs regardless.
-	// Override MachineConfigReaderFn to do nothing (no new node classes discovered).
-	r.MachineConfigReaderFn = func(ctx context.Context, clusterName, endpoint string) ([]byte, string, error) {
-		return nil, "", nil // skipped
-	}
-
 	if err := r.reconcileNodeRosterRefresh(context.Background(), tc); err != nil {
-		// The no-endpoint early return from ensureMachineConfigSecrets is expected;
-		// the roster refresh should still decommission the vanished node.
-		// Accept errors here since the talosconfig secret has empty endpoints.
-		t.Logf("reconcileNodeRosterRefresh returned: %v (may be expected for empty endpoints)", err)
+		t.Fatalf("reconcileNodeRosterRefresh: %v", err)
 	}
 
-	// Verify the annotation was NOT cleared (error path or early return).
+	ns := importSecretsNamespace(cluster)
+	for _, hostname := range []string{"cp1", "cp2"} {
+		crName := cluster + "-mc-import-" + hostname
+		mcs := &platformv1alpha1.MachineConfigSync{}
+		if err := c.Get(context.Background(), client.ObjectKey{Name: crName, Namespace: ns}, mcs); err != nil {
+			t.Errorf("MachineConfigSync CR %q not found: %v", crName, err)
+		}
+	}
+
+	// Annotation must be cleared.
 	updated := &platformv1alpha1.TalosCluster{}
 	if err := c.Get(context.Background(), client.ObjectKeyFromObject(tc), updated); err != nil {
 		t.Fatalf("get updated TalosCluster: %v", err)
 	}
+	if updated.Annotations != nil && updated.Annotations[AnnotationRefreshNodeRoster] == "true" {
+		t.Errorf("expected annotation cleared after refresh, still present")
+	}
 }
 
-// TestReconcileNodeRosterRefresh_ClearsAnnotation verifies the annotation is removed
-// after a successful refresh when there are no endpoints (early return). RECON-C9.
-// Since ensureMachineConfigSecrets returns early on empty endpoints without error,
-// the roster refresh still completes and clears the annotation.
-func TestReconcileNodeRosterRefresh_ClearsAnnotation(t *testing.T) {
-	clusterName := "ccs-dev"
-	ns := importSecretsNamespace(clusterName)
-	talosconfigSecret := buildFakeTalosconfigSecret(clusterName, ns, []string{})
-
+// TestReconcileNodeRosterRefresh_ClearsAnnotationNoMachineConfigCRs verifies the
+// annotation is cleared even when no MachineConfig CRs exist. RECON-C9.
+func TestReconcileNodeRosterRefresh_ClearsAnnotationNoMachineConfigCRs(t *testing.T) {
+	const cluster = "ccs-dev"
 	tc := &platformv1alpha1.TalosCluster{
 		ObjectMeta: metav1.ObjectMeta{
-			Name:      clusterName,
+			Name:      cluster,
 			Namespace: "seam-system",
 			Annotations: map[string]string{
 				AnnotationRefreshNodeRoster: "true",
@@ -165,20 +153,17 @@ func TestReconcileNodeRosterRefresh_ClearsAnnotation(t *testing.T) {
 	}
 
 	c := buildRosterTestScheme(t).
-		WithObjects(tc, talosconfigSecret).
+		WithObjects(tc).
 		WithStatusSubresource(&platformv1alpha1.TalosCluster{}).Build()
 	r := buildRosterReconciler(t, c)
 
-	// reconcileNodeRosterRefresh should clear annotation after the refresh steps.
-	err := r.reconcileNodeRosterRefresh(context.Background(), tc)
-	if err != nil {
-		t.Logf("reconcileNodeRosterRefresh returned: %v (empty-endpoints early return is OK)", err)
-		return
+	if err := r.reconcileNodeRosterRefresh(context.Background(), tc); err != nil {
+		t.Fatalf("reconcileNodeRosterRefresh: %v", err)
 	}
 
 	updated := &platformv1alpha1.TalosCluster{}
-	if gErr := c.Get(context.Background(), client.ObjectKeyFromObject(tc), updated); gErr != nil {
-		t.Fatalf("get updated TalosCluster: %v", gErr)
+	if err := c.Get(context.Background(), client.ObjectKeyFromObject(tc), updated); err != nil {
+		t.Fatalf("get updated TalosCluster: %v", err)
 	}
 	if updated.Annotations != nil && updated.Annotations[AnnotationRefreshNodeRoster] == "true" {
 		t.Errorf("expected annotation cleared after refresh, still present")
@@ -189,32 +174,5 @@ func TestReconcileNodeRosterRefresh_ClearsAnnotation(t *testing.T) {
 func TestMachineConfigSyncStatusDecommissioned_Value(t *testing.T) {
 	if MachineConfigSyncStatusDecommissioned != "decommissioned" {
 		t.Errorf("expected %q, got %q", "decommissioned", MachineConfigSyncStatusDecommissioned)
-	}
-}
-
-// buildFakeTalosconfigSecret builds a talosconfig secret with the given endpoints.
-// Endpoints in the YAML determine which node IPs ensureMachineConfigSecrets probes.
-func buildFakeTalosconfigSecret(clusterName, ns string, endpoints []string) *corev1.Secret {
-	endpointYAML := ""
-	for _, ep := range endpoints {
-		endpointYAML += "    - " + ep + "\n"
-	}
-	talosconfig := `context: ` + clusterName + `
-contexts:
-  ` + clusterName + `:
-    endpoints:
-` + endpointYAML + `    ca: dGVzdA==
-    crt: dGVzdA==
-    key: dGVzdA==
-`
-	return &corev1.Secret{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:            "seam-mc-" + clusterName + "-talosconfig",
-			Namespace:       ns,
-			ResourceVersion: "1",
-		},
-		Data: map[string][]byte{
-			talosconfigSecretKey: []byte(talosconfig),
-		},
 	}
 }

@@ -106,12 +106,24 @@ func jobSpec(jobName, namespace, clusterName, capability, runnerImage string) *b
 							},
 						},
 					},
+					SecurityContext: &corev1.PodSecurityContext{
+						SeccompProfile: &corev1.SeccompProfile{
+							Type: corev1.SeccompProfileTypeRuntimeDefault,
+						},
+					},
 					Containers: []corev1.Container{
 						{
 							Name:            "executor",
 							Image:           runnerImage,
 							ImagePullPolicy: corev1.PullAlways,
 							Args:            []string{"execute"},
+							SecurityContext: &corev1.SecurityContext{
+								AllowPrivilegeEscalation: func() *bool { b := false; return &b }(),
+								RunAsNonRoot:             func() *bool { b := true; return &b }(),
+								Capabilities: &corev1.Capabilities{
+									Drop: []corev1.Capability{"ALL"},
+								},
+							},
 							Env: []corev1.EnvVar{
 								{Name: "CAPABILITY", Value: capability},
 								{Name: "CLUSTER_REF", Value: clusterName},

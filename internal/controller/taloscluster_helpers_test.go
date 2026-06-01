@@ -27,6 +27,10 @@ func buildHelperTestScheme(t *testing.T) *runtime.Scheme {
 	if err := clientgoscheme.AddToScheme(s); err != nil {
 		t.Fatalf("add clientgo scheme: %v", err)
 	}
+	// platformv1alpha1 registers platform CRDs including MachineConfig.
+	if err := platformv1alpha1.AddToScheme(s); err != nil {
+		t.Fatalf("add platformv1alpha1 scheme: %v", err)
+	}
 	// seamplatformv1alpha1 registers TalosCluster under seam.ontai.dev/v1alpha1.
 	if err := seamplatformv1alpha1.AddToScheme(s); err != nil {
 		t.Fatalf("add seamplatformv1alpha1 scheme: %v", err)

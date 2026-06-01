@@ -1,6 +1,6 @@
 package controller
 
-// taloscluster_import_helpers.go — management cluster import path helpers.
+// taloscluster_import_helpers.go -- management cluster import path helpers.
 //
 // CP-INV-001 extension (Governor-directed 2026-04-10): talos goclient is permitted
 // in this file exclusively for the import kubeconfig generation path. The Platform
@@ -13,15 +13,8 @@ package controller
 // No other file in this codebase may import github.com/siderolabs/talos/pkg/machinery.
 
 import (
-	"bytes"
-	"compress/gzip"
 	"context"
-	"crypto/sha256"
-	"encoding/hex"
 	"fmt"
-	"io"
-	"sort"
-	"strings"
 
 	talos_client "github.com/siderolabs/talos/pkg/machinery/client"
 	clientconfig "github.com/siderolabs/talos/pkg/machinery/client/config"
@@ -32,7 +25,6 @@ import (
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/log"
-	sigsyaml "sigs.k8s.io/yaml"
 
 	platformv1alpha1 "github.com/ontai-dev/platform/api/v1alpha1"
 )
@@ -52,8 +44,8 @@ const (
 )
 
 // importSecretsNamespace returns the namespace where import-path Secrets
-// (talosconfig, kubeconfig) are stored for a given cluster.
-// Governor ruling 2026-04-21: seam-tenant-{clusterName} holds these Secrets.
+// (talosconfig, kubeconfig) and MachineConfig CRs are stored for a given cluster.
+// Governor ruling 2026-04-21: seam-tenant-{clusterName} holds these resources.
 func importSecretsNamespace(clusterName string) string {
 	return "seam-tenant-" + clusterName
 }
@@ -79,7 +71,7 @@ func kubeconfigSecretName(clusterName string) string {
 // (idempotent) or has been successfully written.
 //
 // Returns (ctrl.Result{RequeueAfter: importPollInterval}, nil) when the talosconfig
-// Secret is absent — sets KubeconfigUnavailable condition and requeues. Clears the
+// Secret is absent -- sets KubeconfigUnavailable condition and requeues. Clears the
 // condition once the Secret appears and the kubeconfig is written.
 //
 // Returns (ctrl.Result{}, err) for unexpected API or talos client errors.
@@ -150,7 +142,7 @@ func (r *TalosClusterReconciler) ensureKubeconfigSecret(ctx context.Context, tc 
 		}
 
 		// Use the talosconfig endpoints directly. The talosconfig already contains
-		// the correct node IPs (port 50000). Do not override with ClusterEndpoint —
+		// the correct node IPs (port 50000). Do not override with ClusterEndpoint --
 		// that is the Kubernetes API VIP (port 6443) which does not serve the Talos API.
 		talosC, err := talos_client.New(ctx,
 			talos_client.WithConfig(cfg),
@@ -197,215 +189,46 @@ func (r *TalosClusterReconciler) ensureKubeconfigSecret(ctx context.Context, tc 
 	return ctrl.Result{}, nil
 }
 
-// machineConfigTypeKey is the YAML key path for the machine type field in a Talos machineconfig.
-// The value is "controlplane" or "worker".
-type machineTypeExtract struct {
-	Machine struct {
-		Type string `yaml:"type"`
-	} `yaml:"machine"`
-}
-
-// ensureMachineConfigSecrets reads the running machineconfig from every node endpoint
-// in the cluster's talosconfig Secret, classifies nodes by machine.type, and writes
-// one source-of-truth Secret per class (controlplane, worker) to seam-tenant-{cluster}.
-// For each class, it also creates a MachineConfigSync CR so the conductor will inject
-// the ONT-controlled node label via the machineconfig-sync capability.
-//
-// Called during the import flow after ensureKubeconfigSecret succeeds and before the
-// Bootstrapped=True condition transition. Idempotent: existing secrets and MachineConfigSync
-// CRs are preserved (secret content is only created, not overwritten on re-run).
-//
-// CP-INV-001 extension: talos goclient use is authorized for this file by Governor directive.
-// RECON-A2.
-func (r *TalosClusterReconciler) ensureMachineConfigSecrets(ctx context.Context, tc *platformv1alpha1.TalosCluster) error {
-	secretsNS := importSecretsNamespace(tc.Name)
-
-	// Read the talosconfig secret to obtain node endpoints.
-	talosconfigSecret := &corev1.Secret{}
-	if err := r.Client.Get(ctx, types.NamespacedName{
-		Name:      talosconfigSecretName(tc.Name),
-		Namespace: secretsNS,
-	}, talosconfigSecret); err != nil {
-		return fmt.Errorf("ensureMachineConfigSecrets: get talosconfig secret: %w", err)
-	}
-
-	talosconfigBytes, ok := talosconfigSecret.Data[talosconfigSecretKey]
-	if !ok || len(talosconfigBytes) == 0 {
-		return fmt.Errorf("ensureMachineConfigSecrets: talosconfig secret missing %q key", talosconfigSecretKey)
-	}
-
-	cfg, err := clientconfig.FromBytes(talosconfigBytes)
-	if err != nil {
-		return fmt.Errorf("ensureMachineConfigSecrets: parse talosconfig: %w", err)
-	}
-
-	activeCtx, ok := cfg.Contexts[cfg.Context]
-	if !ok || len(activeCtx.Endpoints) == 0 {
-		return fmt.Errorf("ensureMachineConfigSecrets: talosconfig has no endpoints in context %q", cfg.Context)
-	}
-
-	// PLT-BUG-3-ARCH: detect compiler-generated per-node secrets before attempting
-	// live node reads. If they exist, bypass the Talos API entirely and create one
-	// MachineConfigSync CR per node pointing at the specific node's IP.
-	compilerSecrets, csErr := r.listCompilerPerNodeSecrets(ctx, tc.Name, secretsNS)
-	if csErr != nil {
-		return fmt.Errorf("ensureMachineConfigSecrets: list compiler per-node secrets: %w", csErr)
-	}
-	if len(compilerSecrets) > 0 {
-		return r.ensureMachineConfigSecretsFromCompiler(ctx, tc, secretsNS, compilerSecrets, activeCtx.Endpoints)
-	}
-
-	// Build a per-node reader. When MachineConfigReaderFn is set (unit tests),
-	// use it to avoid establishing a real talos goclient connection.
-	readNode := r.buildMachineConfigNodeReader(ctx, tc.Name, talosconfigBytes)
-
-	// Collect the first machineconfig seen for each class (controlplane, worker)
-	// and all classified node IPs for spec.nodeAddresses population.
-	classConfigs := map[string][]byte{}
-	var nodeAddresses []platformv1alpha1.NodeAddress
-
-	for _, endpoint := range activeCtx.Endpoints {
-		configBytes, nodeClass, rErr := readNode(endpoint)
-		if rErr != nil {
-			log.FromContext(ctx).Info("ensureMachineConfigSecrets: could not read machineconfig from node (skipping)",
-				"node", endpoint, "error", rErr.Error())
-			continue
-		}
-		if nodeClass == "" {
-			continue
-		}
-		if _, exists := classConfigs[nodeClass]; !exists {
-			classConfigs[nodeClass] = configBytes
-		}
-		var role platformv1alpha1.NodeRole
-		if nodeClass == MachineConfigClassControlPlane {
-			role = platformv1alpha1.NodeRoleControlPlane
-		} else {
-			role = platformv1alpha1.NodeRoleWorker
-		}
-		nodeAddresses = append(nodeAddresses, platformv1alpha1.NodeAddress{IP: endpoint, Role: role})
-	}
-
-	if len(classConfigs) == 0 {
-		return fmt.Errorf("ensureMachineConfigSecrets: could not read machineconfig from any node in cluster %s", tc.Name)
-	}
-
-	// Create/skip source-of-truth Secrets and MachineConfigSync CRs per class.
-	for class, configBytes := range classConfigs {
-		if wErr := r.writeMachineConfigSecret(ctx, tc.Name, secretsNS, class, configBytes); wErr != nil {
-			return fmt.Errorf("ensureMachineConfigSecrets: write secret for class %s: %w", class, wErr)
-		}
-		if wErr := r.createMachineConfigSyncCR(ctx, tc.Name, secretsNS, class); wErr != nil {
-			return fmt.Errorf("ensureMachineConfigSecrets: create MachineConfigSync for class %s: %w", class, wErr)
-		}
-	}
-
-	// Write classified node IPs to spec.nodeAddresses if not already populated.
-	if len(nodeAddresses) > 0 && len(tc.Spec.NodeAddresses) == 0 {
-		patch := client.MergeFrom(tc.DeepCopy())
-		tc.Spec.NodeAddresses = nodeAddresses
-		if err := r.Client.Patch(ctx, tc, patch); err != nil {
-			return fmt.Errorf("ensureMachineConfigSecrets: patch nodeAddresses: %w", err)
-		}
-		log.FromContext(ctx).Info("ensureMachineConfigSecrets: wrote nodeAddresses",
-			"cluster", tc.Name, "count", len(nodeAddresses))
-	}
-
-	return nil
-}
-
-// listCompilerPerNodeSecrets returns all compiler-generated per-node machineconfig
-// secrets in secretsNS. These are identified by the ontai.dev/managed-by=compiler
-// label. PLT-BUG-3-ARCH.
-func (r *TalosClusterReconciler) listCompilerPerNodeSecrets(
-	ctx context.Context,
-	clusterName, secretsNS string,
-) ([]corev1.Secret, error) {
-	secretList := &corev1.SecretList{}
-	if err := r.Client.List(ctx, secretList,
-		client.InNamespace(secretsNS),
-		client.MatchingLabels{
-			LabelCompilerManagedBy: "compiler",
-			LabelCompilerCluster:   clusterName,
-		},
-	); err != nil {
-		return nil, fmt.Errorf("list compiler per-node secrets in %s: %w", secretsNS, err)
-	}
-	return secretList.Items, nil
-}
-
-// ensureMachineConfigSecretsFromCompiler handles the PLT-BUG-3-ARCH import path when
-// compiler-generated per-node secrets are present. It pairs each compiler secret
-// with a talosconfig endpoint by sorted name order, then creates one per-node
-// MachineConfigSync CR per node with spec.nodeRef set to the node's IP address.
-// The Talos API is never called in this path.
-//
-// Pairing assumption: compiler secrets sorted by name (cp1, cp2, cp3) correspond to
-// talosconfig endpoints in list order. This invariant is maintained by the Compiler
-// and the lab cluster-input.yaml declaration order. PLT-BUG-3-ARCH.
-func (r *TalosClusterReconciler) ensureMachineConfigSecretsFromCompiler(
-	ctx context.Context,
-	tc *platformv1alpha1.TalosCluster,
-	secretsNS string,
-	compilerSecrets []corev1.Secret,
-	endpoints []string,
-) error {
+// ensureMachineConfigCRsExist lists MachineConfig CRs in the cluster's tenant namespace
+// and creates a per-node MachineConfigSync CR for each node that does not yet have one.
+// Non-fatal when no MachineConfig CRs are found: admin or compiler must create them
+// before machineconfig-sync can run. Idempotent.
+func (r *TalosClusterReconciler) ensureMachineConfigCRsExist(ctx context.Context, tc *platformv1alpha1.TalosCluster) error {
+	ns := importSecretsNamespace(tc.Name)
 	logger := log.FromContext(ctx)
 
-	// Sort by name so cp1 < cp2 < cp3 always maps to endpoints[0] < [1] < [2].
-	sort.Slice(compilerSecrets, func(i, j int) bool {
-		return compilerSecrets[i].Name < compilerSecrets[j].Name
-	})
+	mcList := &platformv1alpha1.MachineConfigList{}
+	if err := r.Client.List(ctx, mcList, client.InNamespace(ns)); err != nil {
+		return fmt.Errorf("ensureMachineConfigCRsExist: list MachineConfig CRs in %s: %w", ns, err)
+	}
 
-	var nodeAddresses []platformv1alpha1.NodeAddress
-
-	for i, secret := range compilerSecrets {
-		if i >= len(endpoints) {
-			logger.Info("ensureMachineConfigSecretsFromCompiler: more compiler secrets than endpoints, skipping",
-				"secret", secret.Name)
-			break
-		}
-		nodeIP := endpoints[i]
-
-		// Extract short name: "seam-mc-ccs-dev-cp1" -> "cp1".
-		shortName := strings.TrimPrefix(secret.Name, MachineConfigSecretNamePrefix+tc.Name+"-")
-		if shortName == secret.Name {
-			// TrimPrefix did nothing: secret name does not follow convention. Skip.
-			logger.Info("ensureMachineConfigSecretsFromCompiler: unexpected secret name format, skipping",
-				"secret", secret.Name)
+	found := 0
+	for i := range mcList.Items {
+		mc := &mcList.Items[i]
+		if mc.Spec.ClusterRef.Name != tc.Name {
 			continue
 		}
-
-		// Determine node role from compiler label.
-		role := platformv1alpha1.NodeRoleControlPlane
-		if secret.Labels[LabelCompilerNodeRole] == "worker" {
-			role = platformv1alpha1.NodeRoleWorker
+		if mc.Spec.NodeHostname == "" || mc.Spec.NodeIP == "" {
+			logger.Info("ensureMachineConfigCRsExist: MachineConfig CR missing hostname or IP, skipping",
+				"cr", mc.Name, "cluster", tc.Name)
+			continue
 		}
-		nodeAddresses = append(nodeAddresses, platformv1alpha1.NodeAddress{IP: nodeIP, Role: role})
-
-		// Create per-node MachineConfigSync CR with nodeRef = node IP.
-		if err := r.createPerNodeMachineConfigSyncCR(ctx, tc.Name, secretsNS, shortName, nodeIP); err != nil {
-			return fmt.Errorf("ensureMachineConfigSecretsFromCompiler: create per-node MCS for %s: %w", shortName, err)
+		found++
+		if err := r.createPerNodeMachineConfigSyncCR(ctx, tc.Name, ns, mc.Spec.NodeHostname, mc.Spec.NodeIP); err != nil {
+			return fmt.Errorf("ensureMachineConfigCRsExist: create MachineConfigSync for %s: %w", mc.Spec.NodeHostname, err)
 		}
 	}
 
-	// Write classified node IPs to spec.nodeAddresses if not already populated.
-	if len(nodeAddresses) > 0 && len(tc.Spec.NodeAddresses) == 0 {
-		patch := client.MergeFrom(tc.DeepCopy())
-		tc.Spec.NodeAddresses = nodeAddresses
-		if err := r.Client.Patch(ctx, tc, patch); err != nil {
-			return fmt.Errorf("ensureMachineConfigSecretsFromCompiler: patch nodeAddresses: %w", err)
-		}
-		logger.Info("ensureMachineConfigSecretsFromCompiler: wrote nodeAddresses",
-			"cluster", tc.Name, "count", len(nodeAddresses))
+	if found == 0 {
+		logger.Info("ensureMachineConfigCRsExist: no MachineConfig CRs found -- admin or compiler must create them",
+			"cluster", tc.Name, "namespace", ns)
 	}
-
 	return nil
 }
 
 // createPerNodeMachineConfigSyncCR creates a per-node MachineConfigSync CR that
-// targets a specific node IP via spec.nodeRef. Used in the PLT-BUG-3-ARCH import
-// path when compiler-generated per-node secrets are present. Idempotent.
+// targets a specific node IP via spec.nodeRef. Used in the import path when
+// MachineConfig CRs are present. Idempotent.
 func (r *TalosClusterReconciler) createPerNodeMachineConfigSyncCR(
 	ctx context.Context,
 	clusterName, secretsNS, nodeShortName, nodeRef string,
@@ -433,304 +256,46 @@ func (r *TalosClusterReconciler) createPerNodeMachineConfigSyncCR(
 	if err := r.Client.Create(ctx, mcs); err != nil {
 		return fmt.Errorf("create MachineConfigSync %s/%s: %w", secretsNS, crName, err)
 	}
-	log.FromContext(ctx).Info("ensureMachineConfigSecrets: created per-node MachineConfigSync CR",
+	log.FromContext(ctx).Info("ensureMachineConfigCRsExist: created per-node MachineConfigSync CR",
 		"cluster", clusterName, "nodeShortName", nodeShortName, "nodeRef", nodeRef)
 	return nil
 }
 
-// buildMachineConfigNodeReader returns a per-node reader function.
-// When MachineConfigReaderFn is set, it wraps it directly. Otherwise, it creates
-// a real talos goclient from talosconfigBytes. Returns configBytes, machineClass, error.
-func (r *TalosClusterReconciler) buildMachineConfigNodeReader(
-	ctx context.Context,
-	clusterName string,
-	talosconfigBytes []byte,
-) func(endpoint string) ([]byte, string, error) {
-	if r.MachineConfigReaderFn != nil {
-		fn := r.MachineConfigReaderFn
-		return func(endpoint string) ([]byte, string, error) {
-			return fn(ctx, clusterName, endpoint)
-		}
-	}
-
-	// Production path: one talos client for all nodes, using per-node context.
-	cfg, _ := clientconfig.FromBytes(talosconfigBytes)
-	talosC, err := talos_client.New(ctx, talos_client.WithConfig(cfg))
-	if err != nil {
-		return func(endpoint string) ([]byte, string, error) {
-			return nil, "", fmt.Errorf("build talos client: %w", err)
-		}
-	}
-
-	return func(endpoint string) ([]byte, string, error) {
-		nodeCtx := talos_client.WithNode(ctx, endpoint)
-		rc, rErr := talosC.Read(nodeCtx, "/system/state/config.yaml")
-		if rErr != nil {
-			return nil, "", rErr
-		}
-		defer rc.Close() //nolint:errcheck
-
-		configBytes, rErr := io.ReadAll(rc)
-		if rErr != nil {
-			return nil, "", rErr
-		}
-
-		var extract machineTypeExtract
-		if yErr := sigsyaml.Unmarshal(configBytes, &extract); yErr != nil {
-			return nil, "", fmt.Errorf("parse machineconfig YAML: %w", yErr)
-		}
-
-		stripped, sErr := stripPerNodeNetworkConfig(configBytes)
-		if sErr != nil {
-			return nil, "", fmt.Errorf("stripPerNodeNetworkConfig: %w", sErr)
-		}
-
-		switch extract.Machine.Type {
-		case "controlplane", "init":
-			return stripped, MachineConfigClassControlPlane, nil
-		case "worker":
-			return stripped, MachineConfigClassWorker, nil
-		default:
-			return nil, "", fmt.Errorf("unknown machine.type %q", extract.Machine.Type)
-		}
-	}
-}
-
-// stripPerNodeNetworkConfig removes per-node-specific fields from a raw Talos machineconfig
-// YAML before it is stored as the class-level source-of-truth secret.
+// reconcileMachineConfigSync detects MachineConfig CR generation changes and creates
+// or replaces a watch-triggered MachineConfigSync CR for each node whose MC generation
+// differs from the recorded annotation. This fires only when an admin has updated the
+// MachineConfig CR spec since the last sync was triggered.
 //
-// Per-node fields that must be absent from the class secret:
-//   - machine.network.hostname  (unique per node)
-//   - machine.network.interfaces (node-specific IP, routes, VIP)
+// Watch-triggered CRs are named {cluster}-mc-sync-{hostname}, distinct from the
+// import-triggered {cluster}-mc-import-{hostname} CRs created by ensureMachineConfigCRsExist.
 //
-// Shared fields such as machine.network.nameservers are preserved.
-// When machineconfig-sync applies the class secret to all nodes, Talos performs a
-// strategic merge: fields absent in the applied config are not cleared on the running
-// node, so each node retains its own hostname and interface configuration.
-func stripPerNodeNetworkConfig(configBytes []byte) ([]byte, error) {
-	var doc map[string]interface{}
-	if err := sigsyaml.Unmarshal(configBytes, &doc); err != nil {
-		return nil, fmt.Errorf("unmarshal: %w", err)
-	}
-
-	machine, ok := doc["machine"].(map[string]interface{})
-	if !ok {
-		// No machine section -- nothing to strip.
-		return configBytes, nil
-	}
-
-	network, ok := machine["network"].(map[string]interface{})
-	if !ok {
-		// No network section -- nothing to strip.
-		return configBytes, nil
-	}
-
-	delete(network, "hostname")
-	delete(network, "interfaces")
-
-	if len(network) == 0 {
-		delete(machine, "network")
-	}
-
-	out, err := sigsyaml.Marshal(doc)
-	if err != nil {
-		return nil, fmt.Errorf("marshal: %w", err)
-	}
-	return out, nil
-}
-
-// writeMachineConfigSecret creates or skips the machineconfig source-of-truth Secret
-// for a given cluster and class. If the secret already exists, it is left unchanged
-// (the admin may have pre-created it, or a prior import run wrote it). Idempotent.
-// compressMachineConfig gzip-compresses configBytes. Returns the compressed bytes.
-// Called by writeMachineConfigSecret to reduce etcd footprint. RECON-F5.
-func compressMachineConfig(configBytes []byte) ([]byte, error) {
-	var buf bytes.Buffer
-	w := gzip.NewWriter(&buf)
-	if _, err := w.Write(configBytes); err != nil {
-		return nil, fmt.Errorf("gzip write: %w", err)
-	}
-	if err := w.Close(); err != nil {
-		return nil, fmt.Errorf("gzip close: %w", err)
-	}
-	return buf.Bytes(), nil
-}
-
-func (r *TalosClusterReconciler) writeMachineConfigSecret(
-	ctx context.Context,
-	clusterName, secretsNS, class string,
-	configBytes []byte,
-) error {
-	secretName := MachineConfigSecretName(clusterName, class)
-	existing := &corev1.Secret{}
-	if err := r.Client.Get(ctx, types.NamespacedName{Name: secretName, Namespace: secretsNS}, existing); err == nil {
-		// Secret already exists; import does not overwrite admin-created or prior-run secrets.
-		return nil
-	} else if !apierrors.IsNotFound(err) {
-		return fmt.Errorf("check secret %s/%s: %w", secretsNS, secretName, err)
-	}
-
-	// SHA-256 is computed over the uncompressed bytes so hash comparisons remain stable. RECON-F5.
-	hash := sha256.Sum256(configBytes)
-	hashHex := hex.EncodeToString(hash[:])
-
-	compressed, cErr := compressMachineConfig(configBytes)
-	if cErr != nil {
-		// Fallback to uncompressed rather than failing the import. Log and continue.
-		compressed = configBytes
-		log.FromContext(ctx).Info("writeMachineConfigSecret: gzip compression failed, storing uncompressed",
-			"error", cErr.Error())
-	}
-	compressionLabel := MachineConfigCompressionGzip
-	if len(compressed) == len(configBytes) {
-		// Compression was a no-op (fallback path): don't set the label.
-		compressionLabel = ""
-	}
-
-	labels := map[string]string{
-		LabelMachineConfigCluster:    clusterName,
-		LabelMachineConfigClass:      class,
-		LabelMachineConfigSyncStatus: MachineConfigSyncStatusPending,
-		LabelMachineConfigSyncHash:   labelSafeHash(hashHex),
-	}
-	if compressionLabel != "" {
-		labels[LabelMachineConfigCompression] = compressionLabel
-	}
-
-	secret := &corev1.Secret{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      secretName,
-			Namespace: secretsNS,
-			Labels:    labels,
-		},
-		Data: map[string][]byte{
-			MachineConfigDataKey: compressed,
-		},
-	}
-	if err := r.Client.Create(ctx, secret); err != nil {
-		return fmt.Errorf("create secret %s/%s: %w", secretsNS, secretName, err)
-	}
-	log.FromContext(ctx).Info("ensureMachineConfigSecrets: created machineconfig secret",
-		"cluster", clusterName, "class", class, "hash", hashHex[:8])
-	return nil
-}
-
-// createMachineConfigSyncCR creates a MachineConfigSync CR in secretsNS so the
-// conductor will schedule a sync Job to inject the ONT-controlled node label.
-// Idempotent: skips creation if the CR already exists.
-// RECON-A2: reason="import-initial-sync".
-func (r *TalosClusterReconciler) createMachineConfigSyncCR(
-	ctx context.Context,
-	clusterName, secretsNS, class string,
-) error {
-	crName := clusterName + "-mc-import-" + class
-	existing := &platformv1alpha1.MachineConfigSync{}
-	if err := r.Client.Get(ctx, types.NamespacedName{Name: crName, Namespace: secretsNS}, existing); err == nil {
-		return nil
-	} else if !apierrors.IsNotFound(err) {
-		return fmt.Errorf("check MachineConfigSync %s/%s: %w", secretsNS, crName, err)
-	}
-
-	mcs := &platformv1alpha1.MachineConfigSync{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      crName,
-			Namespace: secretsNS,
-		},
-		Spec: platformv1alpha1.MachineConfigSyncSpec{
-			ClusterRef: platformv1alpha1.LocalObjectRef{Name: clusterName},
-			NodeClass:  class,
-			Reason:     "import-initial-sync",
-		},
-	}
-	if err := r.Client.Create(ctx, mcs); err != nil {
-		return fmt.Errorf("create MachineConfigSync %s/%s: %w", secretsNS, crName, err)
-	}
-	log.FromContext(ctx).Info("ensureMachineConfigSecrets: created MachineConfigSync CR",
-		"cluster", clusterName, "class", class)
-	return nil
-}
-
-// reconcileMachineConfigSync detects content changes in machineconfig Secrets belonging
-// to tc and creates or replaces a MachineConfigSync CR to drive a new sync Job.
-//
-// Trigger condition: SHA-256(data.machineconfig) != platform.ontai.dev/sync-hash label.
-// This fires only when an admin has updated the Secret content since the last successful
-// sync. It is a no-op when content is unchanged (newHash == prevHash), avoiding duplicate
-// Jobs alongside the import-triggered MachineConfigSync CR.
-//
-// Watch-triggered CRs are named {cluster}-mc-sync-{class}, distinct from the import-
-// triggered {cluster}-mc-import-{class} CRs created by ensureMachineConfigSecrets.
-//
-// Called on every TalosClusterReconciler pass for imported clusters, both from periodic
-// requeues and from machineconfig Secret watch events.
-//
-// RECON-A6: Secret Watch auto-create MachineConfigSync on content change.
+// The annotation platform.ontai.dev/mc-generation on the sync CR records the MC
+// generation that triggered creation. A mismatch triggers replacement.
 func (r *TalosClusterReconciler) reconcileMachineConfigSync(ctx context.Context, tc *platformv1alpha1.TalosCluster) error {
 	ns := importSecretsNamespace(tc.Name)
 	logger := log.FromContext(ctx)
 
-	secretList := &corev1.SecretList{}
-	if err := r.Client.List(ctx, secretList,
-		client.InNamespace(ns),
-		client.MatchingLabels{LabelMachineConfigCluster: tc.Name},
-	); err != nil {
-		return fmt.Errorf("reconcileMachineConfigSync: list machineconfig secrets: %w", err)
+	mcList := &platformv1alpha1.MachineConfigList{}
+	if err := r.Client.List(ctx, mcList, client.InNamespace(ns)); err != nil {
+		return fmt.Errorf("reconcileMachineConfigSync: list MachineConfig CRs: %w", err)
 	}
 
-	for i := range secretList.Items {
-		secret := &secretList.Items[i]
-		class := secret.Labels[LabelMachineConfigClass]
-		if class == "" {
-			continue
-		}
-		configBytes := secret.Data[MachineConfigDataKey]
-		if len(configBytes) == 0 {
+	for i := range mcList.Items {
+		mc := &mcList.Items[i]
+		if mc.Spec.ClusterRef.Name != tc.Name || mc.Spec.NodeHostname == "" {
 			continue
 		}
 
-		// Hash is always computed over the uncompressed bytes (RECON-F5). Decompress if needed.
-		hashBytes := configBytes
-		if secret.Labels[LabelMachineConfigCompression] == MachineConfigCompressionGzip {
-			if r, rErr := gzip.NewReader(bytes.NewReader(configBytes)); rErr == nil {
-				if uncompressed, rErr2 := io.ReadAll(r); rErr2 == nil {
-					hashBytes = uncompressed
-				}
-			}
-		}
+		genStr := fmt.Sprintf("%d", mc.Generation)
+		crName := tc.Name + "-mc-sync-" + mc.Spec.NodeHostname
 
-		// Trigger condition: content hash differs from the recorded sync hash.
-		sum := sha256.Sum256(hashBytes)
-		newHash := hex.EncodeToString(sum[:])
-		prevHash := secret.Labels[LabelMachineConfigSyncHash]
-		if labelSafeHash(newHash) == prevHash {
-			// Content unchanged since last sync attempt. No action needed.
-			continue
-		}
-
-		// RECON-F2: coalesce window -- suppress rapid burst submissions for the same
-		// (cluster, class) pair within the 30-second debounce window. The coalescer
-		// allows the submission if the hash changed again, ensuring the latest content
-		// is always eventually applied.
-		if r.mcSyncCoalescer == nil {
-			r.mcSyncCoalescer = NewMCSyncCoalescer()
-		}
-		if !r.mcSyncCoalescer.ShouldSubmit(tc.Name, class, newHash) {
-			logger.Info("reconcileMachineConfigSync: suppressed by coalesce window",
-				"cluster", tc.Name, "class", class, "hash", newHash[:8])
-			continue
-		}
-
-		// Check for an existing watch-triggered MachineConfigSync CR.
-		crName := tc.Name + "-mc-sync-" + class
 		existing := &platformv1alpha1.MachineConfigSync{}
 		getErr := r.Client.Get(ctx, types.NamespacedName{Name: crName, Namespace: ns}, existing)
 		if getErr == nil {
-			// CR exists. If it already targets this content version, skip.
-			if existing.Status.ObservedHash == newHash {
-				r.mcSyncCoalescer.MarkSubmitted(tc.Name, class, newHash)
+			if existing.Annotations[AnnotationMCGeneration] == genStr {
 				continue
 			}
-			// Stale CR from a previous content version. Replace it.
+			// Generation changed -- replace the stale sync CR.
 			if delErr := r.Client.Delete(ctx, existing); delErr != nil && !apierrors.IsNotFound(delErr) {
 				return fmt.Errorf("reconcileMachineConfigSync: delete stale CR %s/%s: %w", ns, crName, delErr)
 			}
@@ -738,30 +303,26 @@ func (r *TalosClusterReconciler) reconcileMachineConfigSync(ctx context.Context,
 			return fmt.Errorf("reconcileMachineConfigSync: get CR %s/%s: %w", ns, crName, getErr)
 		}
 
-		// Mark Secret as pending so observers know a sync is imminent.
-		patch := secret.DeepCopy()
-		patch.Labels[LabelMachineConfigSyncStatus] = MachineConfigSyncStatusPending
-		patch.Labels[LabelMachineConfigSyncHash] = labelSafeHash(newHash)
-		if pErr := r.Client.Update(ctx, patch); pErr != nil {
-			logger.Info("reconcileMachineConfigSync: failed to patch Secret labels (non-fatal)",
-				"secret", secret.Name, "error", pErr.Error())
-		}
-
 		newCR := &platformv1alpha1.MachineConfigSync{
-			ObjectMeta: metav1.ObjectMeta{Name: crName, Namespace: ns},
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      crName,
+				Namespace: ns,
+				Annotations: map[string]string{
+					AnnotationMCGeneration: genStr,
+				},
+			},
 			Spec: platformv1alpha1.MachineConfigSyncSpec{
 				ClusterRef: platformv1alpha1.LocalObjectRef{Name: tc.Name},
-				NodeClass:  class,
-				Reason:     "secret-content-changed",
+				NodeClass:  mc.Spec.NodeHostname,
+				NodeRef:    mc.Spec.NodeIP,
+				Reason:     "mc-generation-changed",
 			},
 		}
 		if cErr := r.Client.Create(ctx, newCR); cErr != nil && !apierrors.IsAlreadyExists(cErr) {
 			return fmt.Errorf("reconcileMachineConfigSync: create CR %s/%s: %w", ns, crName, cErr)
 		}
-		r.mcSyncCoalescer.MarkSubmitted(tc.Name, class, newHash)
-		logger.Info("reconcileMachineConfigSync: created MachineConfigSync CR for content change",
-			"cluster", tc.Name, "class", class)
+		logger.Info("reconcileMachineConfigSync: created MachineConfigSync CR for generation change",
+			"cluster", tc.Name, "hostname", mc.Spec.NodeHostname, "generation", mc.Generation)
 	}
 	return nil
 }
-

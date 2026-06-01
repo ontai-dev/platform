@@ -63,19 +63,6 @@ const (
 	NodeRoleWorker       NodeRole = "worker"
 )
 
-// NodeAddress is a classified node IP entry in TalosClusterSpec.NodeAddresses.
-// RECON-A9.
-type NodeAddress struct {
-	// IP is the node's primary IPv4 address.
-	IP string `json:"ip"`
-	// Role classifies the node as controlplane or worker.
-	// +kubebuilder:validation:Enum=controlplane;worker
-	Role NodeRole `json:"role"`
-	// Name is the optional node hostname. Used for per-node machineconfig secret targeting.
-	// +optional
-	Name string `json:"name,omitempty"`
-}
-
 // TalosClusterMode declares whether the cluster is bootstrapped or imported.
 // +kubebuilder:validation:Enum=bootstrap;import
 type TalosClusterMode string
@@ -161,13 +148,6 @@ type TalosClusterSpec struct {
 	// ClusterEndpoint is the cluster VIP or primary API endpoint IP.
 	// +optional
 	ClusterEndpoint string `json:"clusterEndpoint,omitempty"`
-
-	// NodeAddresses is the classified list of node IPs for this cluster.
-	// Each entry carries the node IP, its role (controlplane or worker),
-	// and an optional hostname. Populated by the import flow and bootstrap
-	// compiler; updated on node enrollment changes. RECON-A9.
-	// +optional
-	NodeAddresses []NodeAddress `json:"nodeAddresses,omitempty"`
 
 	// InfrastructureProvider declares the infrastructure provider backing this cluster.
 	// +kubebuilder:validation:Enum=native;capi;screen

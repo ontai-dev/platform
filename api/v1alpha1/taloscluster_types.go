@@ -44,9 +44,6 @@ type DeletionStage = seamv1alpha1.DeletionStage
 // +kubebuilder:object:generate=false
 type NodeRole = seamv1alpha1.NodeRole
 
-// +kubebuilder:object:generate=false
-type NodeAddress = seamv1alpha1.NodeAddress
-
 // DeletionStage constants -- re-exported from platform/api/seam/v1alpha1. RECON-I1.
 const (
 	DeletionStageNone          = seamv1alpha1.DeletionStageNone

@@ -65,14 +65,8 @@ type TalosClusterReconciler struct {
 	// a live talos endpoint. CP-INV-001 extension: authorized by Governor 2026-04-10.
 	KubeconfigGeneratorFn func(ctx context.Context, clusterName, endpoint string) ([]byte, error)
 
-	// MachineConfigReaderFn, if non-nil, replaces the real per-node talos goclient calls
-	// in ensureMachineConfigSecrets. Receives the cluster name and endpoint IP; returns
-	// raw machineconfig YAML bytes and the machine.type classification string
-	// ("controlplane" or "worker"). Used exclusively in unit tests. RECON-A2.
-	MachineConfigReaderFn func(ctx context.Context, clusterName, endpoint string) ([]byte, string, error)
-
-	// mcSyncCoalescer debounces MachineConfigSync CR creation to prevent content-change
-	// storms from flooding the Job queue. Lazily initialized on first use. RECON-F2.
+	// mcSyncCoalescer is retained for future use but currently unused after the
+	// migration from Secret-hash-based to MachineConfig-generation-based sync detection.
 	mcSyncCoalescer *MCSyncCoalescer
 }
 
@@ -370,30 +364,23 @@ func (r *TalosClusterReconciler) reconcileDirectBootstrap(ctx context.Context, t
 			return result, nil
 		}
 
-		// RECON-A2: read machineconfigs from each cluster node, create source-of-truth
-		// Secrets, and trigger MachineConfigSync CRs for ONT-controlled label injection.
-		// Non-fatal: if machineconfig collection fails for some nodes, the import proceeds
-		// and the operator can manually create the secrets later.
-		if mcErr := r.ensureMachineConfigSecrets(ctx, tc); mcErr != nil {
-			logger.Info("ensureMachineConfigSecrets: partial or full failure (non-fatal, import proceeds)",
+		// Ensure per-node MachineConfigSync CRs exist for all admin-provided MachineConfig CRs.
+		// Non-fatal: admin or compiler must create MachineConfig CRs before sync can run.
+		if mcErr := r.ensureMachineConfigCRsExist(ctx, tc); mcErr != nil {
+			logger.Info("ensureMachineConfigCRsExist: partial or full failure (non-fatal, import proceeds)",
 				"name", tc.Name, "error", mcErr.Error())
 		}
 
-		// RECON-A6: detect admin edits to machineconfig Secrets and trigger sync CRs.
-		// No-op when Secret content matches last sync hash (new import CRs not duplicated).
-		// Non-fatal: Secret watch may not be delivering a change on this reconcile pass.
+		// Detect MachineConfig CR generation changes and trigger watch-triggered sync CRs.
+		// Non-fatal: watch may not be delivering a change on this reconcile pass.
 		if mcErr := r.reconcileMachineConfigSync(ctx, tc); mcErr != nil {
-			logger.Info("reconcileMachineConfigSync: error detecting secret changes (non-fatal)",
+			logger.Info("reconcileMachineConfigSync: error detecting MC generation changes (non-fatal)",
 				"name", tc.Name, "error", mcErr.Error())
 		}
 
-		// Role=tenant on the direct path: create the seam-tenant namespace and
-		// register the cluster for RBAC and pack delivery. CP-INV-004: Platform is
-		// the sole namespace creation authority. WS5.
+		// Role=tenant on the direct path: register the cluster for RBAC and pack delivery.
+		// CP-INV-004 amendment (Governor 2026-05-31): namespace is created by admin/compiler.
 		if tc.Spec.Role == platformv1alpha1.TalosClusterRoleTenant {
-			if err := r.ensureTenantNamespace(ctx, tc); err != nil {
-				return ctrl.Result{}, fmt.Errorf("reconcileDirectBootstrap: ensure tenant namespace for role=tenant: %w", err)
-			}
 			// WS1: register the tenant cluster in guardian RBAC policy/profiles and
 			// create the Kueue LocalQueue so pack deployments can be admitted.
 			if err := r.ensureTenantOnboarding(ctx, tc); err != nil {

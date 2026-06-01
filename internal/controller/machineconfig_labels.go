@@ -94,10 +94,21 @@ const LabelCompilerCluster = "ontai.dev/cluster"
 // Its presence on a node proves that the node accepted an ONT-governed machineconfig.
 const MachineConfigNodeLabel = "ont.platform.dev/controlled"
 
+// AnnotationMCGeneration is the annotation key on a watch-triggered MachineConfigSync CR recording
+// the MachineConfig CR generation that triggered creation. Used by reconcileMachineConfigSync to
+// detect generation changes and replace stale sync CRs.
+const AnnotationMCGeneration = "platform.ontai.dev/mc-generation"
+
 // MachineConfigSecretName returns the canonical Secret name for a given cluster and class.
 // class should be MachineConfigClassControlPlane, MachineConfigClassWorker, or "node-{name}".
 func MachineConfigSecretName(cluster, class string) string {
 	return MachineConfigSecretNamePrefix + cluster + "-" + class
+}
+
+// MachineConfigCRName returns the canonical MachineConfig CR name for a given cluster and hostname.
+// Name convention: seam-mc-{cluster}-{hostname}.
+func MachineConfigCRName(cluster, hostname string) string {
+	return MachineConfigSecretNamePrefix + cluster + "-" + hostname
 }
 
 // labelSafeHash truncates a hex-encoded SHA-256 digest to 63 characters so it

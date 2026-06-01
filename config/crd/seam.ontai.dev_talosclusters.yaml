@@ -184,39 +184,6 @@ spec:
                 description: Mode declares whether this cluster is bootstrapped from
                   scratch or imported.
                 type: string
-              nodeAddresses:
-                description: |-
-                  NodeAddresses is the classified list of node IPs for this cluster.
-                  Each entry carries the node IP, its role (controlplane or worker),
-                  and an optional hostname. Populated by the import flow and bootstrap
-                  compiler; updated on node enrollment changes. RECON-A9.
-                items:
-                  description: |-
-                    NodeAddress is a classified node IP entry in TalosClusterSpec.NodeAddresses.
-                    RECON-A9.
-                  properties:
-                    ip:
-                      description: IP is the node's primary IPv4 address.
-                      type: string
-                    name:
-                      description: Name is the optional node hostname. Used for per-node
-                        machineconfig secret targeting.
-                      type: string
-                    role:
-                      allOf:
-                      - enum:
-                        - controlplane
-                        - worker
-                      - enum:
-                        - controlplane
-                        - worker
-                      description: Role classifies the node as controlplane or worker.
-                      type: string
-                  required:
-                  - ip
-                  - role
-                  type: object
-                type: array
               pkiRotationThresholdDays:
                 default: 30
                 description: |-

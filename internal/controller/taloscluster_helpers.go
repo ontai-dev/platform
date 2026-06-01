@@ -280,32 +280,6 @@ func (r *TalosClusterReconciler) readOperationResult(ctx context.Context, cluste
 	return readOperationRecord(ctx, r.Client, clusterName, jobName)
 }
 
-// ensureTenantNamespace creates the seam-tenant-{cluster-name} namespace if it
-// does not exist. Platform is the sole namespace creation authority. CP-INV-004.
-// platform-design.md §7.
-func (r *TalosClusterReconciler) ensureTenantNamespace(ctx context.Context, tc *platformv1alpha1.TalosCluster) error {
-	ns := &corev1.Namespace{}
-	nsName := "seam-tenant-" + tc.Name
-	if err := r.Client.Get(ctx, types.NamespacedName{Name: nsName}, ns); err != nil {
-		if !apierrors.IsNotFound(err) {
-			return fmt.Errorf("ensureTenantNamespace: get namespace %s: %w", nsName, err)
-		}
-		// Namespace does not exist — create it with the authoritative labels.
-		ns = &corev1.Namespace{
-			ObjectMeta: metav1.ObjectMeta{
-				Name: nsName,
-				Labels: map[string]string{
-					tenantNamespaceLabel:   tc.Namespace, // using TalosCluster namespace as tenant ID
-					clusterNamespaceLabel: tc.Name,
-				},
-			},
-		}
-		if err := r.Client.Create(ctx, ns); err != nil && !apierrors.IsAlreadyExists(err) {
-			return fmt.Errorf("ensureTenantNamespace: create namespace %s: %w", nsName, err)
-		}
-	}
-	return nil
-}
 
 // conductorAgentNamespace is the namespace where Conductor runs on every cluster.
 // Locked namespace model: CONTEXT.md §4.

@@ -178,7 +178,8 @@ spec:
                   rather than all nodes enumerated in the cluster talosconfig. Used for
                   per-node import targeting (PLT-BUG-3-ARCH): one MachineConfigSync CR per
                   node, each pointing at a compiler-generated per-node secret via NodeClass.
-                  When empty, the conductor applies to all nodes in the cluster talosconfig.
+                  When empty, the conductor applies to all nodes in the cluster talosconfig
+                  (default class-based behavior).
                 type: string
               reason:
                 description: |-

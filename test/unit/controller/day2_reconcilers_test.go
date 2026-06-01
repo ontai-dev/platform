@@ -13,6 +13,7 @@ import (
 	batchv1 "k8s.io/api/batch/v1"
 	coordinationv1 "k8s.io/api/coordination/v1"
 	corev1 "k8s.io/api/core/v1"
+	apiextensionsv1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
@@ -2162,25 +2163,34 @@ func TestJobSpec_ConductorEnvInterface(t *testing.T) {
 
 // --- MachineConfigSync tests ---
 
-// mcSyncSecret builds a machineconfig source-of-truth Secret with the given content
-// and optional sync labels. namespace is seam-tenant-{clusterRef}.
-func mcSyncSecret(clusterRef, nodeClass string, content []byte, labels map[string]string) *corev1.Secret {
-	s := &corev1.Secret{
+// mcSyncMachineConfigCR builds a MachineConfig CR for use in MachineConfigSync reconciler tests.
+// machineRaw and clusterRaw are raw JSON bytes for spec.machine and spec.cluster respectively.
+// namespace is seam-tenant-{clusterRef}.
+func mcSyncMachineConfigCR(clusterRef, nodeHostname string, machineRaw, clusterRaw []byte) *platformv1alpha1.MachineConfig {
+	mc := &platformv1alpha1.MachineConfig{
 		ObjectMeta: metav1.ObjectMeta{
-			Name:      "seam-mc-" + clusterRef + "-" + nodeClass,
+			Name:      "seam-mc-" + clusterRef + "-" + nodeHostname,
 			Namespace: "seam-tenant-" + clusterRef,
-			Labels:    labels,
 		},
-		Data: map[string][]byte{
-			"machineconfig": content,
+		Spec: platformv1alpha1.MachineConfigSpec{
+			Role:         platformv1alpha1.MachineConfigRoleControlPlane,
+			ClusterRef:   corev1.LocalObjectReference{Name: clusterRef},
+			NodeHostname: nodeHostname,
+			NodeIP:       "10.0.0.1",
 		},
 	}
-	return s
+	if machineRaw != nil {
+		mc.Spec.Machine = &apiextensionsv1.JSON{Raw: machineRaw}
+	}
+	if clusterRaw != nil {
+		mc.Spec.Cluster = &apiextensionsv1.JSON{Raw: clusterRaw}
+	}
+	return mc
 }
 
-// TestMachineConfigSyncReconcile_SecretNotFound verifies that a missing source-of-truth
-// Secret sets Degraded=True without submitting a Job.
-func TestMachineConfigSyncReconcile_SecretNotFound(t *testing.T) {
+// TestMachineConfigSyncReconcile_MachineConfigCRNotFound verifies that a missing source-of-truth
+// MachineConfig CR sets Degraded=True without submitting a Job.
+func TestMachineConfigSyncReconcile_MachineConfigCRNotFound(t *testing.T) {
 	scheme := buildDay2Scheme(t)
 	mcs := &platformv1alpha1.MachineConfigSync{
 		ObjectMeta: metav1.ObjectMeta{Name: "mcs-1", Namespace: "seam-tenant-ccs-mgmt", Generation: 1},
@@ -2220,20 +2230,17 @@ func TestMachineConfigSyncReconcile_SecretNotFound(t *testing.T) {
 	}
 }
 
-// TestMachineConfigSyncReconcile_SkipsHashMatch verifies that when the Secret hash
-// label matches the content hash and sync-status=synced, a no-op Ready=True result
-// is returned without submitting a Conductor Job.
+// TestMachineConfigSyncReconcile_SkipsHashMatch verifies that when mcs.Status.ObservedHash
+// matches the MachineConfig CR content hash, a no-op Ready=True result is returned without
+// submitting a Conductor Job.
 func TestMachineConfigSyncReconcile_SkipsHashMatch(t *testing.T) {
-	content := []byte("machine:\n  type: controlplane\n")
-	// Pre-compute the hex-encoded SHA-256 hash the reconciler would compute.
-	rawHash := sha256.Sum256(content)
-	import_sha := fmt.Sprintf("%x", rawHash)
+	machineRaw := []byte(`{"type":"controlplane"}`)
+	// Pre-compute the hash the reconciler will compute: SHA256(machineRaw + clusterRaw).
+	rawHash := sha256.Sum256(machineRaw)
+	expectedHash := fmt.Sprintf("%x", rawHash)
 
 	scheme := buildDay2Scheme(t)
-	secret := mcSyncSecret("ccs-mgmt", "controlplane", content, map[string]string{
-		"platform.ontai.dev/sync-status": "synced",
-		"platform.ontai.dev/sync-hash":   import_sha[:63],
-	})
+	mc := mcSyncMachineConfigCR("ccs-mgmt", "controlplane", machineRaw, nil)
 	mcs := &platformv1alpha1.MachineConfigSync{
 		ObjectMeta: metav1.ObjectMeta{Name: "mcs-hash", Namespace: "seam-tenant-ccs-mgmt", Generation: 1},
 		Spec: platformv1alpha1.MachineConfigSyncSpec{
@@ -2241,8 +2248,11 @@ func TestMachineConfigSyncReconcile_SkipsHashMatch(t *testing.T) {
 			NodeClass:  "controlplane",
 			ForceApply: false,
 		},
+		Status: platformv1alpha1.MachineConfigSyncStatus{
+			ObservedHash: expectedHash,
+		},
 	}
-	c := fake.NewClientBuilder().WithScheme(scheme).WithObjects(mcs, secret).WithStatusSubresource(mcs).Build()
+	c := fake.NewClientBuilder().WithScheme(scheme).WithObjects(mcs, mc).WithStatusSubresource(mcs).Build()
 	r := &controller.MachineConfigSyncReconciler{Client: c, Scheme: scheme, Recorder: fakeRecorder()}
 
 	_, err := r.Reconcile(context.Background(), ctrl.Request{
@@ -2276,11 +2286,11 @@ func TestMachineConfigSyncReconcile_SkipsHashMatch(t *testing.T) {
 }
 
 // TestMachineConfigSyncReconcile_SubmitsJob verifies that a Conductor executor Job
-// is submitted when the Secret exists, the hash is stale, and the capability is
+// is submitted when the MachineConfig CR exists, the hash is new, and the capability is
 // published in the cluster RunnerConfig.
 func TestMachineConfigSyncReconcile_SubmitsJob(t *testing.T) {
 	scheme := buildDay2Scheme(t)
-	secret := mcSyncSecret("ccs-mgmt", "controlplane", []byte("machine:\n  type: controlplane\n"), nil)
+	secret := mcSyncMachineConfigCR("ccs-mgmt", "controlplane", []byte(`{"type":"controlplane"}`), nil)
 	mcs := &platformv1alpha1.MachineConfigSync{
 		ObjectMeta: metav1.ObjectMeta{Name: "mcs-submit", Namespace: "seam-tenant-ccs-mgmt", Generation: 1},
 		Spec: platformv1alpha1.MachineConfigSyncSpec{
@@ -2332,7 +2342,7 @@ func TestMachineConfigSyncReconcile_SubmitsJob(t *testing.T) {
 // is submitted. CR-INV-005.
 func TestMachineConfigSyncReconcile_CapabilityUnavailable(t *testing.T) {
 	scheme := buildDay2Scheme(t)
-	secret := mcSyncSecret("ccs-mgmt", "controlplane", []byte("machine:\n  type: controlplane\n"), nil)
+	mc := mcSyncMachineConfigCR("ccs-mgmt", "controlplane", []byte(`{"type":"controlplane"}`), nil)
 	mcs := &platformv1alpha1.MachineConfigSync{
 		ObjectMeta: metav1.ObjectMeta{Name: "mcs-cap", Namespace: "seam-tenant-ccs-mgmt", Generation: 1},
 		Spec: platformv1alpha1.MachineConfigSyncSpec{
@@ -2341,7 +2351,7 @@ func TestMachineConfigSyncReconcile_CapabilityUnavailable(t *testing.T) {
 		},
 	}
 	// No RunnerConfig in the cluster.
-	c := fake.NewClientBuilder().WithScheme(scheme).WithObjects(mcs, secret).WithStatusSubresource(mcs).Build()
+	c := fake.NewClientBuilder().WithScheme(scheme).WithObjects(mcs, mc).WithStatusSubresource(mcs).Build()
 	r := &controller.MachineConfigSyncReconciler{Client: c, Scheme: scheme, Recorder: fakeRecorder()}
 
 	_, err := r.Reconcile(context.Background(), ctrl.Request{
@@ -2363,13 +2373,12 @@ func TestMachineConfigSyncReconcile_CapabilityUnavailable(t *testing.T) {
 	}
 }
 
-// TestMachineConfigSyncReconcile_JobComplete_UpdatesSecretLabels verifies that on
-// Job completion the machineconfig Secret sync-status/sync-hash/synced-at labels are
-// updated and Ready=True is set on the MachineConfigSync.
-func TestMachineConfigSyncReconcile_JobComplete_UpdatesSecretLabels(t *testing.T) {
+// TestMachineConfigSyncReconcile_JobComplete_SetsReadyAndHash verifies that on
+// Job completion Ready=True is set and ObservedHash is populated on MachineConfigSync.
+func TestMachineConfigSyncReconcile_JobComplete_SetsReadyAndHash(t *testing.T) {
 	scheme := buildDay2Scheme(t)
-	content := []byte("machine:\n  type: controlplane\n")
-	secret := mcSyncSecret("ccs-mgmt", "controlplane", content, nil)
+	machineRaw := []byte(`{"type":"controlplane"}`)
+	mc := mcSyncMachineConfigCR("ccs-mgmt", "controlplane", machineRaw, nil)
 	mcs := &platformv1alpha1.MachineConfigSync{
 		ObjectMeta: metav1.ObjectMeta{Name: "mcs-done", Namespace: "seam-tenant-ccs-mgmt", Generation: 1},
 		Spec: platformv1alpha1.MachineConfigSyncSpec{
@@ -2381,7 +2390,7 @@ func TestMachineConfigSyncReconcile_JobComplete_UpdatesSecretLabels(t *testing.T
 	c := fake.NewClientBuilder().
 		WithScheme(scheme).
 		WithObjects(
-			mcs, secret,
+			mcs, mc,
 			clusterRC("ccs-mgmt", "machineconfig-sync"),
 			preExistingJob(jobName, "seam-tenant-ccs-mgmt"),
 			successResultTCOR("ccs-mgmt", jobName),
@@ -2397,7 +2406,6 @@ func TestMachineConfigSyncReconcile_JobComplete_UpdatesSecretLabels(t *testing.T
 		t.Fatalf("unexpected error: %v", err)
 	}
 
-	// MachineConfigSync should be Ready=True.
 	got := &platformv1alpha1.MachineConfigSync{}
 	if err := c.Get(context.Background(), types.NamespacedName{
 		Name: "mcs-done", Namespace: "seam-tenant-ccs-mgmt",
@@ -2408,22 +2416,10 @@ func TestMachineConfigSyncReconcile_JobComplete_UpdatesSecretLabels(t *testing.T
 	if readyCond == nil || readyCond.Status != metav1.ConditionTrue {
 		t.Errorf("expected Ready=True, got %v", readyCond)
 	}
-
-	// Secret should have sync-status=synced label.
-	updatedSecret := &corev1.Secret{}
-	if err := c.Get(context.Background(), types.NamespacedName{
-		Name: "seam-mc-ccs-mgmt-controlplane", Namespace: "seam-tenant-ccs-mgmt",
-	}, updatedSecret); err != nil {
-		t.Fatalf("get secret: %v", err)
-	}
-	if updatedSecret.Labels["platform.ontai.dev/sync-status"] != "synced" {
-		t.Errorf("sync-status = %q, want synced", updatedSecret.Labels["platform.ontai.dev/sync-status"])
-	}
-	if updatedSecret.Labels["platform.ontai.dev/sync-hash"] == "" {
-		t.Error("sync-hash label not set")
-	}
-	if updatedSecret.Labels["platform.ontai.dev/synced-at"] == "" {
-		t.Error("synced-at label not set")
+	rawHash := sha256.Sum256(machineRaw)
+	expectedHash := fmt.Sprintf("%x", rawHash)
+	if got.Status.ObservedHash != expectedHash {
+		t.Errorf("ObservedHash = %q, want %q", got.Status.ObservedHash, expectedHash)
 	}
 }
 
